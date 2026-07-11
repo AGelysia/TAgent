@@ -1,0 +1,7 @@
+name: MinecraftAgent
+version: '${version}'
+main: dev.minecraftagent.paper.MinecraftAgentPlugin
+description: Secure bridge between Paper and the local Minecraft Agent Runtime
+api-version: '1.21'
+authors:
+  - Minecraft Agent contributors
