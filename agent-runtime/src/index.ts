@@ -1,4 +1,45 @@
-export { bootstrap, createRuntimeApp, type BootstrapResult } from "./bootstrap/index.js";
+export {
+  bootstrap,
+  createRuntimeApp,
+  startRuntime,
+  type BootstrapOptions,
+  type BootstrapResult,
+  type RuntimeListenAddress,
+  type StartRuntimeResult,
+} from "./bootstrap/index.js";
+export {
+  asRuntimeStartupError,
+  RuntimeStartupError,
+  runtimeStartupErrorCodes,
+  type RuntimeStartupErrorCode,
+  type RuntimeStartupStage,
+  type SafeStartupDiagnostic,
+} from "./bootstrap/startup-error.js";
+export {
+  loadRuntimeConfig,
+  runtimeConfigWarningCodes,
+  type LoadedRuntimeConfig,
+  type LoadRuntimeConfigOptions,
+  type RuntimeConfig,
+  type RuntimeConfigWarning,
+  type RuntimeConfigWarningCode,
+} from "./config/runtime-config.js";
+export {
+  checkModelProvider,
+  modelProviderFailureCodes,
+  UnsupportedProductionProviderHealthCheck,
+  type ModelProviderFailureCode,
+  type ModelProviderHealthCheck,
+  type ModelProviderHealthRequest,
+  type ModelProviderHealthResult,
+} from "./health/model-provider.js";
+export {
+  runtimeHealthCheckNames,
+  RuntimeHealthState,
+  type RuntimeHealthStatus,
+  type RuntimeHealthView,
+} from "./health/runtime-health.js";
+export { RuntimeLogger, type RuntimeLoggerOptions } from "./observability/runtime-logger.js";
 export {
   ContractManifestError,
   evaluateContractCase,

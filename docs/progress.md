@@ -4,8 +4,8 @@ Last updated: 2026-07-11
 
 ## Current status
 
-Phase 0 and Phase 1 are complete for the headless build-and-contract scope.
-Phase 2 has not started.
+Phase 0, Phase 1, and the bounded Phase 2 Runtime-readiness scope are complete.
+Phase 3 has not started.
 
 ## Locked decisions
 
@@ -23,6 +23,9 @@ Phase 2 has not started.
   semantic validation treats reassembly as a separate validation layer.
 - The optional Fabric client must load without Litematica or MaLiLib.
 - Gradle and npm work is run serially on this constrained host.
+- Phase 2 uses an injectable fake provider adapter for readiness tests. Production
+  provider network calls remain fail closed until request state, policy, and
+  request binding are testable.
 
 ## Phase 0: repository scaffold
 
@@ -65,6 +68,33 @@ Completed:
 - [x] Protocol documentation matches the final landed schemas, fixtures, and
       explicitly limited Phase 1 semantic implementation boundary.
 
+## Phase 2: Runtime configuration and readiness
+
+Completed:
+
+- [x] Strict, versioned YAML configuration is capped at 64 KiB, rejects aliases,
+      duplicate/unknown fields, unsafe paths, unsafe writable permissions, and
+      dangerous secret combinations.
+- [x] Environment substitution occurs after YAML parsing and only for complete
+      `${NAME}` scalar values; missing API key and server token have stable errors.
+- [x] Startup diagnostics contain stable codes and known field paths without
+      serializing configuration values, provider exceptions, or unknown key names.
+- [x] Log and SQLite state are confined below the configuration directory. New
+      directories/files use `0700`/`0600`, and symlinks, hard-linked databases,
+      broad state permissions, and root-directory state paths are rejected.
+- [x] Runtime-owned SQLite readiness performs read, integrity, and real
+      rollback-write probes through Node's built-in SQLite API, then retains one
+      handle until shutdown. No migration or repository is implied.
+- [x] Capability Schema loading and an abortable model-provider health interface
+      are part of the fixed startup gate. Tests use a fake adapter; the default
+      production adapter returns `PROVIDER_UNSUPPORTED` and never reports READY.
+- [x] Fastify binds only after every injected core check passes. `/health` is
+      loopback-only, cached, `no-store`, secret-free, and does not rerun checks.
+- [x] Failed provider checks, occupied ports, and post-bind startup failures close
+      the Fastify listener and SQLite handle without a transient READY state.
+- [x] The packaged configuration template and top-level Bash/PowerShell launchers
+      carry and forward explicit `--config` arguments.
+
 ## Verification
 
 Verified serially on 2026-07-11:
@@ -73,17 +103,23 @@ Verified serially on 2026-07-11:
 ./scripts/package.sh
 # exit 0
 
+cd agent-runtime
+npm audit
+npm audit --omit=dev
+npm run version
+
 cd dist/agent-runtime
 npm ci --omit=dev --prefer-offline
 npm audit --omit=dev
 cd ..
-./start-agent.sh
-# minecraft-agent-runtime 0.1.0
+# with temporary non-placeholder OPENAI_API_KEY and MINECRAFT_AGENT_SERVER_TOKEN exported
+./start-agent.sh --config config.example.yml
+# expected exit 1: PROVIDER_UNSUPPORTED
 ```
 
 Results:
 
-- Runtime: 4 Vitest files, 18 tests passed; TypeScript build, ESLint, and
+- Runtime: 6 Vitest files, 42 tests passed; TypeScript build, ESLint, and
   Prettier passed; full and production-only npm audits reported 0
   vulnerabilities.
 - Paper: build and Spotless passed; 36 shared dynamic contract cases plus one
@@ -92,8 +128,11 @@ Results:
   cases plus one client metadata test passed.
 - Both JVM reports contain no remote Schema load, `UnknownHostException`,
   invalid-schema error, skipped test, or failed test.
-- Packaged Runtime preserved its compiled layout, found the packaged protocol
-  schemas, installed production dependencies, and started successfully.
+- Packaged Runtime preserved its compiled layout, configuration template, and
+  protocol schemas; production dependencies installed with 0 vulnerabilities.
+- The packaged startup smoke used temporary environment secrets, completed the
+  local checks, and failed closed with `PROVIDER_UNSUPPORTED`. Its structured
+  output contained neither secret and no listener remained running.
 - All protocol JSON files parse successfully; Bash scripts pass `bash -n`.
 
 PowerShell scripts were reviewed for native exit-code propagation but were not
@@ -101,17 +140,17 @@ executed because `pwsh` is unavailable on this Linux host. A real Paper server,
 graphical Fabric client, and Litematica were not started; those integration
 lanes remain intentionally deferred. Gradle reports Loom-originated deprecation
 warnings for future Gradle 10 compatibility, but both builds pass on the locked
-Gradle 9.5.1 wrapper.
+Gradle 9.5.1 wrapper. Node emits its documented ExperimentalWarning when the
+built-in SQLite module is loaded; it is not suppressed.
 
 ## Explicitly not implemented
 
-- Runtime configuration loading, environment substitution, or startup
-  self-check.
-- API key access, provider adapter, model health check, or model request.
+- Production model-provider network health adapter or any model request.
 - Runtime-Paper WebSocket server, token enforcement, replay cache, or heartbeat.
 - Paper command registration, Offline state machine, `/agent on`, or
   `/agent off`.
-- SQLite migrations or repositories in either process.
+- SQLite migrations or repositories in either process; Phase 2 only owns the
+  Runtime startup-readiness file and connection.
 - Session resume, module routing, rate limiting, or cost accounting.
 - Tool registry/execution, policy enforcement, proposals, confirmation, or
   audit persistence.
@@ -126,6 +165,21 @@ Gradle 9.5.1 wrapper.
 The presence of a schema does not mark the corresponding feature implemented.
 
 ## Known design risks
+
+### Provider boundary
+
+Phase 2 proves the provider health interface and ordering with a fake adapter but
+does not perform a production provider request. The CLI intentionally refuses
+READY with `PROVIDER_UNSUPPORTED`; a fake provider cannot be selected through
+configuration. A real adapter must map authentication, model availability,
+unreachable, and timeout failures without logging request or response bodies.
+
+### Node SQLite stability
+
+Node 22's built-in synchronous SQLite API avoids a native addon on this small
+host, but Node still labels it active development and emits an ExperimentalWarning.
+Phase 2 confines it to bounded startup work. The repository layer must reassess
+the driver before adding request-path database operations.
 
 ### Conditional command registration
 
@@ -156,12 +210,12 @@ adapter.
 
 ## Next gates
 
-1. Start Phase 2 with Runtime configuration, environment substitution, local
-   SQLite readiness, stable self-check errors, and a fake model health adapter.
-2. Keep provider network calls out until state, policy, and request binding are
-   testable with a fake Runtime.
-3. Complete the Phase 3 command-registration spike before promising in-game
-   recovery from an initial self-check failure.
+1. Complete the Phase 3 command-registration spike against Paper 1.21.11 before
+   promising in-game recovery from an initial self-check failure.
+2. Add the authenticated Runtime-Paper connection and token/protocol checks with
+   a fake Runtime; keep production provider calls out of that integration lane.
+3. Preserve the Phase 2 startup gate when the production provider health adapter
+   is introduced for the first model-backed phase.
 4. Add Gradle dependency-verification metadata before calling a release
    byte-for-byte reproducible; Paper 1.21.11 is available only through an
    upstream mutable snapshot coordinate.

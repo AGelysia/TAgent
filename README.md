@@ -2,8 +2,9 @@
 
 Minecraft Agent is a security-first Minecraft assistant composed of a Paper plugin, a local
 TypeScript runtime, and an optional Fabric client mod. This repository currently implements the
-Phase 0/1 foundation: reproducible project skeletons and a shared protocol contract. It does not
-yet call a model, open a runtime transport, register `/agent`, or mutate Minecraft state.
+Phase 0-2 foundation: reproducible project skeletons, a shared protocol contract, and fail-closed
+Runtime configuration/readiness checks. It does not yet call a model, open the Runtime-Paper
+transport, register `/agent`, or mutate Minecraft state.
 
 The product and delivery baseline is recorded in
 [`minecraft_agent_vibe_coding_plan.md`](minecraft_agent_vibe_coding_plan.md). Implementation status
@@ -18,7 +19,7 @@ is tracked in [`docs/progress.md`](docs/progress.md).
 | Paper API     | 1.21.11-R0.1-SNAPSHOT |
 | Fabric Loader | 0.19.3                |
 | Fabric API    | 0.141.4+1.21.11       |
-| Node.js       | 22.x                  |
+| Node.js       | 22.16-22.x            |
 
 Minecraft 1.21.11 is intentionally pinned because the product baseline requires Java 21. Paper
 26.x requires Java 25 and is outside this compatibility line. Paper publishes the 1.21.11 API only
@@ -38,7 +39,7 @@ metadata before they can be called byte-for-byte reproducible.
 ## Prerequisites
 
 - JDK 21
-- Node.js 22 and npm 10
+- Node.js 22.16 or newer in the 22.x line, and npm 10
 - Bash or PowerShell
 
 Do not install a system Gradle. The checked-in wrapper pins the build tool. The default Gradle
@@ -70,16 +71,30 @@ cd ..
 The Fabric build downloads Minecraft artifacts and is deliberately last. Do not run both Gradle
 builds concurrently on a low-memory host.
 
-## Run the Phase 0 runtime
+## Phase 2 Runtime
 
 ```bash
 cd agent-runtime
 npm run version
-npm run dev
+npm run check
 ```
 
-The current bootstrap prints its version and exits without listening on a port. Runtime self-check,
-configuration, SQLite, and local WebSocket transport belong to later phases.
+[`agent-runtime/config.example.yml`](agent-runtime/config.example.yml) is the strict configuration
+template. Runtime secrets are resolved after YAML parsing from whole-value `${ENV_NAME}` references;
+`.env.example` is documentation only and is not loaded automatically. Keep a local configuration at
+mode `0600`, inject secrets from the shell or service manager, and start with:
+
+```bash
+npm start -- --config config.local.yml
+```
+
+Startup checks the configuration, private log directory, shared Capability Schema, Runtime-owned
+SQLite file, and an injected model-provider health adapter before binding `127.0.0.1`. `/health`
+returns a cached minimal readiness view and does not repeat provider or database work.
+
+Phase 2 deliberately has no production provider network adapter. The default CLI therefore exits
+nonzero with `PROVIDER_UNSUPPORTED` after local checks rather than claiming `READY`; tests inject a
+fake adapter to verify the final listen gate. Runtime-Paper WebSocket handling remains Phase 3 work.
 
 ## Package
 
@@ -90,15 +105,19 @@ configuration, SQLite, and local WebSocket transport belong to later phases.
 Artifacts are placed under `dist/`. This packages only implemented skeletons; it does not claim a
 deployable end-to-end assistant.
 
-The packaged Runtime preserves its `dist/` layout and includes the shared protocol schemas. Install
-production dependencies before running that artifact:
+The packaged Runtime preserves its compiled layout and includes the shared protocol schemas and
+configuration template. Install production dependencies before exercising its fail-closed startup:
 
 ```bash
 cd dist/agent-runtime
 npm ci --omit=dev
 cd ..
-./start-agent.sh
+./start-agent.sh --config config.example.yml
 ```
+
+The top-level start scripts forward `--config`. They do not load `.env`; provide environment values
+through the invoking shell or service manager. Until a production provider adapter lands, startup is
+expected to end with `PROVIDER_UNSUPPORTED` and no listening port.
 
 ## Security baseline
 

@@ -8,4 +8,4 @@ if [[ ! -d node_modules ]]; then
   printf '%s\n' "Runtime dependencies are missing. Run: npm ci --omit=dev" >&2
   exit 1
 fi
-exec npm start
+exec npm start -- "$@"

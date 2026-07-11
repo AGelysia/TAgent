@@ -1,0 +1,36 @@
+configVersion: 1
+
+server:
+  id: survival-main
+
+transport:
+  host: 127.0.0.1
+  port: 38127
+  serverToken: ${MINECRAFT_AGENT_SERVER_TOKEN}
+
+model:
+  provider: openai
+  apiKey: ${OPENAI_API_KEY}
+  model: configured-model-name
+  timeoutSeconds: 60
+
+storage:
+  sqlitePath: ./data/runtime.db
+
+logging:
+  directory: ./logs
+  level: info
+
+limits:
+  maxConcurrentRequests: 4
+  maxQueuedRequests: 32
+  maxToolRounds: 8
+  perPlayerCooldownSeconds: 3
+  dailyRequestsPerPlayer: 100
+  monthlyBudgetUsd: 50
+
+privacy:
+  storeConversations: true
+  retentionDays: 7
+  logMessageContent: false
+  logToolCalls: true

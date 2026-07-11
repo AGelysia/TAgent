@@ -3,8 +3,9 @@
 ## Scope
 
 This is the normative security design for later implementation phases. Phase 0
-and Phase 1 provide scaffolding and schemas only; none of the runtime controls
-described below should be treated as implemented yet.
+and Phase 1 provide scaffolding and schemas. Phase 2 implements only the local
+Runtime configuration and readiness controls described below; it does not
+implement transport, Paper authority, model requests, or tool execution.
 
 The governing rule is:
 
@@ -184,9 +185,31 @@ Document retrieval is confined to configured roots, rejects traversal and
 symlink escapes, and marks document text as untrusted content in model context.
 Live unrestricted web access is not part of the design.
 
+## Runtime startup controls
+
+Phase 2 treats the local configuration as structured but potentially malformed
+input. YAML is size/depth bounded, aliases and duplicate keys are rejected, and
+environment references are expanded only after parsing and only when the full
+scalar is `${NAME}`. Unknown key text and received values never enter diagnostics.
+Group/world-writable configuration is rejected; broader read permissions and
+inline secrets separately produce warnings as required by the product plan, but
+the two may not be combined. Operators should use environment injection and mode
+`0600` configuration.
+
+Runtime data and log paths are relative to the canonical configuration directory
+and must use private subdirectories. Path traversal, symlinks, hard-linked
+databases, unsafe ownership/modes, and state directly in the configuration root
+are rejected. Created directories are `0700`; SQLite and probe files are `0600`.
+
+Startup logs serialize only fixed event names, stable codes, stages, and known
+field paths. Provider exceptions and configuration values are discarded. The
+loopback `/health` response is a cached readiness snapshot with no model name,
+path, secret, raw error, or repeated external check. Phase 2 has no production
+provider network adapter, so the default CLI fails closed before listening.
+
 ## Current enforcement gap
 
-At the end of Phase 0-1 there is no authenticated connection, Offline gate,
+At the end of Phase 2 there is no authenticated connection, Offline gate,
 permission check, proposal repository, capability loader, audit store, client
 payload handler, or world mutation code. Protocol schemas are necessary input
 validation contracts, not a complete security implementation.

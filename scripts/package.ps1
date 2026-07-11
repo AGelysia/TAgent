@@ -19,6 +19,7 @@ Copy-Item $ClientJar.FullName "$Dist/MinecraftAgent-Client-Fabric.jar"
 Copy-Item "$Root/agent-runtime/dist" "$Dist/agent-runtime/dist" -Recurse
 Copy-Item "$Root/agent-runtime/scripts/version.mjs" "$Dist/agent-runtime/scripts"
 Copy-Item "$Root/agent-runtime/package.json", "$Root/agent-runtime/package-lock.json" "$Dist/agent-runtime"
+Copy-Item "$Root/agent-runtime/config.example.yml" "$Dist/agent-runtime"
 Copy-Item "$Root/capability-packs/*" "$Dist/default-capability-packs" -Recurse
 Copy-Item "$Root/protocol/schemas" "$Dist/protocol/schemas" -Recurse
 Copy-Item "$Root/protocol/README.md" "$Dist/protocol"

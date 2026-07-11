@@ -3,10 +3,10 @@
 ## Status and scope
 
 This document records the target architecture and the decisions required by
-Phase 0 and Phase 1. The repository currently contains build scaffolding and
-protocol contracts only. It does not yet contain a live Runtime-Paper
-connection, model access, SQLite repositories, commands, tools, client views,
-or Litematica integration.
+Phase 0 through Phase 2. The repository contains build scaffolding, protocol
+contracts, and the Runtime configuration/readiness boundary. It does not yet
+contain a live Runtime-Paper connection, production model access, SQLite
+repositories, commands, tools, client views, or Litematica integration.
 
 The implementation has three deployable components:
 
@@ -123,6 +123,18 @@ src
 
 Runtime policy is defense in depth. It does not replace Paper's final policy.
 
+Phase 2 implements only the Runtime startup boundary. It parses restricted YAML,
+performs post-parse whole-scalar environment substitution, validates with Zod,
+checks private state paths and Capability Schema availability, opens a
+Runtime-owned SQLite readiness connection, and invokes an injected provider
+health port. The final loopback `listen()` is the port check; no pre-bind probe is
+used. Only a successful final bind changes local health from `STARTING` to
+`READY`.
+
+The production provider health implementation is intentionally absent. The
+default adapter fails with `PROVIDER_UNSUPPORTED`; test-only injection proves
+ordering without creating a configurable fake-health bypass.
+
 ### Fabric client
 
 The optional client will own:
@@ -156,7 +168,9 @@ The planned split is:
 
 Paper may send audit or usage events to Runtime for display, but such a copy is
 not authoritative. The two processes exchange IDs and hashes only through the
-versioned protocol. SQLite itself is not introduced during Phase 0 or Phase 1.
+versioned protocol. Phase 2 creates only the Runtime-owned readiness database
+file and holds its checked connection. Tables, migrations, and repositories for
+the planned Runtime data remain unimplemented; Paper still opens no database.
 
 ## State and health
 
@@ -219,11 +233,11 @@ and integration test before Phase 3 is considered complete.
 
 ## Current non-features
 
-Phase 0-1 explicitly do not implement:
+At the end of Phase 2 the following remain unimplemented:
 
-- Model API calls or provider health checks.
+- Production provider health requests or model calls.
 - Runtime-Paper WebSocket listening or authentication enforcement.
-- Runtime or Paper SQLite databases.
+- Runtime repositories/migrations and every Paper database.
 - `/agent` commands, Offline transitions, tools, proposals, or permissions.
 - Capability Pack loading or command execution.
 - Client payload networking, overlay UI, or item views.
