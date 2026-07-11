@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://minecraft-agent.dev/schemas/1.0/client-handshake.schema.json",
+  "title": "Minecraft Agent Fabric Client Handshake",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "clientProtocolVersion",
+    "modVersion",
+    "capabilities",
+    "dependencies"
+  ],
+  "properties": {
+    "clientProtocolVersion": {
+      "const": "1.0"
+    },
+    "modVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "overlay",
+        "itemIcons",
+        "recipeView",
+        "litematicaPreview",
+        "litematicaMaterialList"
+      ],
+      "properties": {
+        "overlay": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "itemIcons": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "recipeView": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "litematicaPreview": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "litematicaMaterialList": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["litematica", "malilib"],
+      "properties": {
+        "litematica": {
+          "oneOf": [
+            { "type": "string", "minLength": 1, "maxLength": 64 },
+            { "type": "null" }
+          ]
+        },
+        "malilib": {
+          "oneOf": [
+            { "type": "string", "minLength": 1, "maxLength": 64 },
+            { "type": "null" }
+          ]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "capabilities": {
+            "type": "object",
+            "properties": { "litematicaPreview": { "const": 1 } },
+            "required": ["litematicaPreview"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "dependencies": {
+            "type": "object",
+            "properties": {
+              "litematica": { "type": "string" },
+              "malilib": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": {
+            "type": "object",
+            "properties": { "litematicaMaterialList": { "const": 1 } },
+            "required": ["litematicaMaterialList"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "type": "object",
+            "properties": { "litematicaPreview": { "const": 1 } }
+          }
+        }
+      }
+    }
+  ]
+}

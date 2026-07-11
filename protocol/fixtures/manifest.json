@@ -1,0 +1,534 @@
+{
+  "manifestVersion": "1.0",
+  "schemaDraft": "https://json-schema.org/draft/2020-12/schema",
+  "protocolVersion": "1.0",
+  "formatAssertionsRequired": true,
+  "cases": [
+    {
+      "id": "envelope.agent-request.valid",
+      "category": "valid",
+      "file": "valid/envelope-agent-request.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        },
+        {
+          "schema": "agent-request.schema.json",
+          "documentPointer": "/payload",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "handshake.valid",
+      "category": "valid",
+      "file": "valid/handshake.json",
+      "validations": [
+        {
+          "schema": "handshake.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "tool-call.valid",
+      "category": "valid",
+      "file": "valid/tool-call.json",
+      "validations": [
+        {
+          "schema": "tool-call.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "tool-result.valid",
+      "category": "valid",
+      "file": "valid/tool-result.json",
+      "validations": [
+        {
+          "schema": "tool-result.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "proposal.valid",
+      "category": "valid",
+      "file": "valid/proposal.json",
+      "validations": [
+        {
+          "schema": "proposal.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "client-handshake.valid",
+      "category": "valid",
+      "file": "valid/client-handshake.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "view-negotiation.supported-text",
+      "category": "valid",
+      "file": "valid/view-negotiation-supported-text.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "/client",
+          "expectedValid": true
+        },
+        {
+          "schema": "structured-view.schema.json",
+          "documentPointer": "/view",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "view-negotiation-v1",
+        "expectedValid": true
+      }
+    },
+    {
+      "id": "view-negotiation.undeclared-item-icons",
+      "category": "semantic_error",
+      "file": "invalid/view-negotiation-undeclared-item-icons.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "/client",
+          "expectedValid": true
+        },
+        {
+          "schema": "structured-view.schema.json",
+          "documentPointer": "/view",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "view-negotiation-v1",
+        "expectedValid": false,
+        "errorCode": "VIEW_CAPABILITY_UNDECLARED"
+      }
+    },
+    {
+      "id": "structured-text-view.valid",
+      "category": "valid",
+      "file": "valid/structured-text-view.json",
+      "validations": [
+        {
+          "schema": "structured-view.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "structured-item-stack.valid",
+      "category": "valid",
+      "file": "valid/structured-item-stack-view.json",
+      "validations": [
+        {
+          "schema": "structured-view.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "structured-item-stack.invalid-content",
+      "category": "invalid_reference_content",
+      "file": "invalid/structured-item-stack-content-invalid.json",
+      "validations": [
+        {
+          "schema": "structured-view.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "structured-item-list.invalid-content",
+      "category": "invalid_reference_content",
+      "file": "invalid/structured-item-list-content-invalid.json",
+      "validations": [
+        {
+          "schema": "structured-view.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "structured-recipe.invalid-content",
+      "category": "invalid_reference_content",
+      "file": "invalid/structured-recipe-content-invalid.json",
+      "validations": [
+        {
+          "schema": "structured-view.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "structured-build-preview.invalid-content",
+      "category": "invalid_reference_content",
+      "file": "invalid/structured-build-preview-content-invalid.json",
+      "validations": [
+        {
+          "schema": "structured-view.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "structured-proposal.invalid-content",
+      "category": "invalid_reference_content",
+      "file": "invalid/structured-proposal-content-invalid.json",
+      "validations": [
+        {
+          "schema": "structured-view.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "recipe-view.valid",
+      "category": "valid",
+      "file": "valid/recipe-view.json",
+      "validations": [
+        {
+          "schema": "recipe-view.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "recipe-view-v1",
+        "expectedValid": true
+      }
+    },
+    {
+      "id": "build-preview.valid",
+      "category": "valid",
+      "file": "valid/build-preview.json",
+      "validations": [
+        {
+          "schema": "build-preview.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "build-preview-transfer-v1",
+        "expectedValid": true
+      }
+    },
+    {
+      "id": "build-preview.out-of-order-chunks-valid",
+      "category": "valid",
+      "file": "valid/build-preview-out-of-order-chunks.json",
+      "validations": [
+        {
+          "schema": "build-preview.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "build-preview-transfer-v1",
+        "expectedValid": true
+      }
+    },
+    {
+      "id": "capability.valid",
+      "category": "valid",
+      "file": "valid/capability.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "capability-manifest-v1",
+        "expectedValid": true
+      }
+    },
+    {
+      "id": "envelope.missing-request-id",
+      "category": "missing_field",
+      "file": "invalid/envelope-missing-request-id.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "agent-request.missing-message",
+      "category": "missing_field",
+      "file": "invalid/agent-request-missing-message.json",
+      "validations": [
+        {
+          "schema": "agent-request.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "envelope.version-mismatch",
+      "category": "version_mismatch",
+      "file": "invalid/envelope-version-mismatch.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "client-handshake.version-mismatch",
+      "category": "version_mismatch",
+      "file": "invalid/client-version-mismatch.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "build-preview.compressed-size-over-limit",
+      "category": "over_limit",
+      "file": "invalid/build-preview-over-limit.json",
+      "validations": [
+        {
+          "schema": "build-preview.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "build-preview.missing-chunk",
+      "category": "missing_chunk",
+      "file": "invalid/build-preview-missing-chunk.json",
+      "validations": [
+        {
+          "schema": "build-preview.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "build-preview-transfer-v1",
+        "expectedValid": false,
+        "errorCode": "CHUNK_SET_INCOMPLETE"
+      }
+    },
+    {
+      "id": "build-preview.duplicate-chunk-index",
+      "category": "duplicate_chunk",
+      "file": "invalid/build-preview-duplicate-chunk.json",
+      "validations": [
+        {
+          "schema": "build-preview.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "build-preview-transfer-v1",
+        "expectedValid": false,
+        "errorCode": "CHUNK_INDEX_DUPLICATE"
+      }
+    },
+    {
+      "id": "build-preview.chunk-hash-error",
+      "category": "hash_error",
+      "file": "invalid/build-preview-hash-error.json",
+      "validations": [
+        {
+          "schema": "build-preview.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "build-preview-transfer-v1",
+        "expectedValid": false,
+        "errorCode": "CHUNK_HASH_MISMATCH"
+      }
+    },
+    {
+      "id": "build-preview.gzip-expansion-over-declared",
+      "category": "semantic_error",
+      "file": "invalid/build-preview-gzip-expansion-over-declared.json",
+      "validations": [
+        {
+          "schema": "build-preview.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "build-preview-transfer-v1",
+        "expectedValid": false,
+        "errorCode": "CONTENT_DECOMPRESSION_FAILED"
+      }
+    },
+    {
+      "id": "recipe-view.selected-index-out-of-range",
+      "category": "semantic_error",
+      "file": "invalid/recipe-selected-index-out-of-range.json",
+      "validations": [
+        {
+          "schema": "recipe-view.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "recipe-view-v1",
+        "expectedValid": false,
+        "errorCode": "RECIPE_SELECTED_INDEX_OUT_OF_RANGE"
+      }
+    },
+    {
+      "id": "recipe-view.duplicate-id",
+      "category": "semantic_error",
+      "file": "invalid/recipe-duplicate-id.json",
+      "validations": [
+        {
+          "schema": "recipe-view.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "recipe-view-v1",
+        "expectedValid": false,
+        "errorCode": "RECIPE_ID_DUPLICATE"
+      }
+    },
+    {
+      "id": "recipe-view.slot-coordinate-mismatch",
+      "category": "semantic_error",
+      "file": "invalid/recipe-slot-coordinate-mismatch.json",
+      "validations": [
+        {
+          "schema": "recipe-view.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "recipe-view-v1",
+        "expectedValid": false,
+        "errorCode": "RECIPE_SLOT_COORDINATE_MISMATCH"
+      }
+    },
+    {
+      "id": "capability.undeclared-placeholder",
+      "category": "semantic_error",
+      "file": "invalid/capability-undeclared-placeholder.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "capability-manifest-v1",
+        "expectedValid": false,
+        "errorCode": "CAPABILITY_TEMPLATE_ARGUMENT_UNDECLARED"
+      }
+    },
+    {
+      "id": "capability.duplicate-placeholder",
+      "category": "semantic_error",
+      "file": "invalid/capability-duplicate-placeholder.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "capability-manifest-v1",
+        "expectedValid": false,
+        "errorCode": "CAPABILITY_TEMPLATE_ARGUMENT_DUPLICATE"
+      }
+    },
+    {
+      "id": "capability.range-invalid",
+      "category": "semantic_error",
+      "file": "invalid/capability-range-invalid.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "capability-manifest-v1",
+        "expectedValid": false,
+        "errorCode": "CAPABILITY_ARGUMENT_RANGE_INVALID"
+      }
+    },
+    {
+      "id": "capability.console-policy-deferred",
+      "category": "valid",
+      "file": "valid/capability-console-policy-deferred.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "capability-manifest-v1",
+        "expectedValid": true
+      }
+    },
+    {
+      "id": "capability.command-injection",
+      "category": "command_injection",
+      "file": "invalid/capability-command-injection.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    }
+  ]
+}
