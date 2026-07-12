@@ -5,3 +5,7 @@ description: Secure bridge between Paper and the local Minecraft Agent Runtime
 api-version: '1.21'
 authors:
   - Minecraft Agent contributors
+permissions:
+  minecraftagent.command.agent:
+    description: Allows access to the Minecraft Agent status command
+    default: op

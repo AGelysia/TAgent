@@ -2,11 +2,13 @@
 
 ## Status and scope
 
-This document records the target architecture and the decisions required by
-Phase 0 through Phase 2. The repository contains build scaffolding, protocol
-contracts, and the Runtime configuration/readiness boundary. It does not yet
-contain a live Runtime-Paper connection, production model access, SQLite
-repositories, commands, tools, client views, or Litematica integration.
+This document records the target architecture and decisions through Phase 3.
+The repository contains build scaffolding, protocol contracts, the Runtime
+configuration/readiness boundary, and Paper-side Phase 3 startup, authenticated
+hello, core-descriptor, and conditional-command components. Production model
+access, operational tool execution, application repositories, client views, and
+Litematica integration remain later work. The conditional command path has been
+validated on the pinned Paper `1.21.11-132` server artifact.
 
 The implementation has three deployable components:
 
@@ -87,6 +89,14 @@ dev.minecraftagent.paper
 Domain and policy packages must not call Bukkit APIs directly. They receive
 ports implemented by `minecraft`, `client`, or `storage`. This makes policy and
 proposal logic testable without a running server.
+
+Phase 3's `CoreToolRuntime` is deliberately narrower than the future `tool`
+package. It validates six required read-only, closed-schema descriptors and
+reports readiness, but has no invocation API and marks every descriptor
+`executionCapable=false`. Typed Minecraft tool implementations are deferred to
+the Phase 7 milestone. The Phase 3 optional capability-directory inspection is
+not Capability Pack loading; the loader and effective capability registry
+remain Phase 9 work.
 
 ### Agent Runtime
 
@@ -188,9 +198,12 @@ unavailable. A lost authenticated Runtime connection makes the service
 OFFLINE/UNAVAILABLE. Manual Offline persists `Desired mode = DISABLED`; a
 transient health failure must not silently rewrite that preference.
 
-The exact reconnect policy for non-manual failures is deferred until Phase 3.
-Security and protocol incompatibility failures must never auto-recover without
-a fresh authenticated self-check.
+An initial self-check failure remains `UNREGISTERED`: the operator fixes the
+external cause and restarts the server. There is no `/agent on` command when the
+command was never registered. Phase 4 defines recovery after a successful
+initial registration later enters Offline state. Security and protocol
+incompatibility failures must never auto-recover without a fresh authenticated
+self-check.
 
 ## Threading and resource rules
 
@@ -210,38 +223,40 @@ The repository is configured for a constrained build host: Gradle parallelism
 is disabled, one worker is allowed, and the Gradle heap is capped. JVM and Node
 checks should be run serially.
 
-## Phase 3 command-registration spike
+## Phase 3 conditional command registration
 
-The product baseline says both that `/agent` is registered only after the core
-startup self-check succeeds and that `/agent on` can recover an Offline agent.
-Those requirements are not equivalent when the initial startup check fails:
-there is no command through which recovery can be requested.
+[ADR 0001](adr/0001-phase3-conditional-command-registration.md) selects a public
+late-registration path. Paper performs its bounded core self-check away from the
+server thread, returns to the primary thread, preflights both `agent` and
+`minecraftagent:agent`, and calls `Server#getCommandMap().register(...)` only on
+success. The return value and both label mappings must identify the exact
+command instance. Failure and disable cleanup remove mappings by that same
+identity, and successful registration calls `Player.updateCommands()` for
+players already online.
 
-Paper command registration is lifecycle-bound, while the Runtime and model
-checks are asynchronous network work. Phase 3 must prove one supported design
-against the locked Paper version:
+The design rejects static command declaration, post-enable misuse of lifecycle
+helpers, server-thread network waits, permanent not-ready commands, reflection,
+and internal server command APIs. The real Paper `1.21.11-132` smoke verifies
+late registration, both labels, command dispatch, and absence under the three
+core transport failures. Unit tests separately verify player refresh calls,
+identity cleanup, and disable races; an actual connected-client refresh remains
+a later end-to-end test gap.
 
-1. An official, safe late-registration path after asynchronous self-check; or
-2. A bounded startup-only check followed by registration, accepting that a
-   failed initial check requires an external fix and server restart; or
-3. A narrowly redefined core check that allows a lifecycle-only `/agent on|off`
-   surface without exposing the remaining command tree.
+## Current Phase 3 boundary
 
-No implementation should silently fall back to a permanently registered full
-command that merely reports "not ready". The chosen behavior requires an ADR
-and integration test before Phase 3 is considered complete.
+The following remain outside the Phase 3 implementation boundary:
 
-## Current non-features
-
-At the end of Phase 2 the following remain unimplemented:
-
-- Production provider health requests or model calls.
-- Runtime-Paper WebSocket listening or authentication enforcement.
-- Runtime repositories/migrations and every Paper database.
-- `/agent` commands, Offline transitions, tools, proposals, or permissions.
-- Capability Pack loading or command execution.
-- Client payload networking, overlay UI, or item views.
-- Recipe, locate, guide, project, build, or Litematica behavior.
+- Production provider health requests and model calls. The Runtime WebSocket
+  endpoint implements authentication only; agent and tool traffic remain
+  unsupported.
+- Runtime application repositories/migrations and every Paper database.
+- `/agent` request routing, Phase 4 Offline transitions, proposals, and tool
+  execution. The Phase 3 command surface is readiness/doctor only.
+- The six core tool entries are non-executable readiness descriptors. Real
+  typed tools and Paper adapters are Phase 7.
+- Capability Pack loading and command-backed capability execution are Phase 9.
+- Client payload networking, overlay UI, item views, recipe behavior, locate,
+  guide, project, build, and Litematica behavior.
 
 Schemas in the repository define future contracts; they are not evidence that
 the corresponding behavior is active.

@@ -2,10 +2,12 @@
 
 ## Scope
 
-This is the normative security design for later implementation phases. Phase 0
-and Phase 1 provide scaffolding and schemas. Phase 2 implements only the local
-Runtime configuration and readiness controls described below; it does not
-implement transport, Paper authority, model requests, or tool execution.
+This is the normative security design for the staged implementation. Phase 0
+and Phase 1 provide scaffolding and schemas. Phase 2 implements local Runtime
+configuration and readiness controls. Phase 3 adds Paper-side strict startup
+checks, authenticated hello handling, non-executable core descriptors, and a
+conditional command-registration boundary. It still does not provide model
+requests, typed tool execution, proposals, or Capability Pack loading.
 
 The governing rule is:
 
@@ -59,22 +61,50 @@ sent to the Fabric client.
 
 Protocol 1.0 defines an HMAC-SHA-256 challenge/proof handshake. Every envelope
 also carries a UUID `messageId`, UUID `requestId`, timestamp, and unpredictable
-nonce. The schema validates their shape. Phase 3 must add the behavioral
-controls:
+nonce. The schema validates their shape. The Phase 3 Paper client applies these
+behavioral controls before command registration:
 
 - Verify the HMAC proof without logging secret material.
 - Enforce a small clock-skew window.
-- Reject a nonce already seen for the authenticated connection.
-- Reject duplicate message IDs unless the message is an explicitly supported
-  idempotent replay.
-- Correlate all tool messages with a live Paper-originated request.
-- Bound message size before JSON parsing and bound all collections afterward.
+- Reject a handshake nonce or message ID already present in the bounded replay
+  cache.
+- Bind the Runtime reply to Paper's request ID, challenge, server ID, selected
+  protocol, and expected component direction.
+- Bound message size before parsing, require strict UTF-8 and duplicate-key
+  rejection, and validate closed fields afterward.
+
+Live tool-message correlation is a Phase 7 execution requirement; Phase 3 does
+not accept or execute tool calls. The Runtime endpoint accepts only the
+authenticated hello, and the pinned Paper `1.21.11-132` smoke proves that narrow
+channel. It is not evidence of an agent-request or tool-execution channel.
 
 Loopback binding limits remote exposure but does not protect against another
 local process. Token file permissions, log redaction, and host account security
 remain required. If later threat analysis requires message integrity after the
 handshake, add a canonical-envelope MAC and monotonic connection sequence as a
 new protocol version rather than changing 1.0 implicitly.
+
+## Initial command gate
+
+Phase 3 registers `/agent` only after every core check and authenticated Runtime
+hello succeeds. Registration returns to the Paper primary thread and uses the
+public command map API. Both the bare and namespaced labels are checked before
+registration and verified by command-object identity afterward. A conflict,
+false registration result, exception, or failed identity postcondition leaves
+the command absent.
+
+Failure and disable cleanup remove only mappings whose value is the exact
+candidate or registered command instance. This prevents cleanup from deleting a
+label another plugin owns. Static `paper-plugin.yml` command declaration,
+permanently registered not-ready commands, server-thread waits, reflection, NMS,
+and internal command APIs are prohibited. The complete decision and
+real-server verification matrix are in
+[ADR 0001](adr/0001-phase3-conditional-command-registration.md).
+
+If initial self-check fails, there is no authorized command surface to recover
+through. The operator fixes the external cause and restarts. Phase 4 `/agent on`
+is reachable only after successful initial registration and a later Offline
+transition.
 
 ## Offline behavior
 
@@ -96,6 +126,10 @@ vanish atomically.
 Authorization for `on` and `off` remains mandatory while Offline. The command
 gate exception makes those subcommands reachable; it does not make them public.
 
+This Offline command behavior begins in Phase 4. It does not weaken the Phase 3
+rule that an initially failed and therefore unregistered agent exposes no
+command at all.
+
 ## Proposal integrity
 
 Paper creates proposals after tool, schema, risk, and permission validation.
@@ -115,9 +149,23 @@ OP, permission, tool-generation, bounds, size, and state checks.
 
 Vanilla clickable confirmation requires fixed server commands such as
 `/agent confirm <proposal-id>` and `/agent reject <proposal-id>`. These command
-paths are required by the design even though they are not implemented in Phase
-0-1. A structured client action carries only an action kind and proposal ID; it
-cannot supply a command string.
+paths are required by the design even though they are not implemented during
+Phase 3. A structured client action carries only an action kind and proposal ID;
+it cannot supply a command string.
+
+## Phase 3 core descriptor boundary
+
+`CoreToolRuntime` validates exactly six required descriptors:
+`player.context.read`, `player.held_item.read`, `server.info.read`,
+`server.plugins.list`, `server.recipe.lookup`, and `server.recipe.uses`. Every
+descriptor must use read access, declare a closed schema, and set
+`executionCapable=false`.
+
+These records are readiness metadata, not callable security principals. Phase 3
+has no invocation method, Minecraft adapter, argument execution, request binding,
+or permission decision for them. They therefore cannot be used to bypass the
+execution invariants above. Real typed read tools begin in Phase 7 and must
+reapply live identity, catalog, schema, policy, permission, and thread rules.
 
 ## Capability safety
 
@@ -135,6 +183,11 @@ External pack directories require controlled ownership and permissions. A
 future approval record binds pack ID, version, and content hash. Hot reload must
 validate a complete replacement registry before atomically changing the active
 catalog generation.
+
+Phase 3 only inspects the optional capability directory and converts its
+unavailability into a `DEGRADED` warning. It does not parse, approve, register,
+or execute a pack. The Capability Pack loader and effective registry remain
+Phase 9 work.
 
 ## Client and view safety
 
@@ -209,7 +262,10 @@ provider network adapter, so the default CLI fails closed before listening.
 
 ## Current enforcement gap
 
-At the end of Phase 2 there is no authenticated connection, Offline gate,
-permission check, proposal repository, capability loader, audit store, client
-payload handler, or world mutation code. Protocol schemas are necessary input
-validation contracts, not a complete security implementation.
+At the Phase 3 boundary, Paper-side startup, the Runtime-Paper authenticated
+hello, descriptor readiness, and conditional registration exist and have been
+exercised on Paper `1.21.11-132`. Phase 4 Offline controls, request-path
+permission enforcement, proposal repositories, Phase 7 typed tool execution,
+the Phase 9 capability loader, audit storage, client payload handling, and world
+mutation remain absent. Protocol schemas and readiness descriptors are
+necessary contracts, not a complete execution security implementation.

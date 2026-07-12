@@ -64,7 +64,8 @@ network handler.
 - The receiver checks an allowed clock-skew window and stores accepted nonces
   until that window expires. A repeated nonce or message ID is rejected before
   payload handling. The nonce contains at least 128 bits from a CSPRNG and is
-  base64url encoded.
+  encoded as canonical base64url without padding. Handshake challenges and
+  proofs use the same unpadded encoding.
 - `serverId`, `requestId`, `sessionId`, and `playerUuid` must agree with the
   authenticated connection and active Paper request. Payload values do not
   establish identity.
@@ -75,8 +76,13 @@ network handler.
   `componentVersion`, and payload `authentication.challenge`, in that order.
   The raw token is never sent. Compare proofs in constant time.
 - `handshake.component` must match the envelope type. A hello has a null
-  `selectedProtocolVersion`; an accepting reply selects a version present in
-  both peers' advertised sets. Phase 1 only permits `1.0`.
+  `selectedProtocolVersion`; an accepting Runtime reply echoes Paper's exact
+  challenge and selects a version present in both peers' advertised sets. Phase
+  1 only permits `1.0`.
+
+`fixtures/valid/handshake-proof-v1.json` publishes its key only as an explicit,
+deterministic test vector. `publicTestToken` is not a deployment credential and
+must never be accepted as a configured server token.
 
 Plain `ws://` is only acceptable on the configured loopback address. The client
 channel never receives the server token or model API key.

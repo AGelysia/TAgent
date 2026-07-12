@@ -10,11 +10,12 @@ import org.junit.jupiter.api.Test;
 
 class PluginDescriptorTest {
   @Test
-  void descriptorDoesNotRegisterAgentCommandBeforeSelfCheckExists() throws IOException {
+  void descriptorLeavesAgentCommandForConditionalRuntimeRegistration() throws IOException {
     try (var stream = getClass().getClassLoader().getResourceAsStream("paper-plugin.yml")) {
       assertNotNull(stream);
       var descriptor = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
       assertTrue(descriptor.contains("main: dev.minecraftagent.paper.MinecraftAgentPlugin"));
+      assertTrue(descriptor.contains("minecraftagent.command.agent:"));
       assertFalse(descriptor.contains("commands:"));
     }
   }

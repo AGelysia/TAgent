@@ -56,8 +56,8 @@
         "proof": {
           "type": "string",
           "minLength": 43,
-          "maxLength": 44,
-          "pattern": "^[A-Za-z0-9_-]+={0,1}$"
+          "maxLength": 43,
+          "pattern": "^[A-Za-z0-9_-]+$"
         }
       }
     }

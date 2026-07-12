@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 
 import { describe, expect, it } from "vitest";
@@ -7,9 +9,11 @@ import {
   validateBuildPreviewChunks,
   validateCapabilityManifest,
   validateContractSemantics,
+  validateHandshakeProof,
   validateProtocolVersion,
   validateRecipeView,
 } from "../src/protocol/semantic-validation.js";
+import { defaultProtocolRoot } from "../src/protocol/schema-registry.js";
 
 function sha256(value: Buffer): string {
   return createHash("sha256").update(value).digest("hex");
@@ -44,6 +48,40 @@ function validTransferFixture(): Record<string, unknown> {
 }
 
 describe("protocol semantic validation", () => {
+  it("locks the cross-language handshake transcript and response semantics", async () => {
+    const fixture = JSON.parse(
+      await readFile(
+        resolve(defaultProtocolRoot(), "fixtures/valid/handshake-proof-v1.json"),
+        "utf8",
+      ),
+    ) as {
+      runtime: {
+        payload: {
+          selectedProtocolVersion: string | null;
+          authentication: { challenge: string; proof: string };
+        };
+      };
+    };
+
+    expect(validateHandshakeProof(fixture)).toEqual([]);
+
+    const invalidProof = structuredClone(fixture);
+    invalidProof.runtime.payload.authentication.proof = "A".repeat(43);
+    expect(validateHandshakeProof(invalidProof)[0]?.code).toBe("HANDSHAKE_PROOF_INVALID");
+
+    const uncorrelatedChallenge = structuredClone(fixture);
+    uncorrelatedChallenge.runtime.payload.authentication.challenge = "MDEyMzQ1Njc4OWFiY2RlZg";
+    expect(validateHandshakeProof(uncorrelatedChallenge)[0]?.code).toBe(
+      "HANDSHAKE_CHALLENGE_MISMATCH",
+    );
+
+    const unselectedProtocol = structuredClone(fixture);
+    unselectedProtocol.runtime.payload.selectedProtocolVersion = null;
+    expect(validateHandshakeProof(unselectedProtocol)[0]?.code).toBe(
+      "HANDSHAKE_NEGOTIATION_INVALID",
+    );
+  });
+
   it("rejects incompatible runtime and client protocol versions", () => {
     const errors = validateProtocolVersion({
       protocolVersion: "2.0",

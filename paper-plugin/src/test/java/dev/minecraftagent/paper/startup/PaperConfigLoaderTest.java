@@ -1,0 +1,191 @@
+package dev.minecraftagent.paper.startup;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
+import java.util.Map;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+class PaperConfigLoaderTest {
+  @TempDir Path temporaryDirectory;
+
+  private final PaperConfigLoader loader = new PaperConfigLoader();
+
+  @Test
+  void loadsStrictConfigurationAndExpandsOnlyWholeEnvironmentValues() throws Exception {
+    var configPath =
+        StartupTestFixture.writeConfig(temporaryDirectory, StartupTestFixture.validConfig());
+
+    var config = loader.load(configPath, temporaryDirectory, StartupTestFixture.environment());
+
+    assertEquals("survival-main", config.serverId());
+    assertEquals("ws://127.0.0.1:38127/agent", config.runtime().endpoint().toString());
+    assertEquals(StartupTestFixture.TOKEN, config.runtime().serverToken());
+    assertEquals(Duration.ofSeconds(2), config.runtime().connectTimeout());
+    assertEquals(temporaryDirectory.resolve("state"), config.stateDirectory());
+    assertEquals(temporaryDirectory.resolve("capabilities"), config.optionalCapabilityDirectory());
+    assertFalse(config.toString().contains(StartupTestFixture.TOKEN));
+    assertFalse(config.runtime().toString().contains(StartupTestFixture.TOKEN));
+    assertFalse(config.toString().contains(temporaryDirectory.toString()));
+  }
+
+  @Test
+  void rejectsMissingPartialPlaceholderAndUnsafeTokensWithoutLeakingThem() throws Exception {
+    var partialPath =
+        StartupTestFixture.writeConfig(
+            temporaryDirectory,
+            StartupTestFixture.validConfig()
+                .replace(
+                    "${MINECRAFT_AGENT_SERVER_TOKEN}", "prefix-${MINECRAFT_AGENT_SERVER_TOKEN}"));
+    var partial = assertFailure(partialPath, Map.of(), StartupFailure.Code.SERVER_TOKEN_UNSAFE);
+    assertFalse(partial.getMessage().contains("prefix"));
+
+    var missingPath =
+        StartupTestFixture.writeConfig(temporaryDirectory, StartupTestFixture.validConfig());
+    assertFailure(missingPath, Map.of(), StartupFailure.Code.SERVER_TOKEN_MISSING);
+
+    var unsafe = "secret-with-control\ncharacter-01234567890123456789";
+    var unsafeFailure =
+        assertFailure(
+            missingPath,
+            Map.of("MINECRAFT_AGENT_SERVER_TOKEN", unsafe),
+            StartupFailure.Code.SERVER_TOKEN_UNSAFE);
+    assertFalse(unsafeFailure.getMessage().contains(unsafe));
+  }
+
+  @Test
+  void rejectsUnknownDuplicateAliasAndOversizedYaml() throws Exception {
+    var unknown =
+        StartupTestFixture.writeConfig(
+            temporaryDirectory, StartupTestFixture.validConfig() + "untrusted-secret-name: true\n");
+    var unknownFailure =
+        assertFailure(
+            unknown, StartupTestFixture.environment(), StartupFailure.Code.PAPER_CONFIG_INVALID);
+    assertFalse(unknownFailure.getMessage().contains("untrusted-secret-name"));
+
+    var duplicate =
+        StartupTestFixture.writeConfig(
+            temporaryDirectory, StartupTestFixture.validConfig() + "server:\n  id: duplicate\n");
+    assertFailure(
+        duplicate, StartupTestFixture.environment(), StartupFailure.Code.PAPER_CONFIG_INVALID);
+
+    var alias =
+        StartupTestFixture.writeConfig(
+            temporaryDirectory,
+            StartupTestFixture.validConfig().replace("server:\n", "server: &server\n")
+                + "copied: *server\n");
+    assertFailure(
+        alias, StartupTestFixture.environment(), StartupFailure.Code.PAPER_CONFIG_INVALID);
+
+    var oversized =
+        StartupTestFixture.writeConfig(temporaryDirectory, "#" + "x".repeat(64 * 1024) + "\n");
+    assertFailure(
+        oversized, StartupTestFixture.environment(), StartupFailure.Code.PAPER_CONFIG_TOO_LARGE);
+  }
+
+  @Test
+  void acceptsOnlyThePinnedLoopbackWebSocketEndpoint() throws Exception {
+    for (var endpoint :
+        new String[] {
+          "ws://localhost:38127/agent",
+          "wss://127.0.0.1:38127/agent",
+          "ws://127.0.0.1:38127/",
+          "ws://127.0.0.1:38127/agent?token=secret",
+          "ws://user@127.0.0.1:38127/agent",
+          "ws://127.0.0.1:80/agent"
+        }) {
+      var path =
+          StartupTestFixture.writeConfig(
+              temporaryDirectory,
+              StartupTestFixture.validConfig().replace("ws://127.0.0.1:38127/agent", endpoint));
+      assertFailure(
+          path, StartupTestFixture.environment(), StartupFailure.Code.RUNTIME_ENDPOINT_INVALID);
+    }
+  }
+
+  @Test
+  void rejectsEscapingStateAndCapabilityPaths() throws Exception {
+    var statePath =
+        StartupTestFixture.writeConfig(
+            temporaryDirectory,
+            StartupTestFixture.validConfig().replace("directory: state", "directory: ../state"));
+    assertFailure(
+        statePath, StartupTestFixture.environment(), StartupFailure.Code.STATE_DIRECTORY_UNSAFE);
+
+    var capabilityPath =
+        StartupTestFixture.writeConfig(
+            temporaryDirectory,
+            StartupTestFixture.validConfig()
+                .replace("directory: capabilities", "directory: /tmp/capabilities"));
+    assertFailure(
+        capabilityPath, StartupTestFixture.environment(), StartupFailure.Code.PAPER_CONFIG_INVALID);
+
+    var unusualPath =
+        StartupTestFixture.writeConfig(
+            temporaryDirectory,
+            StartupTestFixture.validConfig()
+                .replace("directory: capabilities", "directory: capability:pack"));
+    assertFailure(
+        unusualPath, StartupTestFixture.environment(), StartupFailure.Code.PAPER_CONFIG_INVALID);
+  }
+
+  @Test
+  void validatesPolicyAndTimeoutsWithStableCodes() throws Exception {
+    var policyPath =
+        StartupTestFixture.writeConfig(
+            temporaryDirectory,
+            StartupTestFixture.validConfig()
+                .replace("allow-op-toggle: false", "allow-op-toggle: true"));
+    assertFailure(
+        policyPath, StartupTestFixture.environment(), StartupFailure.Code.CORE_POLICY_INVALID);
+
+    var timeoutPath =
+        StartupTestFixture.writeConfig(
+            temporaryDirectory,
+            StartupTestFixture.validConfig()
+                .replace("connect-timeout-millis: 2000", "connect-timeout-millis: 999999"));
+    assertFailure(
+        timeoutPath, StartupTestFixture.environment(), StartupFailure.Code.PAPER_CONFIG_INVALID);
+  }
+
+  @Test
+  void rejectsSymlinkedAndMalformedUtf8Configuration() throws Exception {
+    var target =
+        StartupTestFixture.writeConfig(temporaryDirectory, StartupTestFixture.validConfig());
+    var link = temporaryDirectory.resolve("linked-config.yml");
+    Files.createSymbolicLink(link, target.getFileName());
+    assertFailure(link, StartupTestFixture.environment(), StartupFailure.Code.PAPER_CONFIG_INVALID);
+
+    var malformed = temporaryDirectory.resolve("malformed.yml");
+    Files.write(malformed, new byte[] {(byte) 0xc3, (byte) 0x28});
+    assertFailure(
+        malformed, StartupTestFixture.environment(), StartupFailure.Code.PAPER_CONFIG_INVALID);
+  }
+
+  @Test
+  void rejectsGroupOrWorldWritableConfiguration() throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        java.nio.file.FileSystems.getDefault().supportedFileAttributeViews().contains("posix"));
+    var path = StartupTestFixture.writeConfig(temporaryDirectory, StartupTestFixture.validConfig());
+    Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-rw-r--"));
+
+    assertFailure(path, StartupTestFixture.environment(), StartupFailure.Code.PAPER_CONFIG_INVALID);
+  }
+
+  private StartupFailure assertFailure(
+      Path configPath, Map<String, String> environment, StartupFailure.Code expectedCode) {
+    var failure =
+        assertThrows(
+            StartupFailure.class, () -> loader.load(configPath, temporaryDirectory, environment));
+    assertEquals(expectedCode, failure.code());
+    assertTrue(failure.getMessage().startsWith("Paper startup check failed:"));
+    return failure;
+  }
+}

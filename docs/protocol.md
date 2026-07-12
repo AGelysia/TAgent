@@ -4,14 +4,15 @@
 
 Protocol 1.0 defines contracts for two separate links:
 
-1. Paper to the local Agent Runtime over an authenticated WebSocket in a later
-   phase.
+1. Paper to the local Agent Runtime over an authenticated WebSocket. Phase 3
+   implements only the `paper.hello` to `runtime.hello` authentication exchange.
 2. Paper to the optional Fabric client over versioned Minecraft custom payloads
    in a later phase.
 
-Phase 1 owns JSON Schemas, fixtures, and cross-language contract tests. It does
-not open sockets, register custom payload handlers, authenticate peers, or
-execute messages.
+Phase 1 owns JSON Schemas, fixtures, and cross-language contract tests. Phase 3
+opens the loopback Runtime-Paper socket and authenticates hello messages against
+those contracts. It still does not register Fabric payload handlers or execute
+agent, tool, proposal, control, or view messages.
 
 The canonical schema source is `protocol/schemas/`. JVM builds copy those files
 as resources; the TypeScript Runtime loads the same files through its schema
@@ -47,8 +48,8 @@ The fields have distinct roles:
 | `requestId`       | Required UUID for every envelope. All messages in one logical exchange reuse it. |
 | `serverId`        | Stable configured server identity, not a display name supplied by a player.      |
 | `type`            | Closed message discriminator. It selects the payload schema and direction.       |
-| `timestamp`       | UTC RFC 3339 timestamp used by later freshness checks.                           |
-| `nonce`           | Unpredictable base64url value unique to an authenticated connection.             |
+| `timestamp`       | UTC RFC 3339 timestamp used by handshake and later message freshness checks.     |
+| `nonce`           | Unpredictable base64url value unique within the active replay window.            |
 | `payload`         | Type-specific closed object validated after the envelope.                        |
 
 `requestId` is intentionally not nullable. The initiator creates one for every
@@ -58,8 +59,9 @@ the ID of an unrelated player request. A sender must not reuse a request ID for
 unrelated operations.
 
 The nonce is not an authentication mechanism by itself. Schema validation only
-checks its representation. Phase 3 must add freshness and per-connection replay
-caches after the HMAC handshake.
+checks its representation. Phase 3 handshake receivers enforce a bounded clock
+window and a bounded TTL replay cache shared across connections; a new socket
+therefore cannot make a previously accepted hello reusable.
 
 ## Validation order
 
@@ -103,9 +105,11 @@ never executed.
 - HMAC-SHA-256 scheme, key ID, random challenge, and proof.
 
 No raw token is placed in an envelope. The exact challenge transcript and
-canonical byte representation must be fixed with golden fixtures before Phase 3
-implements authentication. A selected version of `null` represents negotiation
-failure and cannot transition a connection to ready.
+canonical byte representation are fixed by `protocol/README.md` and the shared
+`handshake-proof-v1` golden fixture. The Runtime reply echoes Paper's challenge,
+and nonces, challenges, and proofs use canonical base64url without padding. A
+selected version of `null` represents negotiation failure and cannot transition
+a connection to ready.
 
 The Fabric handshake is separate. `client-handshake.schema.json` advertises the
 client protocol, mod version, fixed feature versions, and detected Litematica
@@ -128,8 +132,9 @@ Phase 1 includes or targets these closed contracts:
 | `build-preview`    | Bounded target projection and transform metadata                      |
 | `capability`       | Declarative Capability Pack manifest                                  |
 
-Schemas can exist before their behavior. Phase 0-1 do not publish a view, call a
-tool, create a proposal, or load a capability.
+Schemas can exist before their behavior. Through Phase 3 the hello payload is
+the only live Runtime-Paper message. The implementation does not publish a view,
+call a tool, create a proposal, or load a capability.
 
 ## Client views
 

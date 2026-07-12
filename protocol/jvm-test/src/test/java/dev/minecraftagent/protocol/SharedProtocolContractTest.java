@@ -15,8 +15,10 @@ import com.networknt.schema.resource.UriSchemaLoader;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -31,6 +33,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 import java.util.zip.GZIPInputStream;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
 
@@ -85,6 +89,7 @@ final class SharedProtocolContractTest {
     private void verifySemantics(JsonNode expectation, JsonNode fixture, Path fixturePath) {
         var validator = expectation.path("validator").asText();
         var issues = switch (validator) {
+            case "handshake-proof-v1" -> validateHandshakeProof(fixture);
             case "build-preview-transfer-v1" -> validateBuildPreview(fixture);
             case "recipe-view-v1" -> validateRecipeView(fixture);
             case "capability-manifest-v1" -> validateCapability(fixture);
@@ -106,6 +111,156 @@ final class SharedProtocolContractTest {
                             + fixturePath
                             + ", received "
                             + issues);
+        }
+    }
+
+    private List<String> validateHandshakeProof(JsonNode exchange) {
+        if (!exchange.path("publicTestToken").isTextual()) {
+            return List.of("HANDSHAKE_GOLDEN_STRUCTURE_INVALID");
+        }
+        var paper = exchange.path("paper");
+        var runtime = exchange.path("runtime");
+        if (!hasHandshakeGoldenFields(paper) || !hasHandshakeGoldenFields(runtime)) {
+            return List.of("HANDSHAKE_GOLDEN_STRUCTURE_INVALID");
+        }
+        var paperPayload = paper.path("payload");
+        var runtimePayload = runtime.path("payload");
+        var paperAuthentication = paperPayload.path("authentication");
+        var runtimeAuthentication = runtimePayload.path("authentication");
+
+        if (!"1.0".equals(paper.path("protocolVersion").asText())
+                || !"1.0".equals(runtime.path("protocolVersion").asText())
+                || !"paper.hello".equals(paper.path("type").asText())
+                || !"runtime.hello".equals(runtime.path("type").asText())
+                || !"paper".equals(paperPayload.path("component").asText())
+                || !"runtime".equals(runtimePayload.path("component").asText())
+                || !"hmac-sha256".equals(paperAuthentication.path("scheme").asText())
+                || !"hmac-sha256".equals(runtimeAuthentication.path("scheme").asText())) {
+            return List.of("HANDSHAKE_IDENTITY_INVALID");
+        }
+        if (!paper.path("messageId").asText().equals(paper.path("requestId").asText())
+                || !runtime.path("requestId").asText().equals(paper.path("requestId").asText())
+                || runtime.path("messageId").asText().equals(paper.path("messageId").asText())
+                || !runtime.path("serverId").asText().equals(paper.path("serverId").asText())
+                || !paperAuthentication
+                        .path("keyId")
+                        .asText()
+                        .equals(paper.path("serverId").asText())
+                || !runtimeAuthentication
+                        .path("keyId")
+                        .asText()
+                        .equals(paper.path("serverId").asText())) {
+            return List.of("HANDSHAKE_CORRELATION_INVALID");
+        }
+        if (!supportsOnlyProtocolOne(paperPayload)
+                || !supportsOnlyProtocolOne(runtimePayload)
+                || !paperPayload.path("selectedProtocolVersion").isNull()
+                || !"1.0".equals(runtimePayload.path("selectedProtocolVersion").asText())) {
+            return List.of("HANDSHAKE_NEGOTIATION_INVALID");
+        }
+        if (!runtimeAuthentication
+                .path("challenge")
+                .asText()
+                .equals(paperAuthentication.path("challenge").asText())) {
+            return List.of("HANDSHAKE_CHALLENGE_MISMATCH");
+        }
+        if (paper.path("nonce").asText().equals(runtime.path("nonce").asText())
+                || decodeCanonicalBase64Url(paper.path("nonce").asText(), 16, -1) == null
+                || decodeCanonicalBase64Url(runtime.path("nonce").asText(), 16, -1) == null
+                || decodeCanonicalBase64Url(
+                                paperAuthentication.path("challenge").asText(), 16, -1)
+                        == null
+                || decodeCanonicalBase64Url(paperAuthentication.path("proof").asText(), 0, 32)
+                        == null
+                || decodeCanonicalBase64Url(runtimeAuthentication.path("proof").asText(), 0, 32)
+                        == null) {
+            return List.of("HANDSHAKE_BASE64URL_INVALID");
+        }
+
+        var token = exchange.path("publicTestToken").asText();
+        if (!handshakeProofMatches(token, paper) || !handshakeProofMatches(token, runtime)) {
+            return List.of("HANDSHAKE_PROOF_INVALID");
+        }
+        return List.of();
+    }
+
+    private static boolean hasHandshakeGoldenFields(JsonNode envelope) {
+        var payload = envelope.path("payload");
+        var authentication = payload.path("authentication");
+        return envelope.isObject()
+                && payload.isObject()
+                && authentication.isObject()
+                && Stream.of(
+                                envelope.path("protocolVersion"),
+                                envelope.path("messageId"),
+                                envelope.path("requestId"),
+                                envelope.path("serverId"),
+                                envelope.path("type"),
+                                envelope.path("timestamp"),
+                                envelope.path("nonce"),
+                                payload.path("component"),
+                                payload.path("componentVersion"),
+                                authentication.path("scheme"),
+                                authentication.path("keyId"),
+                                authentication.path("challenge"),
+                                authentication.path("proof"))
+                        .allMatch(JsonNode::isTextual)
+                && payload.path("supportedProtocolVersions").isArray()
+                && (payload.path("selectedProtocolVersion").isNull()
+                        || payload.path("selectedProtocolVersion").isTextual());
+    }
+
+    private static boolean supportsOnlyProtocolOne(JsonNode payload) {
+        var supported = payload.path("supportedProtocolVersions");
+        return supported.size() == 1 && "1.0".equals(supported.path(0).asText());
+    }
+
+    private static byte[] decodeCanonicalBase64Url(
+            String value, int minimumBytes, int expectedBytes) {
+        if (!value.matches("^[A-Za-z0-9_-]+$")) {
+            return null;
+        }
+        try {
+            var decoded = Base64.getUrlDecoder().decode(value);
+            if (decoded.length < minimumBytes
+                    || (expectedBytes >= 0 && decoded.length != expectedBytes)
+                    || !Base64.getUrlEncoder().withoutPadding().encodeToString(decoded).equals(value)) {
+                return null;
+            }
+            return decoded;
+        } catch (IllegalArgumentException error) {
+            return null;
+        }
+    }
+
+    private static boolean handshakeProofMatches(String token, JsonNode envelope) {
+        var authentication = envelope.path("payload").path("authentication");
+        var suppliedProof = decodeCanonicalBase64Url(authentication.path("proof").asText(), 0, 32);
+        var expectedProof = hmacSha256(token, handshakeTranscript(envelope));
+        return suppliedProof != null && MessageDigest.isEqual(suppliedProof, expectedProof);
+    }
+
+    private static String handshakeTranscript(JsonNode envelope) {
+        var payload = envelope.path("payload");
+        return String.join(
+                "\n",
+                "minecraft-agent-handshake-v1",
+                envelope.path("serverId").asText(),
+                envelope.path("type").asText(),
+                envelope.path("timestamp").asText(),
+                envelope.path("nonce").asText(),
+                payload.path("component").asText(),
+                payload.path("componentVersion").asText(),
+                payload.path("authentication").path("challenge").asText());
+    }
+
+    private static byte[] hmacSha256(String token, String transcript) {
+        try {
+            var mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(token.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            return mac.doFinal(transcript.getBytes(StandardCharsets.UTF_8));
+        } catch (GeneralSecurityException error) {
+            throw new IllegalStateException("HmacSHA256 is required by the Java runtime", error);
         }
     }
 

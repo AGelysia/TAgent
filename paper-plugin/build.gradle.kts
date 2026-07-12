@@ -21,10 +21,16 @@ repositories {
 
 dependencies {
     compileOnly(libs.paper.api)
+    compileOnly(libs.gson)
+    compileOnly(libs.snakeyaml)
 
     testImplementation(platform(libs.junit.bom))
+    testImplementation(libs.gson)
+    testImplementation(libs.java.websocket)
     testImplementation(libs.json.schema.validator)
     testImplementation(libs.junit.jupiter)
+    testImplementation(libs.paper.api)
+    testImplementation(libs.snakeyaml)
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 

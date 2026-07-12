@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 
 import { SUPPORTED_PROTOCOL_VERSION } from "../version.js";
@@ -16,6 +16,24 @@ export interface SemanticValidationResult {
 }
 
 type JsonRecord = Record<string, unknown>;
+
+interface HandshakeGoldenSide {
+  readonly protocolVersion: string;
+  readonly messageId: string;
+  readonly requestId: string;
+  readonly serverId: string;
+  readonly type: string;
+  readonly timestamp: string;
+  readonly nonce: string;
+  readonly component: string;
+  readonly componentVersion: string;
+  readonly supportedProtocolVersions: readonly unknown[];
+  readonly selectedProtocolVersion: unknown;
+  readonly scheme: string;
+  readonly keyId: string;
+  readonly challenge: string;
+  readonly proof: string;
+}
 
 interface ChunkDescriptor {
   readonly record: JsonRecord;
@@ -65,6 +83,215 @@ function semanticError(
   message: string,
 ): SemanticValidationError {
   return { code, rule, instancePath, message };
+}
+
+function readHandshakeGoldenSide(value: unknown): HandshakeGoldenSide | undefined {
+  if (!isRecord(value) || !isRecord(value["payload"])) {
+    return undefined;
+  }
+  const payload = value["payload"];
+  if (!isRecord(payload["authentication"])) {
+    return undefined;
+  }
+  const authentication = payload["authentication"];
+  const strings = [
+    value["protocolVersion"],
+    value["messageId"],
+    value["requestId"],
+    value["serverId"],
+    value["type"],
+    value["timestamp"],
+    value["nonce"],
+    payload["component"],
+    payload["componentVersion"],
+    authentication["scheme"],
+    authentication["keyId"],
+    authentication["challenge"],
+    authentication["proof"],
+  ];
+  if (strings.some((field) => typeof field !== "string")) {
+    return undefined;
+  }
+  if (!Array.isArray(payload["supportedProtocolVersions"])) {
+    return undefined;
+  }
+
+  return {
+    protocolVersion: value["protocolVersion"] as string,
+    messageId: value["messageId"] as string,
+    requestId: value["requestId"] as string,
+    serverId: value["serverId"] as string,
+    type: value["type"] as string,
+    timestamp: value["timestamp"] as string,
+    nonce: value["nonce"] as string,
+    component: payload["component"] as string,
+    componentVersion: payload["componentVersion"] as string,
+    supportedProtocolVersions: payload["supportedProtocolVersions"],
+    selectedProtocolVersion: payload["selectedProtocolVersion"],
+    scheme: authentication["scheme"] as string,
+    keyId: authentication["keyId"] as string,
+    challenge: authentication["challenge"] as string,
+    proof: authentication["proof"] as string,
+  };
+}
+
+function decodeCanonicalBase64Url(value: string, expectedBytes?: number): Buffer | undefined {
+  if (!/^[A-Za-z\d_-]+$/u.test(value)) {
+    return undefined;
+  }
+  const decoded = Buffer.from(value, "base64url");
+  if (
+    decoded.toString("base64url") !== value ||
+    (expectedBytes === undefined ? decoded.length < 16 : decoded.length !== expectedBytes)
+  ) {
+    return undefined;
+  }
+  return decoded;
+}
+
+function handshakeTranscript(side: HandshakeGoldenSide): string {
+  return [
+    "minecraft-agent-handshake-v1",
+    side.serverId,
+    side.type,
+    side.timestamp,
+    side.nonce,
+    side.component,
+    side.componentVersion,
+    side.challenge,
+  ].join("\n");
+}
+
+function handshakeProofMatches(token: string, side: HandshakeGoldenSide): boolean {
+  const suppliedProof = decodeCanonicalBase64Url(side.proof, 32);
+  if (suppliedProof === undefined) {
+    return false;
+  }
+  const expectedProof = createHmac("sha256", token)
+    .update(handshakeTranscript(side), "utf8")
+    .digest();
+  return timingSafeEqual(suppliedProof, expectedProof);
+}
+
+export function validateHandshakeProof(value: unknown): SemanticValidationError[] {
+  const rule = "handshake-proof-v1";
+  if (!isRecord(value) || typeof value["publicTestToken"] !== "string") {
+    return [
+      semanticError(
+        "HANDSHAKE_GOLDEN_STRUCTURE_INVALID",
+        rule,
+        "",
+        "golden exchange must contain a public test token",
+      ),
+    ];
+  }
+  const paper = readHandshakeGoldenSide(value["paper"]);
+  const runtime = readHandshakeGoldenSide(value["runtime"]);
+  if (paper === undefined || runtime === undefined) {
+    return [
+      semanticError(
+        "HANDSHAKE_GOLDEN_STRUCTURE_INVALID",
+        rule,
+        "",
+        "golden exchange must contain complete Paper and Runtime hello envelopes",
+      ),
+    ];
+  }
+
+  if (
+    paper.protocolVersion !== SUPPORTED_PROTOCOL_VERSION ||
+    runtime.protocolVersion !== SUPPORTED_PROTOCOL_VERSION ||
+    paper.type !== "paper.hello" ||
+    runtime.type !== "runtime.hello" ||
+    paper.component !== "paper" ||
+    runtime.component !== "runtime" ||
+    paper.scheme !== "hmac-sha256" ||
+    runtime.scheme !== "hmac-sha256"
+  ) {
+    return [
+      semanticError(
+        "HANDSHAKE_IDENTITY_INVALID",
+        rule,
+        "",
+        "hello direction, component identity, scheme, or protocol version is invalid",
+      ),
+    ];
+  }
+  if (
+    paper.messageId !== paper.requestId ||
+    runtime.requestId !== paper.requestId ||
+    runtime.messageId === paper.messageId ||
+    runtime.serverId !== paper.serverId ||
+    paper.keyId !== paper.serverId ||
+    runtime.keyId !== paper.serverId
+  ) {
+    return [
+      semanticError(
+        "HANDSHAKE_CORRELATION_INVALID",
+        rule,
+        "",
+        "response correlation or configured server identity does not match the request",
+      ),
+    ];
+  }
+  if (
+    paper.supportedProtocolVersions.length !== 1 ||
+    paper.supportedProtocolVersions[0] !== SUPPORTED_PROTOCOL_VERSION ||
+    runtime.supportedProtocolVersions.length !== 1 ||
+    runtime.supportedProtocolVersions[0] !== SUPPORTED_PROTOCOL_VERSION ||
+    paper.selectedProtocolVersion !== null ||
+    runtime.selectedProtocolVersion !== SUPPORTED_PROTOCOL_VERSION
+  ) {
+    return [
+      semanticError(
+        "HANDSHAKE_NEGOTIATION_INVALID",
+        rule,
+        "",
+        "Runtime must select the one protocol version advertised by Paper",
+      ),
+    ];
+  }
+  if (runtime.challenge !== paper.challenge) {
+    return [
+      semanticError(
+        "HANDSHAKE_CHALLENGE_MISMATCH",
+        rule,
+        "/runtime/payload/authentication/challenge",
+        "Runtime must echo Paper's challenge",
+      ),
+    ];
+  }
+  if (
+    paper.nonce === runtime.nonce ||
+    decodeCanonicalBase64Url(paper.nonce) === undefined ||
+    decodeCanonicalBase64Url(runtime.nonce) === undefined ||
+    decodeCanonicalBase64Url(paper.challenge) === undefined ||
+    decodeCanonicalBase64Url(paper.proof, 32) === undefined ||
+    decodeCanonicalBase64Url(runtime.proof, 32) === undefined
+  ) {
+    return [
+      semanticError(
+        "HANDSHAKE_BASE64URL_INVALID",
+        rule,
+        "",
+        "nonces, challenge, and proofs must be distinct where required and canonical unpadded base64url",
+      ),
+    ];
+  }
+  if (
+    !handshakeProofMatches(value["publicTestToken"], paper) ||
+    !handshakeProofMatches(value["publicTestToken"], runtime)
+  ) {
+    return [
+      semanticError(
+        "HANDSHAKE_PROOF_INVALID",
+        rule,
+        "",
+        "one or more handshake proofs do not match the fixed transcript",
+      ),
+    ];
+  }
+  return [];
 }
 
 function collectRecords(value: unknown, maximumDepth = 3): JsonRecord[] {
@@ -778,6 +1005,9 @@ export function validateViewNegotiation(value: unknown): SemanticValidationError
 export function runSemanticValidator(validator: string, value: unknown): SemanticValidationResult {
   let errors: SemanticValidationError[];
   switch (normalizeRule(validator)) {
+    case "handshake-proof-v1":
+      errors = validateHandshakeProof(value);
+      break;
     case "recipe-view-v1":
       errors = validateRecipeView(value);
       break;
@@ -858,6 +1088,11 @@ export function validateContractSemantics(
 
     if (rule === "view-negotiation-v1") {
       errors.push(...validateViewNegotiation(value));
+      continue;
+    }
+
+    if (rule === "handshake-proof-v1") {
+      errors.push(...validateHandshakeProof(value));
       continue;
     }
 

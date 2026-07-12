@@ -34,6 +34,69 @@
       ]
     },
     {
+      "id": "handshake.proof-v1-golden",
+      "category": "valid",
+      "file": "valid/handshake-proof-v1.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "/paper",
+          "expectedValid": true
+        },
+        {
+          "schema": "handshake.schema.json",
+          "documentPointer": "/paper/payload",
+          "expectedValid": true
+        },
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "/runtime",
+          "expectedValid": true
+        },
+        {
+          "schema": "handshake.schema.json",
+          "documentPointer": "/runtime/payload",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "handshake-proof-v1",
+        "expectedValid": true
+      }
+    },
+    {
+      "id": "handshake.proof-v1-tampered",
+      "category": "authentication_error",
+      "file": "invalid/handshake-proof-tampered.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "/paper",
+          "expectedValid": true
+        },
+        {
+          "schema": "handshake.schema.json",
+          "documentPointer": "/paper/payload",
+          "expectedValid": true
+        },
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "/runtime",
+          "expectedValid": true
+        },
+        {
+          "schema": "handshake.schema.json",
+          "documentPointer": "/runtime/payload",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "handshake-proof-v1",
+        "expectedValid": false,
+        "errorCode": "HANDSHAKE_PROOF_INVALID"
+      }
+    },
+    {
       "id": "tool-call.valid",
       "category": "valid",
       "file": "valid/tool-call.json",

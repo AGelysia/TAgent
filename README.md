@@ -2,9 +2,9 @@
 
 Minecraft Agent is a security-first Minecraft assistant composed of a Paper plugin, a local
 TypeScript runtime, and an optional Fabric client mod. This repository currently implements the
-Phase 0-2 foundation: reproducible project skeletons, a shared protocol contract, and fail-closed
-Runtime configuration/readiness checks. It does not yet call a model, open the Runtime-Paper
-transport, register `/agent`, or mutate Minecraft state.
+Phase 0-3 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
+loopback Runtime-Paper handshake, and conditional `/agent` registration. It does not yet call a
+model, execute a tool, implement Offline controls, or mutate Minecraft state.
 
 The product and delivery baseline is recorded in
 [`minecraft_agent_vibe_coding_plan.md`](minecraft_agent_vibe_coding_plan.md). Implementation status
@@ -71,7 +71,7 @@ cd ..
 The Fabric build downloads Minecraft artifacts and is deliberately last. Do not run both Gradle
 builds concurrently on a low-memory host.
 
-## Phase 2 Runtime
+## Phase 2-3 Runtime
 
 ```bash
 cd agent-runtime
@@ -94,7 +94,33 @@ returns a cached minimal readiness view and does not repeat provider or database
 
 Phase 2 deliberately has no production provider network adapter. The default CLI therefore exits
 nonzero with `PROVIDER_UNSUPPORTED` after local checks rather than claiming `READY`; tests inject a
-fake adapter to verify the final listen gate. Runtime-Paper WebSocket handling remains Phase 3 work.
+fake adapter to verify the final listen gate. Once every readiness check succeeds, Phase 3 exposes
+`/agent` on that same loopback listener and accepts only the bounded authenticated hello exchange.
+It does not yet accept agent requests, tool calls, heartbeats, or any other reserved message type.
+
+## Phase 3 Paper
+
+On first Paper startup, the plugin installs a strict `plugins/MinecraftAgent/config.yml`. Keep its
+Runtime token as the complete `${MINECRAFT_AGENT_SERVER_TOKEN}` environment reference. The endpoint
+is restricted to `ws://127.0.0.1:<port>/agent`, state stays under the plugin data directory, and the
+target server must be Minecraft/Paper 1.21.11 on Java 21 or newer.
+
+Paper performs configuration, state, policy, descriptor, and Runtime authentication checks away
+from the server thread. Only a successful result returns to the primary thread and registers
+`agent` plus `minecraftagent:agent` through Paper's public command map. A core failure leaves both
+labels absent; fix the external cause and restart the server. `/agent doctor` reports stable health
+and optional warning codes. The six core tool entries are non-executable readiness descriptors,
+not working Minecraft tools.
+
+The opt-in exact-server smoke pins Paper `1.21.11-132`, verifies its SHA-256, limits the heap to 512
+MiB, and runs every case serially:
+
+```bash
+./scripts/paper-smoke.sh
+```
+
+This is intentionally separate from routine checks because it downloads and starts a real Paper
+server. It cleans up all temporary worlds, logs, credentials, and child processes.
 
 ## Package
 
@@ -123,5 +149,5 @@ expected to end with `PROVIDER_UNSUPPORTED` and no listening port.
 
 The Paper plugin is the final authorization and execution boundary. The project never exposes a
 general console, shell, script, reflection, or unrestricted file tool. The optional client and all
-model output are untrusted. No `/agent` command is declared in the Phase 0 plugin descriptor because
-later conditional registration must remain fail closed.
+model output are untrusted. `/agent` is deliberately absent from `paper-plugin.yml`; Phase 3 creates
+it dynamically only after the complete core readiness gate succeeds.

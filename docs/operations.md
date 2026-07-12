@@ -1,18 +1,22 @@
 # Operations
 
-## Phase 0-2 purpose
+## Phase 0-3 purpose
 
-The current repository is a development scaffold, not a deployable Minecraft
-Agent service. Its useful operations are build, format, contract tests, and
-Runtime readiness tests. The Runtime now has strict configuration, local
+The repository remains a development implementation, not a deployable Minecraft
+Agent service. Its useful operations are build, format, contract, readiness,
+and focused integration tests. The Runtime has strict configuration, local
 filesystem/SQLite/Schema checks, an injectable provider-health port, and a
-loopback `/health` route. The Paper and Fabric artifacts still contain loadable
-entry-point scaffolds only.
+loopback `/health` route. Paper Phase 3 adds strict startup inputs, a
+Paper-initiated authenticated Runtime hello, non-executable core descriptors,
+and conditional `/agent` registration components. The Fabric artifact remains
+an entry-point scaffold.
 
-No real API key, server token, model account, Paper test server, or Litematica
-installation is required for automated Phase 0-2 checks. Tests use temporary
-secrets, temporary private directories, an ephemeral local port, and a fake
-provider adapter.
+No real API key, production server token, model account, or Litematica
+installation is required for automated Phase 0-3 checks. Tests use temporary
+secrets, private temporary directories, ephemeral loopback ports, fake provider
+adapters, and a fake incompatible Runtime. The exact Paper `1.21.11-132` server
+is used by the Phase 3 decision smoke; successful and token-mismatch cases use
+the production handshake endpoint with a test-only provider-health adapter.
 
 ## Toolchain
 
@@ -40,8 +44,8 @@ org.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m
 
 Run one build at a time. Do not run Gradle and npm checks concurrently. Avoid
 Docker, Testcontainers, a local Paper server, or a graphical Fabric client for
-routine Phase 0-2 validation. Those are later integration lanes and should not
-be left running on this host.
+routine Phase 0-3 validation. The pinned Paper smoke is a short, explicit
+exception and must not be left running on this host.
 
 If memory pressure appears, keep the one-worker policy and run each subproject
 separately. Increasing parallelism is not an appropriate first response.
@@ -154,6 +158,49 @@ Startup failures emit one JSON diagnostic with a stable code, stage, and known
 field path. They never include received configuration values, provider response
 bodies, API keys, server tokens, or unknown YAML key text.
 
+## Paper Phase 3 startup boundary
+
+Paper configuration is strict and closed. The Runtime endpoint must be
+`ws://127.0.0.1:<port>/agent`, and `runtime.server-token` must be a whole-scalar
+environment reference such as `${MINECRAFT_AGENT_SERVER_TOKEN}`. Do not put a
+real token in `config.yml`. State paths remain beneath the plugin data directory,
+and the security policy must retain `allow-op-toggle: false`.
+
+The Phase 3 startup order is:
+
+```text
+platform + strict config + security policy
+  -> private state directory probe
+  -> six core descriptor readiness checks
+  -> optional capability directory inspection
+  -> authenticated Runtime hello with timeout
+  -> return to the Paper primary thread
+  -> conditional /agent registration and player command-tree refresh
+```
+
+Filesystem and Runtime work stay off the primary thread. A missing or invalid
+optional capability directory produces a warning and `DEGRADED`; it does not
+block registration. Any core failure leaves both `agent` and
+`minecraftagent:agent` absent. Correct the configuration, state permissions,
+Runtime availability, token, or protocol externally and restart the server.
+Phase 4 `/agent on` is not an initial-startup recovery mechanism.
+
+The six core entries are only readiness descriptors:
+
+```text
+player.context.read
+player.held_item.read
+server.info.read
+server.plugins.list
+server.recipe.lookup
+server.recipe.uses
+```
+
+All six are read-only, closed-schema, and non-executable. Phase 3 supplies no
+tool invocation or Minecraft adapter. Typed tools begin in Phase 7. Inspecting
+the optional capability directory does not load packs; the Capability Pack
+loader remains Phase 9.
+
 ## Protocol contracts
 
 The canonical files live in:
@@ -190,23 +237,34 @@ warning for plan compatibility and should not be used. A group/world-writable
 configuration is always rejected. Inline secrets additionally require a private
 configuration file; inline secrets and broad read permissions may not be combined.
 
-## Phase 3 operational spike
+## Phase 3 conditional-registration validation
 
-Before implementing the Paper startup lifecycle, test command registration on
-the exact locked Paper build. The spike must answer:
+[ADR 0001](adr/0001-phase3-conditional-command-registration.md) records the
+selected public `Server#getCommandMap` late-registration design. API-level unit
+tests are necessary but not sufficient. `scripts/paper-smoke.sh` uses the real
+Paper `1.21.11-132` server JAR under Java 21 in an ignored, isolated directory,
+pins and verifies its SHA-256, and never commits the JAR, generated world,
+`eula.txt`, logs, or test credentials.
 
-- Can `/agent` be registered through a supported API after an asynchronous core
-  self-check?
-- If initial self-check fails and the command is absent, what supported recovery
-  path exists other than server restart?
-- Does registration refresh the command tree for players already connected?
-- Can the design meet both conditional registration and the rule that Paper's
-  server thread never waits on network I/O?
+On this constrained host, the harness runs Runtime and Paper serially with a
+small Paper heap of `-Xms256M -Xmx512M` and stops both processes after each
+case. Its real-server matrix is:
 
-Record the decision in an ADR and an integration fixture. Until then, do not
-claim that `/agent on` can recover an initial startup failure.
+- Valid handshake: `/agent` and `minecraftagent:agent` both execute, and doctor
+  reports the expected optional warning while health is `DEGRADED`.
+- Runtime unavailable, invalid token/proof, and incompatible protocol: neither
+  command label exists.
+- Optional capability warning: readiness is `DEGRADED` and the command exists.
+- Registration failure and disable cleanup, online-player `updateCommands()`
+  invocation, and stale completion are verified by focused JVM tests. The smoke
+  does not connect a real Minecraft client, so client-side tree refresh remains
+  an explicit later integration gap.
 
-## Troubleshooting Phase 0-2
+The exact commands, artifact hash, and outcomes are recorded in
+`docs/progress.md`. An initial core failure has no command recovery path; fix it
+externally and restart.
+
+## Troubleshooting Phase 0-3
 
 ### Dependency resolution fails
 
@@ -226,11 +284,18 @@ Check JSON Schema draft selection, format validation, `$ref` base URI, and
 fixture path resolution. The schema and fixture remain authoritative; do not
 weaken one validator merely to match the other.
 
-### A scaffold loads but no feature works
+### The plugin loads but `/agent` is absent
 
-That remains expected for the Paper and Fabric scaffolds. There is no command,
-Runtime-Paper transport, model request, repository, client payload handler,
-overlay, or Litematica adapter yet.
+Phase 3 deliberately leaves the command absent when a core startup check fails.
+Use the stable code and stage in the server log; never print the resolved token
+or raw peer message. Check the strict Paper configuration, state permissions,
+fake or local Runtime availability, token match, and protocol version, then
+restart. There is no initial `/agent on` path.
+
+Even after registration, Phase 3 `/agent` is readiness/doctor only. Model
+requests, Offline controls, typed tool execution, proposals, Capability Packs,
+client payloads, overlays, and Litematica adapters remain later phases. The
+Fabric entry point is still a scaffold.
 
 ### Runtime exits with `PROVIDER_UNSUPPORTED`
 

@@ -1,11 +1,10 @@
 # Progress
 
-Last updated: 2026-07-11
+Last updated: 2026-07-12
 
 ## Current status
 
-Phase 0, Phase 1, and the bounded Phase 2 Runtime-readiness scope are complete.
-Phase 3 has not started.
+Phase 0 through Phase 3 are complete. Phase 4 Offline controls are next.
 
 ## Locked decisions
 
@@ -26,6 +25,13 @@ Phase 3 has not started.
 - Phase 2 uses an injectable fake provider adapter for readiness tests. Production
   provider network calls remain fail closed until request state, policy, and
   request binding are testable.
+- Phase 3 uses `paper.hello` followed by `runtime.hello`; the Runtime echoes
+  Paper's challenge and selects exact protocol `1.0`. Both sides enforce the
+  shared HMAC golden transcript and a cross-connection replay window.
+- `/agent` is absent from `paper-plugin.yml` and is registered through Paper's
+  public `CommandMap` only after every core check succeeds. An initial failure
+  requires an external fix and server restart; Phase 4 `/agent on` cannot recover
+  a command that was never registered.
 
 ## Phase 0: repository scaffold
 
@@ -95,60 +101,96 @@ Completed:
 - [x] The packaged configuration template and top-level Bash/PowerShell launchers
       carry and forward explicit `--config` arguments.
 
+## Phase 3: Paper self-check and conditional registration
+
+Completed:
+
+- [x] Runtime readiness now installs a loopback `/agent` WebSocket endpoint that
+      accepts only the authenticated hello exchange. Strict UTF-8, duplicate
+      keys, 16 KiB, Schema, time, identity, HMAC, and bounded replay checks run
+      before a Paper connection occupies the single authenticated slot.
+- [x] The shared HMAC transcript has real Paper and Runtime golden proofs that
+      both TypeScript and JVM tests verify. Runtime echoes the Paper challenge;
+      proof encoding is canonical unpadded base64url.
+- [x] Paper configuration is strict and bounded, accepts only
+      `ws://127.0.0.1:<port>/agent`, resolves the token from a whole environment
+      reference, checks Java/Minecraft compatibility, and rejects unsafe policy,
+      paths, permissions, symlinks, state probes, and core descriptors.
+- [x] Six closed, read-only, non-executable core descriptors satisfy the Phase 3
+      readiness check. Typed tool adapters and invocation remain Phase 7.
+- [x] Missing or invalid optional capability storage produces
+      `OPTIONAL_CAPABILITY_UNAVAILABLE` and `DEGRADED` without blocking command
+      registration. Capability Pack loading remains Phase 9.
+- [x] `onEnable` returns without waiting for filesystem or network work. A
+      generation guard closes late connections after disable and prevents stale
+      or duplicate registration.
+- [x] Successful authentication returns to the primary thread, preflights both
+      command labels, verifies identity after public `CommandMap` registration,
+      refreshes online-player command trees, and performs identity-only rollback
+      and disable cleanup.
+- [x] `/agent` and `/agent doctor` expose readiness and stable warning codes only.
+      Runtime loss removes the command. Offline controls, requests, tools, and
+      models are not part of this command surface.
+- [x] Paper `1.21.11-132` smoke with the pinned SHA-256 proves authenticated
+      registration, both labels, doctor degradation, and absence for unavailable,
+      mismatched-token, and incompatible-protocol cases.
+
 ## Verification
 
-Verified serially on 2026-07-11:
+Verified serially on 2026-07-12:
 
 ```bash
-./scripts/package.sh
-# exit 0
-
 cd agent-runtime
+npm run check
 npm audit
 npm audit --omit=dev
-npm run version
 
-cd dist/agent-runtime
-npm ci --omit=dev --prefer-offline
-npm audit --omit=dev
 cd ..
-# with temporary non-placeholder OPENAI_API_KEY and MINECRAFT_AGENT_SERVER_TOKEN exported
-./start-agent.sh --config config.example.yml
-# expected exit 1: PROVIDER_UNSUPPORTED
+./gradlew --no-daemon --max-workers=1 :paper-plugin:build
+./gradlew --no-daemon --max-workers=1 :client-mod:build
+./scripts/paper-smoke.sh
+./scripts/package.sh
 ```
 
 Results:
 
-- Runtime: 6 Vitest files, 42 tests passed; TypeScript build, ESLint, and
+- Runtime: 8 Vitest files, 59 tests passed; TypeScript build, ESLint, and
   Prettier passed; full and production-only npm audits reported 0
   vulnerabilities.
-- Paper: build and Spotless passed; 36 shared dynamic contract cases plus one
-  descriptor test passed.
-- Fabric: remapped JAR build and Spotless passed; the same 36 shared contract
-  cases plus one client metadata test passed.
+- Paper: build and Spotless passed; 83 tests passed, including 38 shared dynamic
+  Schema/HMAC cases plus strict local startup, real WebSocket fake-peer
+  integration, lifecycle races, command-map transactions, doctor output, and
+  descriptor tests.
+- Fabric: remapped JAR build and Spotless passed; 39 tests passed, including the
+  same 38 shared protocol cases plus client metadata.
 - Both JVM reports contain no remote Schema load, `UnknownHostException`,
   invalid-schema error, skipped test, or failed test.
-- Packaged Runtime preserved its compiled layout, configuration template, and
-  protocol schemas; production dependencies installed with 0 vulnerabilities.
-- The packaged startup smoke used temporary environment secrets, completed the
-  local checks, and failed closed with `PROVIDER_UNSUPPORTED`. Its structured
-  output contained neither secret and no listener remained running.
+- Paper `1.21.11-132` JAR SHA-256
+  `5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba`
+  passed authenticated, unavailable, token-mismatch, and incompatible-protocol
+  cases at `-Xms256M -Xmx512M`; both labels and doctor executed only in the
+  authenticated case, and no Paper or Runtime process remained.
+- Packaged Runtime preserved its compiled handshake endpoint, configuration
+  template, and protocol schemas. The production CLI still fails closed at
+  `PROVIDER_UNSUPPORTED` before binding because no production model provider
+  adapter exists.
 - All protocol JSON files parse successfully; Bash scripts pass `bash -n`.
 
 PowerShell scripts were reviewed for native exit-code propagation but were not
-executed because `pwsh` is unavailable on this Linux host. A real Paper server,
-graphical Fabric client, and Litematica were not started; those integration
-lanes remain intentionally deferred. Gradle reports Loom-originated deprecation
-warnings for future Gradle 10 compatibility, but both builds pass on the locked
-Gradle 9.5.1 wrapper. Node emits its documented ExperimentalWarning when the
-built-in SQLite module is loaded; it is not suppressed.
+executed because `pwsh` is unavailable on this Linux host. A graphical Fabric
+client, a real online player during late command registration, and Litematica
+were not started. Gradle reports Loom-originated deprecation warnings for future
+Gradle 10 compatibility, but both builds pass on the locked Gradle 9.5.1
+wrapper. Node emits its documented ExperimentalWarning when the built-in SQLite
+module is loaded; it is not suppressed.
 
 ## Explicitly not implemented
 
 - Production model-provider network health adapter or any model request.
-- Runtime-Paper WebSocket server, token enforcement, replay cache, or heartbeat.
-- Paper command registration, Offline state machine, `/agent on`, or
-  `/agent off`.
+- Runtime-Paper application messages, heartbeat, or reconnect. Phase 3 supports
+  the authenticated hello only.
+- Offline state persistence and `/agent on` or `/agent off`. The registered
+  Phase 3 command exposes readiness and doctor only.
 - SQLite migrations or repositories in either process; Phase 2 only owns the
   Runtime startup-readiness file and connection.
 - Session resume, module routing, rate limiting, or cost accounting.
@@ -183,11 +225,12 @@ the driver before adding request-path database operations.
 
 ### Conditional command registration
 
-The baseline requires `/agent` to be absent when the initial core self-check
-fails, while recovery is described through `/agent on`. Paper command
-registration is lifecycle-bound and the self-check includes asynchronous work.
-Phase 3 must spike the exact Paper 1.21.11 behavior and select a supported
-recovery design before command implementation.
+ADR 0001 selects public late `CommandMap` registration and the exact Paper smoke
+proves both labels and conditional absence. An initial failure deliberately has
+no in-process recovery path and requires restart. Unit tests prove that
+`Player#updateCommands()` is invoked, but a real connected client was not part
+of the smoke; observing its refreshed Brigadier tree remains a later integration
+test gap.
 
 ### Litematica compatibility
 
@@ -210,10 +253,10 @@ adapter.
 
 ## Next gates
 
-1. Complete the Phase 3 command-registration spike against Paper 1.21.11 before
-   promising in-game recovery from an initial self-check failure.
-2. Add the authenticated Runtime-Paper connection and token/protocol checks with
-   a fake Runtime; keep production provider calls out of that integration lane.
+1. Implement Phase 4 desired mode, persistent Offline state, `/agent off`, and
+   `/agent on` without weakening the initial conditional-registration gate.
+2. Define authenticated-connection loss and explicit recheck behavior before
+   adding reconnect or heartbeat messages.
 3. Preserve the Phase 2 startup gate when the production provider health adapter
    is introduced for the first model-backed phase.
 4. Add Gradle dependency-verification metadata before calling a release

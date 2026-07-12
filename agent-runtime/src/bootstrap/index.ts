@@ -14,6 +14,7 @@ import { registerHealthRoute, RuntimeHealthState } from "../health/runtime-healt
 import { checkRuntimeSqlite, type RuntimeSqliteHandle } from "../health/sqlite.js";
 import { RuntimeLogger } from "../observability/runtime-logger.js";
 import { SchemaRegistry } from "../protocol/schema-registry.js";
+import { registerPaperHandshakeRoute } from "../transport/paper-handshake.js";
 import { runtimeIdentity, type RuntimeIdentity } from "../version.js";
 
 export interface BootstrapOptions extends LoadRuntimeConfigOptions {
@@ -47,12 +48,13 @@ export function createRuntimeApp(health?: RuntimeHealthState): FastifyInstance {
   return app;
 }
 
-async function checkProtocolSchema(protocolRoot?: string): Promise<void> {
+async function checkProtocolSchema(protocolRoot?: string): Promise<SchemaRegistry> {
   try {
     const registry = await SchemaRegistry.load(protocolRoot);
     if (!registry.schemaReferences.includes("capability.schema.json")) {
       throw new Error("Capability schema alias is unavailable");
     }
+    return registry;
   } catch (error) {
     throw new RuntimeStartupError({
       code: "PROTOCOL_SCHEMA_UNAVAILABLE",
@@ -75,7 +77,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
     }
 
     await checkLogDirectory(loaded.paths.rootDirectory, loaded.paths.logDirectory);
-    await checkProtocolSchema(options.protocolRoot);
+    const schemaRegistry = await checkProtocolSchema(options.protocolRoot);
     sqlite = await checkRuntimeSqlite(loaded.paths.rootDirectory, loaded.paths.sqlite);
 
     const providerHealthCheck =
@@ -83,7 +85,15 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
     await checkModelProvider(loaded.config, providerHealthCheck);
 
     const health = new RuntimeHealthState(options.now?.().toISOString());
-    app = createRuntimeApp(health);
+    app = createRuntimeApp();
+    await registerPaperHandshakeRoute(app, {
+      serverId: loaded.config.server.id,
+      serverToken: loaded.config.transport.serverToken,
+      schemaRegistry,
+      health,
+      ...(options.now === undefined ? {} : { now: options.now }),
+    });
+    registerHealthRoute(app, health);
     app.addHook("onClose", async () => {
       health.markStopped();
       sqlite?.close();
