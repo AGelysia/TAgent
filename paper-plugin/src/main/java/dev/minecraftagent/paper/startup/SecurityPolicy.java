@@ -22,7 +22,6 @@ public record SecurityPolicy(
   public void validate() throws StartupFailure {
     if (policyVersion != 1
         || serverAdmin != AccessLevel.OWNER
-        || allowOpToggle
         || !isWriteAccessRestricted(worldWrite)
         || !isWriteAccessRestricted(playerWrite)) {
       throw new StartupFailure(

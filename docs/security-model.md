@@ -6,8 +6,10 @@ This is the normative security design for the staged implementation. Phase 0
 and Phase 1 provide scaffolding and schemas. Phase 2 implements local Runtime
 configuration and readiness controls. Phase 3 adds Paper-side strict startup
 checks, authenticated hello handling, non-executable core descriptors, and a
-conditional command-registration boundary. It still does not provide model
-requests, typed tool execution, proposals, or Capability Pack loading.
+conditional command-registration boundary. Phase 4 adds persistent Offline
+state, epoch-based admission, explicit cleanup ports, and authorized recovery.
+It still does not provide model requests, typed tool execution, proposals, or
+Capability Pack loading.
 
 The governing rule is:
 
@@ -108,7 +110,13 @@ transition.
 
 ## Offline behavior
 
-Manual Offline is persisted by Paper. The command entry point checks state
+Manual Offline is persisted by Paper. The strict state file stores only desired
+mode, not transient health or failure state. Runtime loss therefore closes
+admission without silently converting a temporary failure into a persistent
+manual preference. Existing malformed or unsafe state fails closed rather than
+defaulting to enabled.
+
+The command entry point checks state
 before dispatching every subcommand. While Offline, every command other than
 `/agent on` and `/agent off` returns exactly:
 
@@ -116,7 +124,8 @@ before dispatching every subcommand. While Offline, every command other than
 AI offline
 ```
 
-The same state check occurs immediately before any Paper tool execution. On an
+The same epoch permit must be revalidated immediately before any Paper tool
+execution. On an
 `off` transition Paper rejects new requests, invalidates proposals, cancels
 queued work, ignores late Runtime calls, and clears transient client transfers.
 Cancellation is cooperative: a world mutation already in progress needs an
@@ -125,8 +134,11 @@ vanish atomically.
 
 Authorization for `on` and `off` remains mandatory while Offline. The command
 gate exception makes those subcommands reachable; it does not make them public.
+The local console and configured Owner UUIDs are authorized. Ordinary OPs are
+authorized only when `allow-op-toggle` is true and the dedicated permission is
+present. Other sender types cannot acquire toggle authority.
 
-This Offline command behavior begins in Phase 4. It does not weaken the Phase 3
+This Offline command behavior is implemented in Phase 4. It does not weaken the Phase 3
 rule that an initially failed and therefore unregistered agent exposes no
 command at all.
 
@@ -262,10 +274,13 @@ provider network adapter, so the default CLI fails closed before listening.
 
 ## Current enforcement gap
 
-At the Phase 3 boundary, Paper-side startup, the Runtime-Paper authenticated
-hello, descriptor readiness, and conditional registration exist and have been
-exercised on Paper `1.21.11-132`. Phase 4 Offline controls, request-path
-permission enforcement, proposal repositories, Phase 7 typed tool execution,
-the Phase 9 capability loader, audit storage, client payload handling, and world
-mutation remain absent. Protocol schemas and readiness descriptors are
-necessary contracts, not a complete execution security implementation.
+At the Phase 4 boundary, Paper-side startup, the Runtime-Paper authenticated
+hello, descriptor readiness, conditional registration, persistent Offline
+state, recovery, and epoch gate exist and have been exercised on Paper
+`1.21.11-132`. Request-path permission enforcement, proposal repositories,
+Phase 7 typed tool execution, the Phase 9 capability loader, audit storage,
+client payload handling, and world mutation remain absent. The four cleanup
+ports have no producers yet; their tests prove ordering, exception isolation,
+and epoch invalidation, not proposal/tool/client end-to-end behavior. Protocol
+schemas and readiness descriptors remain necessary contracts, not a complete
+execution security implementation.

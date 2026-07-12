@@ -19,6 +19,7 @@ final class StartupTestFixture {
         config-version: 1
         server:
           id: survival-main
+        owners: []
         runtime:
           url: ws://127.0.0.1:38127/agent
           server-token: ${MINECRAFT_AGENT_SERVER_TOKEN}

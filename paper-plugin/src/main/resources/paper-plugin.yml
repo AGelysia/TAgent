@@ -9,3 +9,6 @@ permissions:
   minecraftagent.command.agent:
     description: Allows access to the Minecraft Agent status command
     default: op
+  minecraftagent.admin.toggle:
+    description: Allows authorized administrators to toggle Minecraft Agent
+    default: op

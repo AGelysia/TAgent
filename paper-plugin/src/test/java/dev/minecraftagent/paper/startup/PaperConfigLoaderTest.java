@@ -10,6 +10,8 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -26,6 +28,7 @@ class PaperConfigLoaderTest {
     var config = loader.load(configPath, temporaryDirectory, StartupTestFixture.environment());
 
     assertEquals("survival-main", config.serverId());
+    assertEquals(Set.of(), config.owners());
     assertEquals("ws://127.0.0.1:38127/agent", config.runtime().endpoint().toString());
     assertEquals(StartupTestFixture.TOKEN, config.runtime().serverToken());
     assertEquals(Duration.ofSeconds(2), config.runtime().connectTimeout());
@@ -34,6 +37,69 @@ class PaperConfigLoaderTest {
     assertFalse(config.toString().contains(StartupTestFixture.TOKEN));
     assertFalse(config.runtime().toString().contains(StartupTestFixture.TOKEN));
     assertFalse(config.toString().contains(temporaryDirectory.toString()));
+  }
+
+  @Test
+  void loadsCanonicalOwnerUuidsWithoutExposingThem() throws Exception {
+    var first = UUID.fromString("11111111-1111-4111-8111-111111111111");
+    var second = UUID.fromString("AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA");
+    var source =
+        StartupTestFixture.validConfig()
+            .replace(
+                "owners: []",
+                "owners:\n"
+                    + "  - 11111111-1111-4111-8111-111111111111\n"
+                    + "  - AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA");
+    var configPath = StartupTestFixture.writeConfig(temporaryDirectory, source);
+
+    var config = loader.load(configPath, temporaryDirectory, StartupTestFixture.environment());
+
+    assertEquals(Set.of(first, second), config.owners());
+    assertThrows(UnsupportedOperationException.class, () -> config.owners().add(UUID.randomUUID()));
+    assertTrue(config.toString().contains("ownersCount=2"));
+    assertFalse(config.toString().contains(first.toString()));
+    assertFalse(config.toString().contains(second.toString()));
+  }
+
+  @Test
+  void safelyLoadsAPhaseThreeConfigWithoutOwnersAsConsoleOnly() throws Exception {
+    var source = StartupTestFixture.validConfig().replace("owners: []\n\n", "");
+    var configPath = StartupTestFixture.writeConfig(temporaryDirectory, source);
+
+    var config = loader.load(configPath, temporaryDirectory, StartupTestFixture.environment());
+
+    assertEquals(Set.of(), config.owners());
+  }
+
+  @Test
+  void rejectsMalformedDuplicateOversizedAndNonSequenceOwners() throws Exception {
+    for (var owners :
+        new String[] {
+          "owners: [not-a-uuid]",
+          "owners: [11111111-1111-4111-8111-111111111111, 11111111-1111-4111-8111-111111111111]",
+          "owners: 11111111-1111-4111-8111-111111111111",
+          "owners: [42]"
+        }) {
+      var path =
+          StartupTestFixture.writeConfig(
+              temporaryDirectory, StartupTestFixture.validConfig().replace("owners: []", owners));
+      assertFailure(
+          path, StartupTestFixture.environment(), StartupFailure.Code.PAPER_CONFIG_INVALID);
+    }
+
+    var entries = new StringBuilder("owners:\n");
+    for (var index = 0; index < 129; index++) {
+      entries
+          .append("  - 00000000-0000-4000-8000-")
+          .append(String.format("%012d", index))
+          .append('\n');
+    }
+    var oversizedPath =
+        StartupTestFixture.writeConfig(
+            temporaryDirectory,
+            StartupTestFixture.validConfig().replace("owners: []\n", entries.toString()));
+    assertFailure(
+        oversizedPath, StartupTestFixture.environment(), StartupFailure.Code.PAPER_CONFIG_INVALID);
   }
 
   @Test
@@ -143,8 +209,8 @@ class PaperConfigLoaderTest {
             temporaryDirectory,
             StartupTestFixture.validConfig()
                 .replace("allow-op-toggle: false", "allow-op-toggle: true"));
-    assertFailure(
-        policyPath, StartupTestFixture.environment(), StartupFailure.Code.CORE_POLICY_INVALID);
+    var policy = loader.load(policyPath, temporaryDirectory, StartupTestFixture.environment());
+    assertTrue(policy.securityPolicy().allowOpToggle());
 
     var timeoutPath =
         StartupTestFixture.writeConfig(

@@ -42,15 +42,29 @@ public final class JavaHttpRuntimeConnector implements RuntimeConnector {
   @Override
   public CompletionStage<AuthenticatedRuntimeConnection> connect(
       RuntimeConnectionSettings settings) {
+    return begin(settings).result();
+  }
+
+  @Override
+  public RuntimeConnectAttempt begin(RuntimeConnectionSettings settings) {
     var listener = new HandshakeListener();
     var hello = codec.createPaperHello(settings);
     var socketReference = new AtomicReference<WebSocket>();
+    var cancelled = new AtomicBoolean();
 
-    var socketFuture =
+    var rawSocketFuture =
         httpClient
             .newWebSocketBuilder()
             .connectTimeout(settings.connectTimeout())
-            .buildAsync(settings.endpoint(), listener)
+            .buildAsync(settings.endpoint(), listener);
+    rawSocketFuture.whenComplete(
+        (socket, error) -> {
+          if (socket != null && cancelled.get()) {
+            socket.abort();
+          }
+        });
+    var socketFuture =
+        rawSocketFuture
             .orTimeout(settings.connectTimeout().toMillis(), TimeUnit.MILLISECONDS)
             .handle(
                 (socket, error) -> {
@@ -92,17 +106,48 @@ public final class JavaHttpRuntimeConnector implements RuntimeConnector {
                       new JavaHttpAuthenticatedConnection(socket, listener);
                 });
 
-    return result.handle(
-        (connection, error) -> {
-          if (error == null) {
-            return connection;
-          }
-          var socket = socketReference.get();
-          if (socket != null) {
-            socket.abort();
-          }
-          throw mapFailure(error);
-        });
+    var completion =
+        result
+            .handle(
+                (connection, error) -> {
+                  if (error == null && !cancelled.get()) {
+                    return connection;
+                  }
+                  if (connection != null) {
+                    connection.close();
+                  }
+                  var socket = socketReference.get();
+                  if (socket != null) {
+                    socket.abort();
+                  }
+                  if (cancelled.get()) {
+                    throw new CompletionException(
+                        new RuntimeConnectionFailure("SELF_CHECK_CANCELLED", "lifecycle"));
+                  }
+                  throw mapFailure(error);
+                })
+            .toCompletableFuture();
+    return new RuntimeConnectAttempt() {
+      @Override
+      public CompletionStage<AuthenticatedRuntimeConnection> result() {
+        return completion;
+      }
+
+      @Override
+      public void cancel() {
+        if (!cancelled.compareAndSet(false, true)) {
+          return;
+        }
+        rawSocketFuture.cancel(true);
+        socketFuture.cancel(true);
+        completion.cancel(true);
+        listener.abort();
+        var socket = socketReference.get();
+        if (socket != null) {
+          socket.abort();
+        }
+      }
+    };
   }
 
   private static CompletionException mapFailure(Throwable error) {

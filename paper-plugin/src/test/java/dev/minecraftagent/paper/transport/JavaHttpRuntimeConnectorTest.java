@@ -134,6 +134,21 @@ class JavaHttpRuntimeConnectorTest {
   }
 
   @Test
+  void cancellingASilentHandshakeClosesTheSocketAndCompletion() throws Exception {
+    runtime = FakeRuntime.start(Mode.SILENT, TOKEN);
+    executor = Executors.newSingleThreadExecutor();
+    var connector = new JavaHttpRuntimeConnector(executor);
+    var attempt = connector.begin(settings(runtime.port()));
+    await(() -> !runtime.getConnections().isEmpty());
+
+    attempt.cancel();
+
+    await(() -> attempt.result().toCompletableFuture().isDone());
+    await(() -> runtime.getConnections().isEmpty());
+    assertTrue(attempt.result().toCompletableFuture().isCompletedExceptionally());
+  }
+
+  @Test
   void reportsAnUnavailableRuntimeWithoutLeakingTheSocketError() throws Exception {
     var port = unusedPort();
 
@@ -181,6 +196,15 @@ class JavaHttpRuntimeConnectorTest {
     try (var socket = new ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
       return socket.getLocalPort();
     }
+  }
+
+  private static void await(java.util.function.BooleanSupplier condition)
+      throws InterruptedException {
+    var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+    while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
+      Thread.sleep(5);
+    }
+    assertTrue(condition.getAsBoolean());
   }
 
   private enum Mode {

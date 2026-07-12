@@ -2,9 +2,9 @@
 
 Minecraft Agent is a security-first Minecraft assistant composed of a Paper plugin, a local
 TypeScript runtime, and an optional Fabric client mod. This repository currently implements the
-Phase 0-3 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
-loopback Runtime-Paper handshake, and conditional `/agent` registration. It does not yet call a
-model, execute a tool, implement Offline controls, or mutate Minecraft state.
+Phase 0-4 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
+loopback Runtime-Paper handshake, conditional `/agent` registration, and persistent emergency
+Offline controls. It does not yet call a model, execute a tool, or mutate Minecraft state.
 
 The product and delivery baseline is recorded in
 [`minecraft_agent_vibe_coding_plan.md`](minecraft_agent_vibe_coding_plan.md). Implementation status
@@ -71,7 +71,7 @@ cd ..
 The Fabric build downloads Minecraft artifacts and is deliberately last. Do not run both Gradle
 builds concurrently on a low-memory host.
 
-## Phase 2-3 Runtime
+## Phase 2-4 Runtime
 
 ```bash
 cd agent-runtime
@@ -98,12 +98,17 @@ fake adapter to verify the final listen gate. Once every readiness check succeed
 `/agent` on that same loopback listener and accepts only the bounded authenticated hello exchange.
 It does not yet accept agent requests, tool calls, heartbeats, or any other reserved message type.
 
-## Phase 3 Paper
+## Phase 3-4 Paper
 
 On first Paper startup, the plugin installs a strict `plugins/MinecraftAgent/config.yml`. Keep its
 Runtime token as the complete `${MINECRAFT_AGENT_SERVER_TOKEN}` environment reference. The endpoint
 is restricted to `ws://127.0.0.1:<port>/agent`, state stays under the plugin data directory, and the
 target server must be Minecraft/Paper 1.21.11 on Java 21 or newer.
+
+The default `owners: []` permits only the local server console to run `/agent on` or
+`/agent off`. Add canonical player UUIDs to `owners` for player administration. Setting
+`security.allow-op-toggle: true` additionally permits a live OP with
+`minecraftagent.admin.toggle`; it remains false by default.
 
 Paper performs configuration, state, policy, descriptor, and Runtime authentication checks away
 from the server thread. Only a successful result returns to the primary thread and registers
@@ -111,6 +116,14 @@ from the server thread. Only a successful result returns to the primary thread a
 labels absent; fix the external cause and restart the server. `/agent doctor` reports stable health
 and optional warning codes. The six core tool entries are non-executable readiness descriptors,
 not working Minecraft tools.
+
+After initial registration, `/agent off` closes admission before it cancels transient work and
+atomically persists `DISABLED` in `plugins/MinecraftAgent/state/agent-state.yml`. While not ONLINE,
+every non-toggle command returns exactly `AI offline`. `/agent on` repeats the full local check and
+authenticated handshake, then persists `ENABLED` before publishing ONLINE. A Runtime disconnect
+moves the Agent Offline without changing the persisted desired mode, and the command remains
+available for an explicit recovery attempt. An initial startup failure still leaves the command
+absent and requires an external fix plus restart.
 
 The opt-in exact-server smoke pins Paper `1.21.11-132`, verifies its SHA-256, limits the heap to 512
 MiB, and runs every case serially:
@@ -121,6 +134,8 @@ MiB, and runs every case serially:
 
 This is intentionally separate from routine checks because it downloads and starts a real Paper
 server. It cleans up all temporary worlds, logs, credentials, and child processes.
+The smoke includes an Offline/restart/on/Runtime-loss/on lifecycle and checks clean dynamic command
+unregistration in addition to the three initial transport-failure cases.
 
 ## Package
 
@@ -150,4 +165,6 @@ expected to end with `PROVIDER_UNSUPPORTED` and no listening port.
 The Paper plugin is the final authorization and execution boundary. The project never exposes a
 general console, shell, script, reflection, or unrestricted file tool. The optional client and all
 model output are untrusted. `/agent` is deliberately absent from `paper-plugin.yml`; Phase 3 creates
-it dynamically only after the complete core readiness gate succeeds.
+it dynamically only after the complete core readiness gate succeeds. Phase 4 keeps the registered
+command during later Offline transitions, rotates an epoch permit before cleanup, and requires a
+fresh check before returning Online.

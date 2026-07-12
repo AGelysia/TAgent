@@ -75,7 +75,15 @@ public final class PaperCommandRegistration {
   }
 
   private void removeIdentityMappings(AgentCommand command) {
-    commandMap.getKnownCommands().entrySet().removeIf(entry -> entry.getValue() == command);
+    var knownCommands = commandMap.getKnownCommands();
+    var ownedLabels =
+        knownCommands.entrySet().stream()
+            .filter(entry -> entry.getValue() == command)
+            .map(java.util.Map.Entry::getKey)
+            .toList();
+    for (var label : ownedLabels) {
+      knownCommands.remove(label, command);
+    }
   }
 
   private void refreshOnlinePlayers() {

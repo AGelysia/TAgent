@@ -4,6 +4,8 @@ import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
 
 public final class PaperStartupConfig {
   public static final class RuntimeSettings {
@@ -47,6 +49,7 @@ public final class PaperStartupConfig {
   }
 
   private final String serverId;
+  private final Set<UUID> owners;
   private final RuntimeSettings runtime;
   private final Path stateDirectory;
   private final SecurityPolicy securityPolicy;
@@ -54,11 +57,13 @@ public final class PaperStartupConfig {
 
   public PaperStartupConfig(
       String serverId,
+      Set<UUID> owners,
       RuntimeSettings runtime,
       Path stateDirectory,
       SecurityPolicy securityPolicy,
       Path optionalCapabilityDirectory) {
     this.serverId = Objects.requireNonNull(serverId);
+    this.owners = Set.copyOf(owners);
     this.runtime = Objects.requireNonNull(runtime);
     this.stateDirectory = Objects.requireNonNull(stateDirectory);
     this.securityPolicy = Objects.requireNonNull(securityPolicy);
@@ -67,6 +72,10 @@ public final class PaperStartupConfig {
 
   public String serverId() {
     return serverId;
+  }
+
+  public Set<UUID> owners() {
+    return owners;
   }
 
   public RuntimeSettings runtime() {
@@ -89,6 +98,8 @@ public final class PaperStartupConfig {
   public String toString() {
     return "PaperStartupConfig[serverId="
         + serverId
+        + ", ownersCount="
+        + owners.size()
         + ", runtime="
         + runtime
         + ", stateDirectory=<redacted>, securityPolicy="

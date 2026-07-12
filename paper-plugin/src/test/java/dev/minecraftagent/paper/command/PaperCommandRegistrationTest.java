@@ -7,10 +7,15 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.minecraftagent.paper.lifecycle.AgentHealth;
+import dev.minecraftagent.paper.lifecycle.AgentState;
+import dev.minecraftagent.paper.lifecycle.AgentStatus;
+import dev.minecraftagent.paper.lifecycle.DesiredMode;
 import java.lang.reflect.Proxy;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import org.bukkit.Location;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandException;
@@ -84,6 +89,7 @@ class PaperCommandRegistrationTest {
   @Test
   void unregisterRemovesOnlyThisPluginsMappingsAndRefreshesPlayers() {
     var map = new FakeCommandMap();
+    map.paperLikeEntrySet = true;
     var refreshes = new int[1];
     var registration = registration(map, refreshes);
     var command = command();
@@ -130,7 +136,23 @@ class PaperCommandRegistrationTest {
                 Plugin.class.getClassLoader(),
                 new Class<?>[] {Plugin.class},
                 (proxy, method, arguments) -> defaultValue(method.getReturnType()));
-    return new AgentCommand(plugin, () -> AgentDiagnostics.available(List.of()));
+    return new AgentCommand(
+        plugin,
+        () ->
+            new AgentStatus(
+                AgentState.ONLINE, DesiredMode.ENABLED, AgentHealth.HEALTHY, null, null, List.of()),
+        new AgentControl() {
+          @Override
+          public void turnOff() {}
+
+          @Override
+          public RecoveryRequest turnOn() {
+            return new RecoveryRequest(
+                RecoveryDisposition.ALREADY_ONLINE, CompletableFuture.completedFuture(true));
+          }
+        },
+        ignored -> true,
+        Runnable::run);
   }
 
   private static Object defaultValue(Class<?> type) {
@@ -155,6 +177,7 @@ class PaperCommandRegistrationTest {
   private static final class FakeCommandMap implements CommandMap {
     private final Map<String, Command> known = new LinkedHashMap<>();
     private boolean failAfterFallbackRegistration;
+    private boolean paperLikeEntrySet;
 
     @Override
     public void registerAll(String fallbackPrefix, List<Command> commands) {
@@ -206,7 +229,30 @@ class PaperCommandRegistrationTest {
 
     @Override
     public Map<String, Command> getKnownCommands() {
-      return known;
+      if (!paperLikeEntrySet) {
+        return known;
+      }
+      return new java.util.AbstractMap<>() {
+        @Override
+        public java.util.Set<Map.Entry<String, Command>> entrySet() {
+          return java.util.Collections.unmodifiableMap(known).entrySet();
+        }
+
+        @Override
+        public Command get(Object key) {
+          return known.get(key);
+        }
+
+        @Override
+        public Command remove(Object key) {
+          return known.remove(key);
+        }
+
+        @Override
+        public boolean remove(Object key, Object value) {
+          return known.remove(key, value);
+        }
+      };
     }
   }
 

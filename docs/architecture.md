@@ -2,13 +2,14 @@
 
 ## Status and scope
 
-This document records the target architecture and decisions through Phase 3.
+This document records the target architecture and decisions through Phase 4.
 The repository contains build scaffolding, protocol contracts, the Runtime
 configuration/readiness boundary, and Paper-side Phase 3 startup, authenticated
-hello, core-descriptor, and conditional-command components. Production model
-access, operational tool execution, application repositories, client views, and
-Litematica integration remain later work. The conditional command path has been
-validated on the pinned Paper `1.21.11-132` server artifact.
+hello, core-descriptor, conditional-command, and Phase 4 Offline lifecycle
+components. Production model access, operational tool execution, application
+repositories, client views, and Litematica integration remain later work. The
+conditional command and Offline recovery paths have been validated on the pinned
+Paper `1.21.11-132` server artifact.
 
 The implementation has three deployable components:
 
@@ -242,16 +243,39 @@ core transport failures. Unit tests separately verify player refresh calls,
 identity cleanup, and disable races; an actual connected-client refresh remains
 a later end-to-end test gap.
 
-## Current Phase 3 boundary
+## Phase 4 Offline lifecycle
 
-The following remain outside the Phase 3 implementation boundary:
+[ADR 0002](adr/0002-phase4-offline-state-machine.md) separates operational
+state, desired mode, and health. The coordinator owns each connection candidate
+until a generation-checked primary-thread commit transfers it to the active
+lease. Initial success registers the command once; manual off, Runtime loss, and
+failed recovery never unregister it. Plugin disable is the only post-registration
+unregistration path.
+
+`OperationalGate` holds the authoritative admission epoch. Every transition
+rotates the epoch; permits are issued only ONLINE and revalidation requires both
+ONLINE state and the exact issuing epoch. STOPPING therefore closes command and
+future request/tool/proposal/client admission before cleanup or filesystem I/O.
+The four explicit cleanup ports exist now, while their request, proposal,
+operation, and client producers arrive in later phases.
+
+Paper persists only `DesiredMode` in a strict private state file. Transient
+health, Runtime failure, connection identity, and Offline reason are never
+written as user intent. Recovery repeats the same core check and handshake, then
+atomically persists ENABLED before publishing ONLINE. Runtime loss retains
+desired ENABLED and requires an explicit `/agent on`; there is no Phase 4
+auto-reconnect.
+
+## Current Phase 4 boundary
+
+The following remain outside the Phase 4 implementation boundary:
 
 - Production provider health requests and model calls. The Runtime WebSocket
   endpoint implements authentication only; agent and tool traffic remain
   unsupported.
 - Runtime application repositories/migrations and every Paper database.
-- `/agent` request routing, Phase 4 Offline transitions, proposals, and tool
-  execution. The Phase 3 command surface is readiness/doctor only.
+- `/agent` request routing, proposals, and tool execution. The current command
+  surface is readiness, doctor, and authorized Offline toggles only.
 - The six core tool entries are non-executable readiness descriptors. Real
   typed tools and Paper adapters are Phase 7.
 - Capability Pack loading and command-backed capability execution are Phase 9.

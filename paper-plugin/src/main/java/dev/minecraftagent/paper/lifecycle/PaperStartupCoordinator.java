@@ -1,11 +1,14 @@
 package dev.minecraftagent.paper.lifecycle;
 
-import dev.minecraftagent.paper.command.AgentDiagnostics;
+import dev.minecraftagent.paper.command.AgentControl;
 import dev.minecraftagent.paper.command.CommandRegistrationFailure;
 import dev.minecraftagent.paper.startup.StartupFailure;
+import dev.minecraftagent.paper.state.DesiredModeStore;
 import dev.minecraftagent.paper.transport.AuthenticatedRuntimeConnection;
+import dev.minecraftagent.paper.transport.RuntimeConnectAttempt;
 import dev.minecraftagent.paper.transport.RuntimeConnectionFailure;
 import dev.minecraftagent.paper.transport.RuntimeConnector;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -15,7 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
-public final class PaperStartupCoordinator implements AutoCloseable {
+public final class PaperStartupCoordinator implements AgentControl, AutoCloseable {
   @FunctionalInterface
   public interface CoreSelfCheck {
     CoreReadiness run() throws StartupFailure;
@@ -37,7 +40,14 @@ public final class PaperStartupCoordinator implements AutoCloseable {
 
     void warning(String stage, String code);
 
-    void available(AgentDiagnostics.State state);
+    void available(AgentHealth health);
+
+    default void offline(OfflineReason reason) {}
+  }
+
+  private enum AttemptKind {
+    INITIAL,
+    RECOVERY
   }
 
   private final ExecutorService worker;
@@ -47,15 +57,21 @@ public final class PaperStartupCoordinator implements AutoCloseable {
   private final CommandGate commandGate;
   private final BooleanSupplier pluginEnabled;
   private final EventSink events;
-  private final AtomicBoolean active = new AtomicBoolean();
+  private final OfflineCleanup offlineCleanup;
+  private final AtomicBoolean running = new AtomicBoolean();
   private final AtomicLong generation = new AtomicLong();
-  private final AtomicReference<AuthenticatedRuntimeConnection> candidateConnection =
-      new AtomicReference<>();
-  private final AtomicReference<AgentDiagnostics> diagnostics =
-      new AtomicReference<>(AgentDiagnostics.starting());
+  private final AtomicReference<Attempt> currentAttempt = new AtomicReference<>();
+  private final AtomicReference<AgentStatus> status =
+      new AtomicReference<>(AgentStatus.unregistered(null));
+  private final AtomicReference<AdminPolicy> adminPolicy =
+      new AtomicReference<>(AdminPolicy.locked());
+  private final OperationalGate operationalGate = new OperationalGate();
+  private final CompletableFuture<Void> initialCompletion = new CompletableFuture<>();
 
-  private volatile CompletableFuture<?> pipeline;
   private AuthenticatedRuntimeConnection activeConnection;
+  private DesiredModeStore desiredModeStore;
+  private boolean commandRegistered;
+  private volatile CompletableFuture<Void> pendingOffPersistence;
 
   public PaperStartupCoordinator(
       ExecutorService worker,
@@ -65,6 +81,26 @@ public final class PaperStartupCoordinator implements AutoCloseable {
       CommandGate commandGate,
       BooleanSupplier pluginEnabled,
       EventSink events) {
+    this(
+        worker,
+        coreSelfCheck,
+        runtimeConnector,
+        mainThread,
+        commandGate,
+        pluginEnabled,
+        events,
+        OfflineCleanup.empty());
+  }
+
+  public PaperStartupCoordinator(
+      ExecutorService worker,
+      CoreSelfCheck coreSelfCheck,
+      RuntimeConnector runtimeConnector,
+      MainThreadExecutor mainThread,
+      CommandGate commandGate,
+      BooleanSupplier pluginEnabled,
+      EventSink events,
+      OfflineCleanup offlineCleanup) {
     this.worker = Objects.requireNonNull(worker);
     this.coreSelfCheck = Objects.requireNonNull(coreSelfCheck);
     this.runtimeConnector = Objects.requireNonNull(runtimeConnector);
@@ -72,72 +108,191 @@ public final class PaperStartupCoordinator implements AutoCloseable {
     this.commandGate = Objects.requireNonNull(commandGate);
     this.pluginEnabled = Objects.requireNonNull(pluginEnabled);
     this.events = Objects.requireNonNull(events);
+    this.offlineCleanup = Objects.requireNonNull(offlineCleanup);
   }
 
-  public void start() {
-    if (!active.compareAndSet(false, true)) {
+  public synchronized void start() {
+    if (!running.compareAndSet(false, true)) {
       throw new IllegalStateException("Paper startup has already begun");
     }
-    diagnostics.set(AgentDiagnostics.starting());
-    var currentGeneration = generation.incrementAndGet();
-
-    pipeline =
-        CompletableFuture.supplyAsync(this::runCoreCheck, worker)
-            .thenCompose(
-                readiness ->
-                    runtimeConnector
-                        .connect(readiness.runtimeSettings())
-                        .thenApply(
-                            connection ->
-                                prepareCandidate(currentGeneration, readiness, connection)))
-            .whenComplete(
-                (candidate, error) -> {
-                  if (!isCurrent(currentGeneration)) {
-                    closeCandidate(candidate);
-                    return;
-                  }
-                  if (error != null) {
-                    schedule(currentGeneration, () -> finishFailure(error));
-                  } else {
-                    schedule(currentGeneration, () -> finishSuccess(candidate));
-                  }
-                })
-            .toCompletableFuture();
+    publish(AgentStatus.starting(DesiredMode.ENABLED));
+    beginAttempt(AttemptKind.INITIAL, DesiredMode.ENABLED);
   }
 
-  public AgentDiagnostics diagnostics() {
-    return diagnostics.get();
+  public AgentStatus diagnostics() {
+    return status.get();
+  }
+
+  public AdminPolicy adminPolicy() {
+    return adminPolicy.get();
+  }
+
+  public OperationalGate operationalGate() {
+    return operationalGate;
   }
 
   public boolean startupComplete() {
-    var current = pipeline;
-    return current != null && current.isDone();
+    return initialCompletion.isDone();
   }
 
   @Override
-  public void close() {
-    active.set(false);
-    generation.incrementAndGet();
-    commandGate.unregister();
+  public synchronized void turnOff() {
+    if (!running.get() || !commandRegistered) {
+      return;
+    }
+    var snapshot = status.get();
+    if (snapshot.state() == AgentState.STOPPING
+        || (snapshot.state() == AgentState.OFFLINE
+            && snapshot.desiredMode() == DesiredMode.DISABLED
+            && snapshot.offlineReason() == OfflineReason.MANUAL
+            && snapshot.failureCode() == null)) {
+      return;
+    }
 
-    var candidate = candidateConnection.getAndSet(null);
-    if (candidate != null) {
-      candidate.close();
-    }
-    if (activeConnection != null) {
-      activeConnection.close();
-      activeConnection = null;
-    }
-    diagnostics.set(
-        new AgentDiagnostics(AgentDiagnostics.State.STOPPED, null, java.util.List.of()));
-    worker.shutdownNow();
+    var currentGeneration = generation.incrementAndGet();
+    publish(AgentStatus.stopping());
+    cancelCurrentAttempt();
+    var epoch = operationalGate.epoch();
+    detachAndCloseActiveConnection();
+    reportCleanupFailures(offlineCleanup.quiesce(epoch, OfflineReason.MANUAL));
+
+    var store = desiredModeStore;
+    var persistence =
+        CompletableFuture.runAsync(() -> saveDesiredMode(store, DesiredMode.DISABLED), worker);
+    pendingOffPersistence = persistence;
+    persistence.whenComplete(
+        (ignored, error) -> {
+          var completion = (Runnable) () -> finishOff(currentGeneration, error);
+          if (!schedule(completion) && running.get()) {
+            completion.run();
+          }
+        });
   }
 
-  private CoreReadiness runCoreCheck() {
+  @Override
+  public synchronized RecoveryRequest turnOn() {
+    if (!running.get() || !commandRegistered) {
+      return completedRecovery(RecoveryDisposition.UNAVAILABLE, false);
+    }
+    var snapshot = status.get();
+    if (snapshot.state() == AgentState.ONLINE) {
+      return completedRecovery(RecoveryDisposition.ALREADY_ONLINE, true);
+    }
+    var attempt = currentAttempt.get();
+    if (snapshot.state() == AgentState.STARTING
+        && attempt != null
+        && attempt.kind == AttemptKind.RECOVERY) {
+      return new RecoveryRequest(RecoveryDisposition.ALREADY_STARTING, attempt.completion);
+    }
+    if (snapshot.state() != AgentState.OFFLINE) {
+      return completedRecovery(RecoveryDisposition.UNAVAILABLE, false);
+    }
+
+    publish(AgentStatus.starting(snapshot.desiredMode()));
+    var recovery = beginAttempt(AttemptKind.RECOVERY, snapshot.desiredMode());
+    return new RecoveryRequest(RecoveryDisposition.STARTED, recovery.completion);
+  }
+
+  @Override
+  public synchronized void close() {
+    if (!running.getAndSet(false)) {
+      return;
+    }
+    generation.incrementAndGet();
+    cancelCurrentAttempt();
+    detachAndCloseActiveConnection();
+    operationalGate.transitionTo(AgentState.UNREGISTERED);
+    if (commandRegistered) {
+      commandGate.unregister();
+      commandRegistered = false;
+    }
+    status.set(AgentStatus.unregistered("PLUGIN_DISABLED"));
+    initialCompletion.complete(null);
+    var persistence = pendingOffPersistence;
+    if (persistence != null && !persistence.isDone()) {
+      worker.shutdown();
+    } else {
+      worker.shutdownNow();
+    }
+  }
+
+  private Attempt beginAttempt(AttemptKind kind, DesiredMode fallbackDesiredMode) {
+    var attempt = new Attempt(generation.incrementAndGet(), kind, fallbackDesiredMode);
+    if (!currentAttempt.compareAndSet(null, attempt)) {
+      throw new IllegalStateException("An Agent self-check is already active");
+    }
+
+    CompletableFuture<Candidate> pipeline =
+        CompletableFuture.supplyAsync(() -> runCoreCheck(attempt), worker)
+            .thenCompose(
+                readiness -> {
+                  requireCurrent(attempt);
+                  var connectionAttempt = runtimeConnector.begin(readiness.runtimeSettings());
+                  attempt.connectionAttempt.set(connectionAttempt);
+                  if (!isCurrent(attempt)) {
+                    connectionAttempt.cancel();
+                    throw cancelled();
+                  }
+                  return connectionAttempt
+                      .result()
+                      .thenApply(connection -> prepareCandidate(attempt, readiness, connection));
+                });
+    if (kind == AttemptKind.RECOVERY) {
+      pipeline =
+          pipeline.thenApplyAsync(
+              candidate -> {
+                requireCurrent(attempt);
+                saveDesiredMode(candidate.readiness().desiredModeStore(), DesiredMode.ENABLED);
+                attempt.persistedDesiredMode = DesiredMode.ENABLED;
+                requireCurrent(attempt);
+                return candidate;
+              },
+              worker);
+    }
+    pipeline.whenComplete(
+        (candidate, error) -> {
+          if (!isCurrent(attempt)) {
+            closeCandidate(candidate);
+            attempt.completion.complete(false);
+            return;
+          }
+          var completion =
+              (Runnable)
+                  () -> {
+                    synchronized (PaperStartupCoordinator.this) {
+                      if (!isCurrent(attempt)) {
+                        closeCandidate(candidate);
+                        attempt.completion.complete(false);
+                      } else if (error == null) {
+                        finishSuccess(attempt, candidate);
+                      } else {
+                        finishFailure(attempt, error);
+                      }
+                    }
+                  };
+          if (!schedule(completion) && running.get()) {
+            synchronized (PaperStartupCoordinator.this) {
+              if (isCurrent(attempt)) {
+                finishFailure(
+                    attempt,
+                    new RuntimeConnectionFailure("MAIN_THREAD_SCHEDULE_FAILED", "lifecycle"));
+              }
+            }
+          }
+        });
+    return attempt;
+  }
+
+  private CoreReadiness runCoreCheck(Attempt attempt) {
+    requireCurrent(attempt);
     try {
-      return coreSelfCheck.run();
+      var readiness = coreSelfCheck.run();
+      requireCurrent(attempt);
+      return readiness;
     } catch (StartupFailure failure) {
       throw new CompletionException(failure);
+    } catch (CompletionException error) {
+      throw error;
     } catch (RuntimeException error) {
       throw new CompletionException(
           new RuntimeConnectionFailure("SELF_CHECK_INTERNAL_ERROR", "lifecycle"));
@@ -145,128 +300,272 @@ public final class PaperStartupCoordinator implements AutoCloseable {
   }
 
   private Candidate prepareCandidate(
-      long currentGeneration, CoreReadiness readiness, AuthenticatedRuntimeConnection connection) {
+      Attempt attempt, CoreReadiness readiness, AuthenticatedRuntimeConnection connection) {
     Objects.requireNonNull(connection);
-    candidateConnection.set(connection);
-    connection
-        .whenClosed()
-        .whenComplete((ignored, error) -> scheduleConnectionLost(currentGeneration, connection));
-    if (!isCurrent(currentGeneration)) {
-      candidateConnection.compareAndSet(connection, null);
+    attempt.candidate.set(connection);
+    connection.whenClosed().whenComplete((ignored, error) -> scheduleConnectionLost(connection));
+    if (!isCurrent(attempt)) {
+      attempt.candidate.compareAndSet(connection, null);
       connection.close();
-      throw new CompletionException(
-          new RuntimeConnectionFailure("SELF_CHECK_CANCELLED", "lifecycle"));
+      throw cancelled();
     }
     return new Candidate(readiness, connection);
   }
 
-  private void finishSuccess(Candidate candidate) {
+  private void finishSuccess(Attempt attempt, Candidate candidate) {
     var connection = candidate.connection();
     if (!pluginEnabled.getAsBoolean() || !connection.isOpen()) {
-      candidateConnection.compareAndSet(connection, null);
-      connection.close();
-      finishFailure(new RuntimeConnectionFailure("RUNTIME_UNREACHABLE", "runtime-connect"));
+      finishFailure(
+          attempt, new RuntimeConnectionFailure("RUNTIME_CONNECTION_LOST", "runtime-connect"));
       return;
     }
 
-    var nextDiagnostics = AgentDiagnostics.available(candidate.readiness().warningCodes());
-    diagnostics.set(nextDiagnostics);
-    try {
-      commandGate.register();
-    } catch (CommandRegistrationFailure failure) {
-      candidateConnection.compareAndSet(connection, null);
-      connection.close();
-      finishFailure(failure);
-      return;
-    } catch (RuntimeException error) {
-      candidateConnection.compareAndSet(connection, null);
-      connection.close();
-      finishFailure(new CommandRegistrationFailure("COMMAND_REGISTRATION_FAILED"));
-      return;
+    if (attempt.kind == AttemptKind.INITIAL) {
+      try {
+        commandGate.register();
+        commandRegistered = true;
+      } catch (CommandRegistrationFailure failure) {
+        finishFailure(attempt, failure);
+        return;
+      } catch (RuntimeException error) {
+        finishFailure(attempt, new CommandRegistrationFailure("COMMAND_REGISTRATION_FAILED"));
+        return;
+      }
+      if (!connection.isOpen()) {
+        commandGate.unregister();
+        commandRegistered = false;
+        finishFailure(
+            attempt, new RuntimeConnectionFailure("RUNTIME_CONNECTION_LOST", "runtime-connect"));
+        return;
+      }
     }
 
-    if (!connection.isOpen()) {
-      commandGate.unregister();
-      candidateConnection.compareAndSet(connection, null);
+    desiredModeStore = candidate.readiness().desiredModeStore();
+    adminPolicy.set(candidate.readiness().adminPolicy());
+    attempt.connectionAttempt.set(null);
+    currentAttempt.compareAndSet(attempt, null);
+    attempt.candidate.compareAndSet(connection, null);
+    reportWarnings(candidate.readiness().warningCodes());
+
+    if (attempt.kind == AttemptKind.INITIAL
+        && candidate.readiness().desiredMode() == DesiredMode.DISABLED) {
       connection.close();
-      finishFailure(new RuntimeConnectionFailure("RUNTIME_CONNECTION_LOST", "runtime-connect"));
+      publish(
+          AgentStatus.offline(
+              DesiredMode.DISABLED,
+              OfflineReason.MANUAL,
+              null,
+              candidate.readiness().warningCodes()));
+      events.offline(OfflineReason.MANUAL);
+    } else {
+      activeConnection = connection;
+      publish(AgentStatus.online(candidate.readiness().warningCodes()));
+      events.available(status.get().health());
+    }
+    attempt.completion.complete(true);
+    if (attempt.kind == AttemptKind.INITIAL) {
+      initialCompletion.complete(null);
+    }
+  }
+
+  private void finishFailure(Attempt attempt, Throwable error) {
+    currentAttempt.compareAndSet(attempt, null);
+    var connectionAttempt = attempt.connectionAttempt.getAndSet(null);
+    if (connectionAttempt != null) {
+      connectionAttempt.cancel();
+    }
+    var connection = attempt.candidate.getAndSet(null);
+    if (connection != null) {
+      connection.close();
+    }
+    var failure = failureDetails(error);
+    if (attempt.kind == AttemptKind.INITIAL) {
+      if (commandRegistered) {
+        commandGate.unregister();
+        commandRegistered = false;
+      }
+      publish(AgentStatus.unregistered(failure.code()));
+      initialCompletion.complete(null);
+    } else {
+      publish(
+          AgentStatus.offline(
+              attempt.persistedDesiredMode, failure.reason(), failure.code(), List.of()));
+      events.offline(failure.reason());
+    }
+    events.failure(failure.stage(), failure.code());
+    attempt.completion.complete(false);
+  }
+
+  private void scheduleConnectionLost(AuthenticatedRuntimeConnection connection) {
+    var transition = (Runnable) () -> finishConnectionLost(connection);
+    if (!schedule(transition) && running.get()) {
+      transition.run();
+    }
+  }
+
+  private synchronized void finishOff(long expectedGeneration, Throwable error) {
+    if (!isGenerationCurrent(expectedGeneration)) {
       return;
     }
+    if (error == null) {
+      publish(AgentStatus.offline(DesiredMode.DISABLED, OfflineReason.MANUAL, null, List.of()));
+      events.offline(OfflineReason.MANUAL);
+    } else {
+      publish(
+          AgentStatus.offline(
+              DesiredMode.DISABLED,
+              OfflineReason.SECURITY_FAILURE,
+              "STATE_PERSISTENCE_FAILED",
+              List.of()));
+      events.failure("STATE", "STATE_PERSISTENCE_FAILED");
+    }
+  }
 
-    candidateConnection.compareAndSet(connection, null);
-    activeConnection = connection;
-    for (var warning : candidate.readiness().warningCodes()) {
+  private synchronized void finishConnectionLost(AuthenticatedRuntimeConnection connection) {
+    if (!running.get() || activeConnection != connection) {
+      return;
+    }
+    activeConnection = null;
+    generation.incrementAndGet();
+    var desired = status.get().desiredMode();
+    var warnings = status.get().warningCodes();
+    publish(
+        AgentStatus.offline(
+            desired, OfflineReason.RUNTIME_UNAVAILABLE, "RUNTIME_CONNECTION_LOST", warnings));
+    reportCleanupFailures(
+        offlineCleanup.quiesce(operationalGate.epoch(), OfflineReason.RUNTIME_UNAVAILABLE));
+    events.failure("runtime-connect", "RUNTIME_CONNECTION_LOST");
+    events.offline(OfflineReason.RUNTIME_UNAVAILABLE);
+  }
+
+  private void cancelCurrentAttempt() {
+    var attempt = currentAttempt.getAndSet(null);
+    if (attempt == null) {
+      return;
+    }
+    var connectionAttempt = attempt.connectionAttempt.getAndSet(null);
+    if (connectionAttempt != null) {
+      connectionAttempt.cancel();
+    }
+    var candidate = attempt.candidate.getAndSet(null);
+    if (candidate != null) {
+      candidate.close();
+    }
+    attempt.completion.complete(false);
+  }
+
+  private void detachAndCloseActiveConnection() {
+    var connection = activeConnection;
+    activeConnection = null;
+    if (connection != null) {
+      connection.close();
+    }
+  }
+
+  private void publish(AgentStatus next) {
+    operationalGate.transitionTo(next.state());
+    status.set(next);
+  }
+
+  private void reportWarnings(List<String> warningCodes) {
+    for (var warning : warningCodes) {
       events.warning("optional-capabilities", warning);
     }
-    events.available(nextDiagnostics.state());
   }
 
-  private void finishFailure(Throwable error) {
-    var failure = unwrap(error);
-    String stage;
-    String code;
-    if (failure instanceof StartupFailure startupFailure) {
-      stage = startupFailure.stage().name();
-      code = startupFailure.code().name();
-    } else if (failure instanceof RuntimeConnectionFailure connectionFailure) {
-      stage = connectionFailure.stage();
-      code = connectionFailure.code();
-    } else if (failure instanceof CommandRegistrationFailure registrationFailure) {
-      stage = "command-registration";
-      code = registrationFailure.code();
-    } else {
-      stage = "lifecycle";
-      code = "SELF_CHECK_INTERNAL_ERROR";
+  private void reportCleanupFailures(List<String> failureCodes) {
+    for (var failure : failureCodes) {
+      events.failure("offline-cleanup", failure);
     }
-    diagnostics.set(AgentDiagnostics.unavailable(code));
-    events.failure(stage, code);
   }
 
-  private void scheduleConnectionLost(
-      long currentGeneration, AuthenticatedRuntimeConnection connection) {
-    if (!isCurrent(currentGeneration)) {
-      return;
-    }
-    schedule(
-        currentGeneration,
-        () -> {
-          if (activeConnection != connection) {
-            return;
-          }
-          activeConnection = null;
-          commandGate.unregister();
-          diagnostics.set(AgentDiagnostics.unavailable("RUNTIME_CONNECTION_LOST"));
-          events.failure("runtime-connect", "RUNTIME_CONNECTION_LOST");
-        });
-  }
-
-  private void schedule(long expectedGeneration, Runnable task) {
-    if (!isCurrent(expectedGeneration)) {
-      return;
+  private boolean schedule(Runnable task) {
+    if (!running.get()) {
+      return false;
     }
     try {
       mainThread.execute(
           () -> {
-            if (isCurrent(expectedGeneration)) {
+            if (running.get()) {
               task.run();
             }
           });
+      return true;
     } catch (RuntimeException error) {
-      var candidate = candidateConnection.getAndSet(null);
-      if (candidate != null) {
-        candidate.close();
-      }
+      events.failure("lifecycle", "MAIN_THREAD_SCHEDULE_FAILED");
+      return false;
     }
   }
 
-  private boolean isCurrent(long expectedGeneration) {
-    return active.get() && generation.get() == expectedGeneration;
+  private boolean isCurrent(Attempt attempt) {
+    return running.get()
+        && generation.get() == attempt.generation
+        && currentAttempt.get() == attempt;
+  }
+
+  private boolean isGenerationCurrent(long expectedGeneration) {
+    return running.get() && generation.get() == expectedGeneration;
+  }
+
+  private void requireCurrent(Attempt attempt) {
+    if (!isCurrent(attempt)) {
+      throw cancelled();
+    }
+  }
+
+  private static CompletionException cancelled() {
+    return new CompletionException(
+        new RuntimeConnectionFailure("SELF_CHECK_CANCELLED", "lifecycle"));
+  }
+
+  private static RecoveryRequest completedRecovery(
+      RecoveryDisposition disposition, boolean result) {
+    return new RecoveryRequest(disposition, CompletableFuture.completedFuture(result));
+  }
+
+  private static void saveDesiredMode(DesiredModeStore store, DesiredMode mode) {
+    if (store == null) {
+      throw new CompletionException(
+          new StartupFailure(
+              StartupFailure.Code.STATE_PERSISTENCE_FAILED, StartupFailure.Stage.STATE));
+    }
+    try {
+      store.save(mode);
+    } catch (StartupFailure failure) {
+      throw new CompletionException(failure);
+    }
   }
 
   private static void closeCandidate(Candidate candidate) {
     if (candidate != null) {
       candidate.connection().close();
     }
+  }
+
+  private static FailureDetails failureDetails(Throwable error) {
+    var failure = unwrap(error);
+    if (failure instanceof StartupFailure startupFailure) {
+      var reason =
+          switch (startupFailure.stage()) {
+            case SECURITY_POLICY, STATE -> OfflineReason.SECURITY_FAILURE;
+            case CONFIG, ENVIRONMENT, CORE_TOOLS -> OfflineReason.CONFIG_INVALID;
+          };
+      return new FailureDetails(
+          startupFailure.stage().name(), startupFailure.code().name(), reason);
+    }
+    if (failure instanceof RuntimeConnectionFailure connectionFailure) {
+      var reason =
+          connectionFailure.code().startsWith("MODEL_")
+              ? OfflineReason.MODEL_UNAVAILABLE
+              : OfflineReason.RUNTIME_UNAVAILABLE;
+      return new FailureDetails(connectionFailure.stage(), connectionFailure.code(), reason);
+    }
+    if (failure instanceof CommandRegistrationFailure registrationFailure) {
+      return new FailureDetails(
+          "command-registration", registrationFailure.code(), OfflineReason.CONFIG_INVALID);
+    }
+    return new FailureDetails(
+        "lifecycle", "SELF_CHECK_INTERNAL_ERROR", OfflineReason.RUNTIME_UNAVAILABLE);
   }
 
   private static Throwable unwrap(Throwable error) {
@@ -279,5 +578,24 @@ public final class PaperStartupCoordinator implements AutoCloseable {
     return current;
   }
 
+  private static final class Attempt {
+    private final long generation;
+    private final AttemptKind kind;
+    private final AtomicReference<RuntimeConnectAttempt> connectionAttempt =
+        new AtomicReference<>();
+    private final AtomicReference<AuthenticatedRuntimeConnection> candidate =
+        new AtomicReference<>();
+    private final CompletableFuture<Boolean> completion = new CompletableFuture<>();
+    private volatile DesiredMode persistedDesiredMode;
+
+    private Attempt(long generation, AttemptKind kind, DesiredMode fallbackDesiredMode) {
+      this.generation = generation;
+      this.kind = kind;
+      this.persistedDesiredMode = fallbackDesiredMode;
+    }
+  }
+
   private record Candidate(CoreReadiness readiness, AuthenticatedRuntimeConnection connection) {}
+
+  private record FailureDetails(String stage, String code, OfflineReason reason) {}
 }

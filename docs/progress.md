@@ -4,7 +4,7 @@ Last updated: 2026-07-12
 
 ## Current status
 
-Phase 0 through Phase 3 are complete. Phase 4 Offline controls are next.
+Phase 0 through Phase 4 are complete. Phase 5 basic conversation is next.
 
 ## Locked decisions
 
@@ -32,6 +32,12 @@ Phase 0 through Phase 3 are complete. Phase 4 Offline controls are next.
   public `CommandMap` only after every core check succeeds. An initial failure
   requires an external fix and server restart; Phase 4 `/agent on` cannot recover
   a command that was never registered.
+- Paper persists only the desired ENABLED/DISABLED mode. Runtime loss changes
+  operational state to OFFLINE without rewriting that preference. Every Online
+  permit carries a monotonic epoch so work admitted before an Offline transition
+  remains invalid after a later recovery.
+- Toggle authorization is local console, a configured Owner UUID, or a live OP
+  with `minecraftagent.admin.toggle` when `allow-op-toggle` is explicitly enabled.
 
 ## Phase 0: repository scaffold
 
@@ -128,12 +134,46 @@ Completed:
       command labels, verifies identity after public `CommandMap` registration,
       refreshes online-player command trees, and performs identity-only rollback
       and disable cleanup.
-- [x] `/agent` and `/agent doctor` expose readiness and stable warning codes only.
-      Runtime loss removes the command. Offline controls, requests, tools, and
-      models are not part of this command surface.
+- [x] `/agent` and `/agent doctor` expose readiness and stable warning codes.
+      Phase 4 supersedes the original disconnect behavior: Runtime loss now
+      retains the registered command and enters Offline.
 - [x] Paper `1.21.11-132` smoke with the pinned SHA-256 proves authenticated
       registration, both labels, doctor degradation, and absence for unavailable,
       mismatched-token, and incompatible-protocol cases.
+
+## Phase 4: persistent emergency Offline
+
+Completed:
+
+- [x] Operational state, desired mode, and health are separate immutable
+      dimensions. `DEGRADED` remains usable ONLINE health, not an Offline state.
+- [x] A monotonic `OperationalGate` issues permits only while ONLINE and rejects
+      every permit from an earlier epoch, including after a successful recovery.
+- [x] Paper owns a strict 4 KiB `agent-state.yml`. Missing state defaults to
+      ENABLED; malformed, aliased, duplicated, unknown, symlinked, non-private,
+      or non-regular state fails closed. Writes use a forced `0600` temporary,
+      atomic replacement, and a private `0700` directory.
+- [x] `/agent off` first enters STOPPING and closes admission, detaches the
+      authenticated connection, invokes request/proposal/operation/client cleanup
+      ports with exception isolation, persists DISABLED off-thread, then enters
+      OFFLINE. A persistence failure never returns Online.
+- [x] `/agent on` is asynchronous and reruns configuration, platform, security,
+      state, descriptor, optional capability, protocol, token, and Runtime checks.
+      It persists ENABLED before publishing ONLINE; failure returns the exact safe
+      message and leaves the registered command Offline.
+- [x] Runtime disconnect enters OFFLINE/RUNTIME_UNAVAILABLE, invalidates the
+      current epoch, invokes cleanup, retains desired ENABLED, and does not remove
+      either command label. There is no automatic reconnect in Phase 4.
+- [x] Offline command dispatch precedes ordinary permission, doctor, and usage
+      handling. Every non-exact `on`/`off` form returns one exact `AI offline`.
+      Toggle commands still require console, Owner UUID, or the explicitly enabled
+      OP policy.
+- [x] Initial core failure still leaves `/agent` absent. Persisted DISABLED startup
+      still completes the full Runtime handshake before registering the command
+      Offline, so Offline cannot bypass the startup trust gate.
+- [x] The real Paper lifecycle smoke proves manual off, `0600` persistence,
+      restart remaining Offline, explicit recovery, Runtime-loss command retention,
+      recovery against a restarted Runtime, and clean identity-only unregistration.
 
 ## Verification
 
@@ -157,19 +197,24 @@ Results:
 - Runtime: 8 Vitest files, 59 tests passed; TypeScript build, ESLint, and
   Prettier passed; full and production-only npm audits reported 0
   vulnerabilities.
-- Paper: build and Spotless passed; 83 tests passed, including 38 shared dynamic
-  Schema/HMAC cases plus strict local startup, real WebSocket fake-peer
-  integration, lifecycle races, command-map transactions, doctor output, and
-  descriptor tests.
+- Paper: build and Spotless passed; 120 tests passed, including 38 shared dynamic
+  Schema/HMAC cases plus strict desired-state parsing/atomic persistence,
+  operational epoch invalidation, Owner/OP/console authorization, cancellable
+  real-WebSocket handshakes, lifecycle/persistence races, command-map
+  transactions, exact Offline output, doctor output, and descriptor tests.
 - Fabric: remapped JAR build and Spotless passed; 39 tests passed, including the
   same 38 shared protocol cases plus client metadata.
 - Both JVM reports contain no remote Schema load, `UnknownHostException`,
   invalid-schema error, skipped test, or failed test.
 - Paper `1.21.11-132` JAR SHA-256
   `5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba`
-  passed authenticated, unavailable, token-mismatch, and incompatible-protocol
-  cases at `-Xms256M -Xmx512M`; both labels and doctor executed only in the
-  authenticated case, and no Paper or Runtime process remained.
+  passed Offline lifecycle, unavailable, token-mismatch, and
+  incompatible-protocol cases at `-Xms256M -Xmx512M`. The lifecycle case proved
+  online doctor degradation, exact per-command Offline output, `0600` DISABLED
+  persistence, restart remaining Offline, successful on, Runtime-loss retention,
+  failed on while Runtime was absent, successful on after Runtime restart, both
+  command labels, and exception-free plugin disable. No Paper, Runtime, or
+  Gradle process remained.
 - Packaged Runtime preserved its compiled handshake endpoint, configuration
   template, and protocol schemas. The production CLI still fails closed at
   `PROVIDER_UNSUPPORTED` before binding because no production model provider
@@ -187,10 +232,12 @@ module is loaded; it is not suppressed.
 ## Explicitly not implemented
 
 - Production model-provider network health adapter or any model request.
-- Runtime-Paper application messages, heartbeat, or reconnect. Phase 3 supports
-  the authenticated hello only.
-- Offline state persistence and `/agent on` or `/agent off`. The registered
-  Phase 3 command exposes readiness and doctor only.
+- Runtime-Paper application messages, heartbeat, or automatic reconnect. The
+  transport accepts the authenticated hello only; Phase 4 recovery creates a
+  fresh authenticated connection only after explicit `/agent on`.
+- Request queues, proposal repositories, executable tools, and client transfers.
+  Phase 4 provides their mandatory cleanup ports and epoch validation contract,
+  but no such producer exists yet and no end-to-end cleanup is claimed.
 - SQLite migrations or repositories in either process; Phase 2 only owns the
   Runtime startup-readiness file and connection.
 - Session resume, module routing, rate limiting, or cost accounting.
@@ -253,10 +300,11 @@ adapter.
 
 ## Next gates
 
-1. Implement Phase 4 desired mode, persistent Offline state, `/agent off`, and
-   `/agent on` without weakening the initial conditional-registration gate.
-2. Define authenticated-connection loss and explicit recheck behavior before
-   adding reconnect or heartbeat messages.
+1. Implement Phase 5 `/agent say`, private replies, bounded per-player request
+   concurrency, cancellation, timeout handling, and fallback text.
+2. Bind every Phase 5 request and late Runtime response to an OperationalGate
+   epoch; Runtime application messages remain disabled until that validation is
+   present on both ingress and the final side-effect boundary.
 3. Preserve the Phase 2 startup gate when the production provider health adapter
    is introduced for the first model-backed phase.
 4. Add Gradle dependency-verification metadata before calling a release

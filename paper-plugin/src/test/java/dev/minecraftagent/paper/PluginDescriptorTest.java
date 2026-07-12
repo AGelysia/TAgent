@@ -16,6 +16,12 @@ class PluginDescriptorTest {
       var descriptor = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
       assertTrue(descriptor.contains("main: dev.minecraftagent.paper.MinecraftAgentPlugin"));
       assertTrue(descriptor.contains("minecraftagent.command.agent:"));
+      assertTrue(descriptor.contains("minecraftagent.admin.toggle:"));
+      assertTrue(
+          descriptor.contains(
+              "minecraftagent.admin.toggle:\n"
+                  + "    description: Allows authorized administrators to toggle Minecraft Agent\n"
+                  + "    default: op"));
       assertFalse(descriptor.contains("commands:"));
     }
   }

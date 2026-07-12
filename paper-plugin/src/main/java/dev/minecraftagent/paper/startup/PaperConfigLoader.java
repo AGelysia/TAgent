@@ -16,9 +16,12 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
 import java.time.Duration;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 import java.util.regex.Pattern;
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
@@ -34,9 +37,15 @@ public final class PaperConfigLoader {
       Pattern.compile("(?i)(?:change-?me|replace-with-.*|your[-_].*)");
   private static final Pattern DIRECTORY_SEGMENT =
       Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,127}");
+  private static final Pattern OWNER_UUID =
+      Pattern.compile(
+          "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+  private static final int MAX_OWNERS = 128;
 
-  private static final Set<String> ROOT_KEYS =
+  private static final Set<String> PHASE_3_ROOT_KEYS =
       Set.of("config-version", "server", "runtime", "state", "security", "capabilities");
+  private static final Set<String> ROOT_KEYS_WITH_OWNERS =
+      Set.of("config-version", "server", "owners", "runtime", "state", "security", "capabilities");
   private static final Set<String> SERVER_KEYS = Set.of("id");
   private static final Set<String> RUNTIME_KEYS =
       Set.of("url", "server-token", "connect-timeout-millis", "handshake-timeout-millis");
@@ -52,7 +61,10 @@ public final class PaperConfigLoader {
     Objects.requireNonNull(environment);
 
     var root = parseRoot(configFile);
-    requireExactKeys(root, ROOT_KEYS, StartupFailure.Code.PAPER_CONFIG_INVALID);
+    requireExactKeys(
+        root,
+        root.containsKey("owners") ? ROOT_KEYS_WITH_OWNERS : PHASE_3_ROOT_KEYS,
+        StartupFailure.Code.PAPER_CONFIG_INVALID);
     if (requireInteger(root, "config-version", StartupFailure.Code.PAPER_CONFIG_INVALID) != 1) {
       throw failure(StartupFailure.Code.PAPER_CONFIG_INVALID, StartupFailure.Stage.CONFIG);
     }
@@ -63,6 +75,7 @@ public final class PaperConfigLoader {
     if (!SERVER_ID.matcher(serverId).matches()) {
       throw failure(StartupFailure.Code.PAPER_CONFIG_INVALID, StartupFailure.Stage.CONFIG);
     }
+    var owners = root.containsKey("owners") ? requireOwners(root) : Set.<UUID>of();
 
     var runtime =
         requireMapping(root, "runtime", RUNTIME_KEYS, StartupFailure.Code.PAPER_CONFIG_INVALID);
@@ -98,6 +111,7 @@ public final class PaperConfigLoader {
 
     return new PaperStartupConfig(
         serverId,
+        owners,
         new PaperStartupConfig.RuntimeSettings(
             endpoint, serverToken, connectTimeout, handshakeTimeout),
         stateDirectory,
@@ -235,6 +249,25 @@ public final class PaperConfigLoader {
     } catch (IllegalArgumentException exception) {
       throw failure(StartupFailure.Code.CORE_POLICY_INVALID, StartupFailure.Stage.SECURITY_POLICY);
     }
+  }
+
+  private static Set<UUID> requireOwners(Map<?, ?> root) throws StartupFailure {
+    var value = root.get("owners");
+    if (!(value instanceof List<?> entries) || entries.size() > MAX_OWNERS) {
+      throw failure(StartupFailure.Code.PAPER_CONFIG_INVALID, StartupFailure.Stage.CONFIG);
+    }
+
+    var owners = new LinkedHashSet<UUID>();
+    for (var entry : entries) {
+      if (!(entry instanceof String text) || !OWNER_UUID.matcher(text).matches()) {
+        throw failure(StartupFailure.Code.PAPER_CONFIG_INVALID, StartupFailure.Stage.CONFIG);
+      }
+      var owner = UUID.fromString(text);
+      if (!owners.add(owner)) {
+        throw failure(StartupFailure.Code.PAPER_CONFIG_INVALID, StartupFailure.Stage.CONFIG);
+      }
+    }
+    return Set.copyOf(owners);
   }
 
   private static Path resolveContainedDirectory(

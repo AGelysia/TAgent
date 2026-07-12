@@ -1,6 +1,6 @@
 # Operations
 
-## Phase 0-3 purpose
+## Phase 0-4 purpose
 
 The repository remains a development implementation, not a deployable Minecraft
 Agent service. Its useful operations are build, format, contract, readiness,
@@ -8,11 +8,11 @@ and focused integration tests. The Runtime has strict configuration, local
 filesystem/SQLite/Schema checks, an injectable provider-health port, and a
 loopback `/health` route. Paper Phase 3 adds strict startup inputs, a
 Paper-initiated authenticated Runtime hello, non-executable core descriptors,
-and conditional `/agent` registration components. The Fabric artifact remains
-an entry-point scaffold.
+conditional `/agent` registration, and persistent emergency Offline controls.
+The Fabric artifact remains an entry-point scaffold.
 
 No real API key, production server token, model account, or Litematica
-installation is required for automated Phase 0-3 checks. Tests use temporary
+installation is required for automated Phase 0-4 checks. Tests use temporary
 secrets, private temporary directories, ephemeral loopback ports, fake provider
 adapters, and a fake incompatible Runtime. The exact Paper `1.21.11-132` server
 is used by the Phase 3 decision smoke; successful and token-mismatch cases use
@@ -44,7 +44,7 @@ org.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m
 
 Run one build at a time. Do not run Gradle and npm checks concurrently. Avoid
 Docker, Testcontainers, a local Paper server, or a graphical Fabric client for
-routine Phase 0-3 validation. The pinned Paper smoke is a short, explicit
+routine Phase 0-4 validation. The pinned Paper smoke is a short, explicit
 exception and must not be left running on this host.
 
 If memory pressure appears, keep the one-worker policy and run each subproject
@@ -163,8 +163,9 @@ bodies, API keys, server tokens, or unknown YAML key text.
 Paper configuration is strict and closed. The Runtime endpoint must be
 `ws://127.0.0.1:<port>/agent`, and `runtime.server-token` must be a whole-scalar
 environment reference such as `${MINECRAFT_AGENT_SERVER_TOKEN}`. Do not put a
-real token in `config.yml`. State paths remain beneath the plugin data directory,
-and the security policy must retain `allow-op-toggle: false`.
+real token in `config.yml`. State paths remain beneath the plugin data directory.
+`allow-op-toggle` defaults to false; do not enable it unless every live OP should
+be eligible for the dedicated toggle permission.
 
 The Phase 3 startup order is:
 
@@ -184,6 +185,54 @@ block registration. Any core failure leaves both `agent` and
 `minecraftagent:agent` absent. Correct the configuration, state permissions,
 Runtime availability, token, or protocol externally and restart the server.
 Phase 4 `/agent on` is not an initial-startup recovery mechanism.
+
+## Paper Phase 4 Offline controls
+
+The generated configuration has an empty `owners` list. With that secure
+default, only the local server console may use `/agent on` or `/agent off`.
+Configured Owner UUIDs may toggle without OP status. Ordinary OPs require both:
+
+```yaml
+security:
+  allow-op-toggle: true
+```
+
+and the `minecraftagent.admin.toggle` permission, whose descriptor default is
+`op`. Remote console and command-block senders are not treated as the local
+console.
+
+Paper stores the desired mode at:
+
+```text
+plugins/MinecraftAgent/state/agent-state.yml
+```
+
+The state directory must be `0700` and the file `0600`. Do not hand-edit it
+while Paper is running. A missing file means ENABLED. An existing malformed,
+unknown-version, aliased, duplicated, symlinked, non-regular, or overbroad file
+is a core startup failure; Paper never treats corrupt state as permission to
+enable the Agent.
+
+The state directory is pinned for one plugin lifecycle. Change
+`state.directory` only while Paper is stopped and move the private state file
+with it; a live recovery rejects a directory change instead of splitting writes
+between two stores.
+
+`/agent off` closes admission immediately, invalidates the current work epoch,
+detaches Runtime, invokes all cleanup ports, then writes DISABLED on the worker.
+Until ONLINE, every command other than an exact one-argument `on` or `off`
+returns exactly `AI offline`. `/agent on` returns immediately, repeats the full
+local check and authenticated handshake, persists ENABLED, and only then returns
+Online. Failure leaves the Agent Offline and prints:
+
+```text
+AI remains offline. Check the server console.
+```
+
+A Runtime disconnect enters Offline but does not write DISABLED. Restart the
+Runtime, then use `/agent on`; Phase 4 deliberately has no automatic reconnect.
+If `/agent` was never registered because initial startup failed, fix the cause
+and restart Paper instead.
 
 The six core entries are only readiness descriptors:
 
@@ -237,7 +286,7 @@ warning for plan compatibility and should not be used. A group/world-writable
 configuration is always rejected. Inline secrets additionally require a private
 configuration file; inline secrets and broad read permissions may not be combined.
 
-## Phase 3 conditional-registration validation
+## Phase 3-4 Paper validation
 
 [ADR 0001](adr/0001-phase3-conditional-command-registration.md) records the
 selected public `Server#getCommandMap` late-registration design. API-level unit
@@ -255,16 +304,20 @@ case. Its real-server matrix is:
 - Runtime unavailable, invalid token/proof, and incompatible protocol: neither
   command label exists.
 - Optional capability warning: readiness is `DEGRADED` and the command exists.
-- Registration failure and disable cleanup, online-player `updateCommands()`
-  invocation, and stale completion are verified by focused JVM tests. The smoke
-  does not connect a real Minecraft client, so client-side tree refresh remains
-  an explicit later integration gap.
+- Offline lifecycle: manual off persists a `0600` DISABLED state, restart remains
+  Offline with both labels registered, explicit on recovers, Runtime loss retains
+  the command, and a second on recovers against a restarted Runtime.
+- Dynamic identity mappings are removed through Paper's supported map removal
+  path, and both server stops must disable the plugin without an exception.
+- Online-player `updateCommands()` invocation and stale completion are verified
+  by focused JVM tests. The smoke does not connect a real Minecraft client, so
+  client-side tree refresh remains an explicit later integration gap.
 
 The exact commands, artifact hash, and outcomes are recorded in
 `docs/progress.md`. An initial core failure has no command recovery path; fix it
 externally and restart.
 
-## Troubleshooting Phase 0-3
+## Troubleshooting Phase 0-4
 
 ### Dependency resolution fails
 
@@ -292,10 +345,17 @@ or raw peer message. Check the strict Paper configuration, state permissions,
 fake or local Runtime availability, token match, and protocol version, then
 restart. There is no initial `/agent on` path.
 
-Even after registration, Phase 3 `/agent` is readiness/doctor only. Model
-requests, Offline controls, typed tool execution, proposals, Capability Packs,
-client payloads, overlays, and Litematica adapters remain later phases. The
-Fabric entry point is still a scaffold.
+After registration, Phase 4 adds only readiness, doctor, and Offline toggles.
+Model requests, typed tool execution, proposals, Capability Packs, client
+payloads, overlays, and Litematica adapters remain later phases. The Fabric
+entry point is still a scaffold.
+
+### `/agent` exists but returns `AI offline`
+
+This is expected after manual off, restart with persisted DISABLED, Runtime
+loss, or a failed recovery. Check the stable console code and Runtime first.
+An authorized local console, Owner, or explicitly enabled OP may run `/agent on`.
+Do not delete or loosen permissions on the state file as a recovery shortcut.
 
 ### Runtime exits with `PROVIDER_UNSUPPORTED`
 

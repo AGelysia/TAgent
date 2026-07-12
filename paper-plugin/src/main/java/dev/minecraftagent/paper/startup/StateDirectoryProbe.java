@@ -10,10 +10,11 @@ import java.nio.channels.FileChannel;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.nio.file.attribute.UserPrincipal;
 import java.util.Set;
 import java.util.UUID;
 
@@ -34,9 +35,10 @@ public final class StateDirectoryProbe {
 
     try {
       ensureDataDirectory(root);
-      createPrivatePath(root, target);
-      verifyPrivatePermissions(target, PRIVATE_DIRECTORY_PERMISSIONS);
-      probeWrite(target);
+      var rootOwner = verifyPrivateDirectory(root, null);
+      createPrivatePath(root, target, rootOwner);
+      verifyPrivateDirectory(target, rootOwner);
+      probeWrite(target, rootOwner);
     } catch (StartupFailure failure) {
       throw failure;
     } catch (IOException exception) {
@@ -51,13 +53,14 @@ public final class StateDirectoryProbe {
       Files.createDirectories(
           root, PosixFilePermissions.asFileAttribute(PRIVATE_DIRECTORY_PERMISSIONS));
     }
-    var attributes = Files.readAttributes(root, BasicFileAttributes.class, NOFOLLOW_LINKS);
+    var attributes = Files.readAttributes(root, PosixFileAttributes.class, NOFOLLOW_LINKS);
     if (attributes.isSymbolicLink() || !attributes.isDirectory()) {
       throw unsafe();
     }
   }
 
-  private static void createPrivatePath(Path root, Path target) throws IOException, StartupFailure {
+  private static void createPrivatePath(Path root, Path target, UserPrincipal rootOwner)
+      throws IOException, StartupFailure {
     var current = root;
     for (var segment : root.relativize(target)) {
       current = current.resolve(segment);
@@ -69,15 +72,16 @@ public final class StateDirectoryProbe {
           // Validate the path below; it may have appeared between the existence check and create.
         }
       }
-      var attributes = Files.readAttributes(current, BasicFileAttributes.class, NOFOLLOW_LINKS);
+      var attributes = Files.readAttributes(current, PosixFileAttributes.class, NOFOLLOW_LINKS);
       if (attributes.isSymbolicLink() || !attributes.isDirectory()) {
         throw unsafe();
       }
-      verifyPrivatePermissions(current, PRIVATE_DIRECTORY_PERMISSIONS);
+      verifyPrivateDirectory(current, rootOwner);
     }
   }
 
-  private static void probeWrite(Path directory) throws IOException, StartupFailure {
+  private static void probeWrite(Path directory, UserPrincipal expectedOwner)
+      throws IOException, StartupFailure {
     var probe = directory.resolve(".startup-probe-" + UUID.randomUUID());
     var created = false;
     try {
@@ -93,7 +97,7 @@ public final class StateDirectoryProbe {
         }
         channel.force(true);
       }
-      verifyPrivatePermissions(probe, PRIVATE_FILE_PERMISSIONS);
+      verifyPrivateFile(probe, expectedOwner);
     } finally {
       if (created) {
         Files.deleteIfExists(probe);
@@ -101,10 +105,27 @@ public final class StateDirectoryProbe {
     }
   }
 
-  private static void verifyPrivatePermissions(
-      Path path, Set<PosixFilePermission> expectedPermissions) throws IOException, StartupFailure {
+  private static UserPrincipal verifyPrivateDirectory(Path path, UserPrincipal expectedOwner)
+      throws IOException, StartupFailure {
     var view = Files.getFileAttributeView(path, PosixFileAttributeView.class, NOFOLLOW_LINKS);
-    if (view == null || !view.readAttributes().permissions().equals(expectedPermissions)) {
+    if (view == null) {
+      throw unsafe();
+    }
+    var attributes = view.readAttributes();
+    if (!attributes.isDirectory()
+        || !attributes.permissions().equals(PRIVATE_DIRECTORY_PERMISSIONS)
+        || (expectedOwner != null && !attributes.owner().equals(expectedOwner))) {
+      throw unsafe();
+    }
+    return attributes.owner();
+  }
+
+  private static void verifyPrivateFile(Path path, UserPrincipal expectedOwner)
+      throws IOException, StartupFailure {
+    var attributes = Files.readAttributes(path, PosixFileAttributes.class, NOFOLLOW_LINKS);
+    if (!attributes.isRegularFile()
+        || !attributes.permissions().equals(PRIVATE_FILE_PERMISSIONS)
+        || !attributes.owner().equals(expectedOwner)) {
       throw unsafe();
     }
   }

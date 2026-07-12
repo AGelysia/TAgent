@@ -4,10 +4,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import dev.minecraftagent.paper.command.AgentDiagnostics;
+import dev.minecraftagent.paper.command.AgentControl.RecoveryDisposition;
 import dev.minecraftagent.paper.command.CommandRegistrationFailure;
 import dev.minecraftagent.paper.startup.StartupFailure;
+import dev.minecraftagent.paper.state.DesiredModeStore;
 import dev.minecraftagent.paper.transport.AuthenticatedRuntimeConnection;
+import dev.minecraftagent.paper.transport.RuntimeConnectAttempt;
 import dev.minecraftagent.paper.transport.RuntimeConnectionFailure;
 import dev.minecraftagent.paper.transport.RuntimeConnectionSettings;
 import dev.minecraftagent.paper.transport.RuntimeConnector;
@@ -17,262 +19,506 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
 
 class PaperStartupCoordinatorTest {
   @Test
-  void returnsImmediatelyAndRegistersExactlyOnceAfterAuthentication() throws Exception {
-    var connector = new FakeConnector();
-    var main = new QueuedMainThread();
-    var commands = new FakeCommandGate();
-    var events = new RecordingEvents();
-    var releaseCheck = new CompletableFuture<Void>();
-    var coordinator =
-        coordinator(
-            () -> {
-              releaseCheck.join();
-              return readiness(List.of());
-            },
-            connector,
-            main,
-            commands,
-            () -> true,
-            events);
+  void initialSuccessRegistersExactlyOnceAndPublishesSeparatedHealth() throws Exception {
+    var fixture = fixture(DesiredMode.ENABLED, List.of("OPTIONAL_CAPABILITY_UNAVAILABLE"));
 
-    coordinator.start();
-    assertEquals(0, commands.registerCalls);
-    assertEquals(AgentDiagnostics.State.STARTING, coordinator.diagnostics().state());
+    fixture.coordinator.start();
+    assertEquals(AgentState.STARTING, fixture.coordinator.diagnostics().state());
+    var connection = fixture.connector.completeNext();
+    fixture.finishMainTransition();
 
-    releaseCheck.complete(null);
-    var connection = new FakeConnection();
-    await(() -> connector.connectCalls == 1);
-    connector.result.complete(connection);
-    await(main::hasTasks);
-    main.drain();
-
-    assertEquals(1, commands.registerCalls);
-    assertEquals(AgentDiagnostics.State.ONLINE, coordinator.diagnostics().state());
-    assertEquals(List.of("ONLINE"), events.availableStates);
-    coordinator.close();
+    assertEquals(1, fixture.commands.registerCalls);
+    assertEquals(AgentState.ONLINE, fixture.coordinator.diagnostics().state());
+    assertEquals(AgentHealth.DEGRADED, fixture.coordinator.diagnostics().health());
+    assertEquals(List.of(AgentHealth.DEGRADED), fixture.events.availableHealth);
+    assertTrue(fixture.coordinator.operationalGate().tryAcquire().isPresent());
+    fixture.close();
   }
 
   @Test
-  void coreFailureNeverAttemptsRuntimeOrRegistration() throws Exception {
-    var connector = new FakeConnector();
-    var main = new QueuedMainThread();
-    var commands = new FakeCommandGate();
-    var events = new RecordingEvents();
-    var coordinator =
-        coordinator(
-            () -> {
-              throw new StartupFailure(
-                  StartupFailure.Code.STATE_DIRECTORY_UNSAFE, StartupFailure.Stage.STATE);
-            },
-            connector,
-            main,
-            commands,
-            () -> true,
-            events);
+  void initialCoreOrRuntimeFailureNeverRegistersTheCommand() throws Exception {
+    var coreFailure = fixture(DesiredMode.ENABLED, List.of());
+    coreFailure.checkFailure =
+        new StartupFailure(StartupFailure.Code.STATE_DIRECTORY_UNSAFE, StartupFailure.Stage.STATE);
+    coreFailure.coordinator.start();
+    coreFailure.finishMainTransition();
 
-    coordinator.start();
-    await(main::hasTasks);
-    main.drain();
+    assertEquals(0, coreFailure.connector.connectCalls);
+    assertEquals(0, coreFailure.commands.registerCalls);
+    assertEquals(AgentState.UNREGISTERED, coreFailure.coordinator.diagnostics().state());
+    assertEquals("STATE_DIRECTORY_UNSAFE", coreFailure.coordinator.diagnostics().failureCode());
+    coreFailure.close();
 
-    assertEquals(0, connector.connectCalls);
-    assertEquals(0, commands.registerCalls);
-    assertEquals("STATE_DIRECTORY_UNSAFE", coordinator.diagnostics().failureCode());
-    assertEquals(List.of("STATE:STATE_DIRECTORY_UNSAFE"), events.failures);
-    coordinator.close();
-  }
-
-  @Test
-  void runtimeAuthenticationFailureNeverRegisters() throws Exception {
-    var connector = new FakeConnector();
-    var main = new QueuedMainThread();
-    var commands = new FakeCommandGate();
-    var events = new RecordingEvents();
-    var coordinator =
-        coordinator(() -> readiness(List.of()), connector, main, commands, () -> true, events);
-
-    coordinator.start();
-    await(() -> connector.connectCalls == 1);
-    connector.result.completeExceptionally(
+    var runtimeFailure = fixture(DesiredMode.ENABLED, List.of());
+    runtimeFailure.coordinator.start();
+    runtimeFailure.connector.failNext(
         new RuntimeConnectionFailure("TOKEN_AUTH_FAILED", "authentication"));
-    await(main::hasTasks);
-    main.drain();
+    runtimeFailure.finishMainTransition();
 
-    assertEquals(0, commands.registerCalls);
-    assertEquals("TOKEN_AUTH_FAILED", coordinator.diagnostics().failureCode());
-    coordinator.close();
+    assertEquals(0, runtimeFailure.commands.registerCalls);
+    assertEquals(AgentState.UNREGISTERED, runtimeFailure.coordinator.diagnostics().state());
+    assertEquals("TOKEN_AUTH_FAILED", runtimeFailure.coordinator.diagnostics().failureCode());
+    runtimeFailure.close();
   }
 
   @Test
-  void optionalCapabilityFailureRegistersInDegradedHealth() throws Exception {
-    var connector = new FakeConnector();
-    var main = new QueuedMainThread();
-    var commands = new FakeCommandGate();
-    var events = new RecordingEvents();
-    var coordinator =
-        coordinator(
-            () -> readiness(List.of("OPTIONAL_CAPABILITY_UNAVAILABLE")),
-            connector,
-            main,
-            commands,
-            () -> true,
-            events);
+  void persistedDisabledModeStillAuthenticatesThenRegistersOffline() throws Exception {
+    var fixture = fixture(DesiredMode.DISABLED, List.of());
 
-    coordinator.start();
-    await(() -> connector.connectCalls == 1);
-    connector.result.complete(new FakeConnection());
-    await(main::hasTasks);
-    main.drain();
+    fixture.coordinator.start();
+    var connection = fixture.connector.completeNext();
+    fixture.finishMainTransition();
 
-    assertEquals(1, commands.registerCalls);
-    assertEquals(AgentDiagnostics.State.DEGRADED, coordinator.diagnostics().state());
-    assertEquals(List.of("optional-capabilities:OPTIONAL_CAPABILITY_UNAVAILABLE"), events.warnings);
-    coordinator.close();
-  }
-
-  @Test
-  void disableDuringHandshakeClosesLateSuccessWithoutRegistration() throws Exception {
-    var connector = new FakeConnector();
-    var main = new QueuedMainThread();
-    var commands = new FakeCommandGate();
-    var coordinator =
-        coordinator(
-            () -> readiness(List.of()),
-            connector,
-            main,
-            commands,
-            () -> false,
-            new RecordingEvents());
-
-    coordinator.start();
-    await(() -> connector.connectCalls == 1);
-    coordinator.close();
-    var connection = new FakeConnection();
-    connector.result.complete(connection);
-    await(() -> connection.closeCalls > 0);
-    main.drain();
-
-    assertEquals(0, commands.registerCalls);
+    assertEquals(1, fixture.connector.connectCalls);
+    assertEquals(1, fixture.commands.registerCalls);
+    assertTrue(fixture.commands.registered);
+    assertEquals(AgentState.OFFLINE, fixture.coordinator.diagnostics().state());
+    assertEquals(DesiredMode.DISABLED, fixture.coordinator.diagnostics().desiredMode());
+    assertEquals(OfflineReason.MANUAL, fixture.coordinator.diagnostics().offlineReason());
     assertFalse(connection.isOpen());
-    assertEquals(AgentDiagnostics.State.STOPPED, coordinator.diagnostics().state());
+    fixture.close();
   }
 
   @Test
-  void commandConflictClosesTheAuthenticatedConnection() throws Exception {
-    var connector = new FakeConnector();
-    var main = new QueuedMainThread();
-    var commands = new FakeCommandGate();
-    commands.registrationFailure = new CommandRegistrationFailure("COMMAND_LABEL_CONFLICT");
-    var coordinator =
-        coordinator(
-            () -> readiness(List.of()),
-            connector,
-            main,
-            commands,
-            () -> true,
-            new RecordingEvents());
-    var connection = new FakeConnection();
-
-    coordinator.start();
-    await(() -> connector.connectCalls == 1);
-    connector.result.complete(connection);
-    await(main::hasTasks);
-    main.drain();
-
-    assertFalse(connection.isOpen());
-    assertEquals("COMMAND_LABEL_CONFLICT", coordinator.diagnostics().failureCode());
-    assertFalse(commands.registered);
-    coordinator.close();
-  }
-
-  @Test
-  void anAuthenticatedConnectionLossRemovesTheCommand() throws Exception {
-    var connector = new FakeConnector();
-    var main = new QueuedMainThread();
-    var commands = new FakeCommandGate();
-    var coordinator =
-        coordinator(
-            () -> readiness(List.of()),
-            connector,
-            main,
-            commands,
-            () -> true,
-            new RecordingEvents());
-    var connection = new FakeConnection();
-
-    coordinator.start();
-    await(() -> connector.connectCalls == 1);
-    connector.result.complete(connection);
-    await(main::hasTasks);
-    main.drain();
-    assertTrue(commands.registered);
+  void runtimeLossClosesAdmissionButKeepsCommandAndDesiredMode() throws Exception {
+    var cleanupCalls = new ArrayList<String>();
+    var fixture = fixture(DesiredMode.ENABLED, List.of(), cleanup(cleanupCalls, false));
+    fixture.coordinator.start();
+    var connection = fixture.connector.completeNext();
+    fixture.finishMainTransition();
+    var permit = fixture.coordinator.operationalGate().tryAcquire().orElseThrow();
 
     connection.remoteClose();
-    await(main::hasTasks);
-    main.drain();
+    fixture.finishMainTransition();
 
-    assertFalse(commands.registered);
-    assertEquals("RUNTIME_CONNECTION_LOST", coordinator.diagnostics().failureCode());
+    assertTrue(fixture.commands.registered);
+    assertEquals(0, fixture.commands.unregisterCalls);
+    assertEquals(AgentState.OFFLINE, fixture.coordinator.diagnostics().state());
+    assertEquals(DesiredMode.ENABLED, fixture.coordinator.diagnostics().desiredMode());
+    assertEquals(
+        OfflineReason.RUNTIME_UNAVAILABLE, fixture.coordinator.diagnostics().offlineReason());
+    assertFalse(fixture.coordinator.operationalGate().revalidate(permit));
+    assertEquals(List.of("requests", "proposals", "operations", "client"), cleanupCalls);
+    assertTrue(fixture.store.saves.isEmpty());
+    fixture.close();
+  }
+
+  @Test
+  void manualOffInvalidatesOldEpochCleansEverythingAndPersistsDisabled() throws Exception {
+    var cleanupCalls = new ArrayList<String>();
+    var fixture = fixture(DesiredMode.ENABLED, List.of(), cleanup(cleanupCalls, true));
+    fixture.coordinator.start();
+    var connection = fixture.connector.completeNext();
+    fixture.finishMainTransition();
+    var permit = fixture.coordinator.operationalGate().tryAcquire().orElseThrow();
+
+    fixture.coordinator.turnOff();
+
+    assertEquals(AgentState.STOPPING, fixture.coordinator.diagnostics().state());
+    assertFalse(fixture.coordinator.operationalGate().revalidate(permit));
+    assertFalse(connection.isOpen());
+    fixture.finishUntil(() -> fixture.coordinator.diagnostics().state() == AgentState.OFFLINE);
+
+    assertEquals(DesiredMode.DISABLED, fixture.store.mode);
+    assertEquals(List.of(DesiredMode.DISABLED), fixture.store.saves);
+    assertEquals(List.of("requests", "proposals", "operations", "client"), cleanupCalls);
+    assertEquals(List.of("offline-cleanup:PROPOSAL_INVALIDATION_FAILED"), fixture.events.failures);
+    assertTrue(fixture.commands.registered);
+    fixture.close();
+  }
+
+  @Test
+  void recoveryRechecksReconnectsAndPersistsBeforePublishingOnline() throws Exception {
+    var fixture = fixture(DesiredMode.ENABLED, List.of());
+    fixture.coordinator.start();
+    fixture.connector.completeNext();
+    fixture.finishMainTransition();
+    fixture.activeConnection().remoteClose();
+    fixture.finishMainTransition();
+
+    var recovery = fixture.coordinator.turnOn();
+    assertEquals(RecoveryDisposition.STARTED, recovery.disposition());
+    var duplicate = fixture.coordinator.turnOn();
+    assertEquals(RecoveryDisposition.ALREADY_STARTING, duplicate.disposition());
+    assertEquals(AgentState.STARTING, fixture.coordinator.diagnostics().state());
+    var replacement = fixture.connector.completeNext();
+    fixture.finishUntil(() -> recovery.completion().toCompletableFuture().isDone());
+
+    assertTrue(recovery.completion().toCompletableFuture().join());
+    assertTrue(replacement.isOpen());
+    assertEquals(2, fixture.checkCalls.get());
+    assertEquals(2, fixture.connector.connectCalls);
+    assertEquals(1, fixture.commands.registerCalls);
+    assertEquals(List.of(DesiredMode.ENABLED), fixture.store.saves);
+    assertEquals(AgentState.ONLINE, fixture.coordinator.diagnostics().state());
+    fixture.close();
+  }
+
+  @Test
+  void failedRecoveryStaysOfflineAndClosesCandidate() throws Exception {
+    var fixture = fixture(DesiredMode.DISABLED, List.of());
+    fixture.coordinator.start();
+    fixture.connector.completeNext();
+    fixture.finishMainTransition();
+    fixture.store.saveFailure =
+        new StartupFailure(
+            StartupFailure.Code.STATE_PERSISTENCE_FAILED, StartupFailure.Stage.STATE);
+
+    var recovery = fixture.coordinator.turnOn();
+    var candidate = fixture.connector.completeNext();
+    fixture.finishUntil(() -> recovery.completion().toCompletableFuture().isDone());
+
+    assertFalse(recovery.completion().toCompletableFuture().join());
+    assertFalse(candidate.isOpen());
+    assertEquals(AgentState.OFFLINE, fixture.coordinator.diagnostics().state());
+    assertEquals(DesiredMode.DISABLED, fixture.coordinator.diagnostics().desiredMode());
+    assertEquals("STATE_PERSISTENCE_FAILED", fixture.coordinator.diagnostics().failureCode());
+    assertTrue(fixture.commands.registered);
+    fixture.close();
+  }
+
+  @Test
+  void connectionLossAfterEnabledCommitKeepsDiskAndMemoryDesiredModeConsistent() throws Exception {
+    var fixture = fixture(DesiredMode.DISABLED, List.of());
+    fixture.coordinator.start();
+    fixture.connector.completeNext();
+    fixture.finishMainTransition();
+
+    var recovery = fixture.coordinator.turnOn();
+    var candidate = fixture.connector.completeNext();
+    await(() -> fixture.store.mode == DesiredMode.ENABLED && fixture.main.hasTasks());
+    candidate.remoteClose();
+    fixture.main.drain();
+
+    assertFalse(recovery.completion().toCompletableFuture().join());
+    assertEquals(DesiredMode.ENABLED, fixture.store.mode);
+    assertEquals(DesiredMode.ENABLED, fixture.coordinator.diagnostics().desiredMode());
+    assertEquals(AgentState.OFFLINE, fixture.coordinator.diagnostics().state());
+    fixture.close();
+  }
+
+  @Test
+  void failedOffPersistenceCanBeRetriedWithoutReenablingAdmission() throws Exception {
+    var fixture = fixture(DesiredMode.ENABLED, List.of());
+    fixture.coordinator.start();
+    fixture.connector.completeNext();
+    fixture.finishMainTransition();
+    fixture.store.saveFailure =
+        new StartupFailure(
+            StartupFailure.Code.STATE_PERSISTENCE_FAILED, StartupFailure.Stage.STATE);
+
+    fixture.coordinator.turnOff();
+    fixture.finishUntil(
+        () -> "STATE_PERSISTENCE_FAILED".equals(fixture.coordinator.diagnostics().failureCode()));
+    fixture.store.saveFailure = null;
+    fixture.coordinator.turnOff();
+    fixture.finishUntil(
+        () ->
+            fixture.coordinator.diagnostics().state() == AgentState.OFFLINE
+                && fixture.coordinator.diagnostics().offlineReason() == OfflineReason.MANUAL);
+
+    assertEquals(DesiredMode.DISABLED, fixture.store.mode);
+    assertEquals(List.of(DesiredMode.DISABLED), fixture.store.saves);
+    assertTrue(fixture.commands.registered);
+    fixture.close();
+  }
+
+  @Test
+  void immediateDisableLetsAnAlreadyQueuedOffWriteFinishDurably() throws Exception {
+    var fixture = fixture(DesiredMode.ENABLED, List.of());
+    fixture.coordinator.start();
+    fixture.connector.completeNext();
+    fixture.finishMainTransition();
+    fixture.store.saveBlock = new CompletableFuture<>();
+
+    fixture.coordinator.turnOff();
+    await(fixture.store.saveStarted::isDone);
+    fixture.coordinator.close();
+    fixture.store.saveBlock.complete(null);
+    await(() -> fixture.store.mode == DesiredMode.DISABLED);
+
+    assertEquals(List.of(DesiredMode.DISABLED), fixture.store.saves);
+    assertEquals(1, fixture.commands.unregisterCalls);
+  }
+
+  @Test
+  void offPreemptsRecoveryAndLateConnectionCannotTakeOwnership() throws Exception {
+    var fixture = fixture(DesiredMode.DISABLED, List.of());
+    fixture.coordinator.start();
+    fixture.connector.completeNext();
+    fixture.finishMainTransition();
+
+    var recovery = fixture.coordinator.turnOn();
+    await(() -> fixture.connector.connectCalls == 2);
+    fixture.coordinator.turnOff();
+    var stale = fixture.connector.completePending();
+    fixture.finishUntil(() -> fixture.coordinator.diagnostics().state() == AgentState.OFFLINE);
+    await(() -> !stale.isOpen());
+
+    assertFalse(recovery.completion().toCompletableFuture().join());
+    assertFalse(stale.isOpen());
+    assertEquals(DesiredMode.DISABLED, fixture.store.mode);
+    assertEquals(AgentState.OFFLINE, fixture.coordinator.diagnostics().state());
+    assertEquals(1, fixture.commands.registerCalls);
+    assertTrue(fixture.connector.cancelCalls > 0);
+    fixture.close();
+  }
+
+  @Test
+  void pluginDisableIsTheOnlyPostRegistrationUnregisterPath() throws Exception {
+    var fixture = fixture(DesiredMode.ENABLED, List.of());
+    fixture.coordinator.start();
+    fixture.connector.completeNext();
+    fixture.finishMainTransition();
+
+    fixture.coordinator.close();
+    fixture.coordinator.close();
+
+    assertEquals(1, fixture.commands.unregisterCalls);
+    assertFalse(fixture.commands.registered);
+    assertEquals(AgentState.UNREGISTERED, fixture.coordinator.diagnostics().state());
+  }
+
+  @Test
+  void rejectedMainThreadSchedulingFailsClosedAndClosesTheCandidate() throws Exception {
+    var worker = Executors.newSingleThreadExecutor();
+    var connector = new FakeConnector();
+    var commands = new FakeCommandGate();
+    var events = new RecordingEvents();
+    var store = new FakeStore(DesiredMode.ENABLED);
+    var coordinator =
+        new PaperStartupCoordinator(
+            worker,
+            () ->
+                new CoreReadiness(
+                    settings(), List.of(), store.load(), store, new AdminPolicy(Set.of(), false)),
+            connector,
+            task -> {
+              throw new IllegalStateException("scheduler stopped");
+            },
+            commands,
+            () -> true,
+            events);
+
+    coordinator.start();
+    var candidate = connector.completeNext();
+    await(coordinator::startupComplete);
+
+    assertFalse(candidate.isOpen());
+    assertEquals(AgentState.UNREGISTERED, coordinator.diagnostics().state());
+    assertEquals("MAIN_THREAD_SCHEDULE_FAILED", coordinator.diagnostics().failureCode());
+    assertEquals(0, commands.registerCalls);
     coordinator.close();
   }
 
-  private static PaperStartupCoordinator coordinator(
-      PaperStartupCoordinator.CoreSelfCheck check,
-      RuntimeConnector connector,
-      QueuedMainThread main,
-      FakeCommandGate commands,
-      BooleanSupplier enabled,
-      RecordingEvents events) {
-    return new PaperStartupCoordinator(
-        Executors.newSingleThreadExecutor(), check, connector, main, commands, enabled, events);
+  private static Fixture fixture(DesiredMode mode, List<String> warnings) {
+    return fixture(mode, warnings, OfflineCleanup.empty());
   }
 
-  private static CoreReadiness readiness(List<String> warnings) {
-    return new CoreReadiness(
-        new RuntimeConnectionSettings(
-            URI.create("ws://127.0.0.1:38127/agent"),
-            "survival-main",
-            "phase-3-public-test-token-32-characters",
-            "0.1.0",
-            Duration.ofSeconds(1),
-            Duration.ofSeconds(1)),
-        warnings);
+  private static Fixture fixture(DesiredMode mode, List<String> warnings, OfflineCleanup cleanup) {
+    var fixture = new Fixture(mode, warnings);
+    fixture.coordinator =
+        new PaperStartupCoordinator(
+            fixture.worker,
+            fixture::check,
+            fixture.connector,
+            fixture.main,
+            fixture.commands,
+            () -> true,
+            fixture.events,
+            cleanup);
+    return fixture;
+  }
+
+  private static OfflineCleanup cleanup(List<String> calls, boolean failProposal) {
+    return new OfflineCleanup(
+        (epoch, reason) -> calls.add("requests"),
+        (epoch, reason) -> {
+          calls.add("proposals");
+          if (failProposal) {
+            throw new IllegalStateException("expected test failure");
+          }
+        },
+        (epoch, reason) -> calls.add("operations"),
+        (epoch, reason) -> calls.add("client"));
+  }
+
+  private static RuntimeConnectionSettings settings() {
+    return new RuntimeConnectionSettings(
+        URI.create("ws://127.0.0.1:38127/agent"),
+        "survival-main",
+        "phase-4-public-test-token-32-characters",
+        "0.1.0",
+        Duration.ofSeconds(1),
+        Duration.ofSeconds(1));
   }
 
   private static void await(BooleanSupplier condition) throws InterruptedException {
-    var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+    var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
     while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
       Thread.sleep(5);
     }
     assertTrue(condition.getAsBoolean());
   }
 
-  private static final class FakeConnector implements RuntimeConnector {
-    private final CompletableFuture<AuthenticatedRuntimeConnection> result =
-        new CompletableFuture<>();
-    private volatile int connectCalls;
+  private static final class Fixture {
+    private final java.util.concurrent.ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final FakeConnector connector = new FakeConnector();
+    private final QueuedMainThread main = new QueuedMainThread();
+    private final FakeCommandGate commands = new FakeCommandGate();
+    private final RecordingEvents events = new RecordingEvents();
+    private final FakeStore store;
+    private final List<String> warnings;
+    private final AtomicInteger checkCalls = new AtomicInteger();
+    private volatile StartupFailure checkFailure;
+    private PaperStartupCoordinator coordinator;
+
+    private Fixture(DesiredMode mode, List<String> warnings) {
+      store = new FakeStore(mode);
+      this.warnings = warnings;
+    }
+
+    private CoreReadiness check() throws StartupFailure {
+      checkCalls.incrementAndGet();
+      if (checkFailure != null) {
+        throw checkFailure;
+      }
+      return new CoreReadiness(
+          settings(), warnings, store.load(), store, new AdminPolicy(Set.of(), false));
+    }
+
+    private void finishMainTransition() throws InterruptedException {
+      await(main::hasTasks);
+      main.drain();
+    }
+
+    private void finishUntil(BooleanSupplier condition) throws InterruptedException {
+      var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+      while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
+        if (main.hasTasks()) {
+          main.drain();
+        } else {
+          Thread.sleep(5);
+        }
+      }
+      if (main.hasTasks()) {
+        main.drain();
+      }
+      assertTrue(condition.getAsBoolean());
+    }
+
+    private FakeConnection activeConnection() {
+      return connector.connections.get(0);
+    }
+
+    private void close() {
+      coordinator.close();
+    }
+  }
+
+  private static final class FakeStore implements DesiredModeStore {
+    private final List<DesiredMode> saves = new ArrayList<>();
+    private volatile DesiredMode mode;
+    private volatile StartupFailure saveFailure;
+    private volatile CompletableFuture<Void> saveBlock;
+    private final CompletableFuture<Void> saveStarted = new CompletableFuture<>();
+
+    private FakeStore(DesiredMode mode) {
+      this.mode = mode;
+    }
 
     @Override
-    public CompletionStage<AuthenticatedRuntimeConnection> connect(
+    public DesiredMode load() {
+      return mode;
+    }
+
+    @Override
+    public synchronized void save(DesiredMode mode) throws StartupFailure {
+      saveStarted.complete(null);
+      var block = saveBlock;
+      if (block != null) {
+        block.join();
+      }
+      if (saveFailure != null) {
+        throw saveFailure;
+      }
+      saves.add(mode);
+      this.mode = mode;
+    }
+  }
+
+  private static final class FakeConnector implements RuntimeConnector {
+    private final Queue<CompletableFuture<AuthenticatedRuntimeConnection>> pending =
+        new ArrayDeque<>();
+    private final List<FakeConnection> connections = new ArrayList<>();
+    private volatile int connectCalls;
+    private volatile int cancelCalls;
+
+    @Override
+    public synchronized CompletionStage<AuthenticatedRuntimeConnection> connect(
         RuntimeConnectionSettings settings) {
       connectCalls++;
+      var result = new CompletableFuture<AuthenticatedRuntimeConnection>();
+      pending.add(result);
       return result;
+    }
+
+    @Override
+    public RuntimeConnectAttempt begin(RuntimeConnectionSettings settings) {
+      var result = connect(settings);
+      return new RuntimeConnectAttempt() {
+        @Override
+        public CompletionStage<AuthenticatedRuntimeConnection> result() {
+          return result;
+        }
+
+        @Override
+        public void cancel() {
+          cancelCalls++;
+        }
+      };
+    }
+
+    private FakeConnection completeNext() throws InterruptedException {
+      await(() -> connectCalls > connections.size());
+      return completePending();
+    }
+
+    private synchronized FakeConnection completePending() {
+      var connection = new FakeConnection();
+      connections.add(connection);
+      pending.remove().complete(connection);
+      return connection;
+    }
+
+    private void failNext(RuntimeException failure) throws InterruptedException {
+      await(
+          () -> {
+            synchronized (this) {
+              return !pending.isEmpty();
+            }
+          });
+      synchronized (this) {
+        pending.remove().completeExceptionally(failure);
+      }
     }
   }
 
   private static final class FakeConnection implements AuthenticatedRuntimeConnection {
     private final CompletableFuture<Void> closed = new CompletableFuture<>();
     private final AtomicBoolean open = new AtomicBoolean(true);
-    private volatile int closeCalls;
 
     @Override
     public boolean isOpen() {
@@ -286,11 +532,10 @@ class PaperStartupCoordinatorTest {
 
     @Override
     public void close() {
-      closeCalls++;
       remoteClose();
     }
 
-    void remoteClose() {
+    private void remoteClose() {
       open.set(false);
       closed.complete(null);
     }
@@ -305,11 +550,11 @@ class PaperStartupCoordinatorTest {
       tasks.add(task);
     }
 
-    synchronized boolean hasTasks() {
+    private synchronized boolean hasTasks() {
       return !tasks.isEmpty();
     }
 
-    void drain() {
+    private void drain() {
       while (true) {
         Runnable task;
         synchronized (this) {
@@ -325,6 +570,7 @@ class PaperStartupCoordinatorTest {
 
   private static final class FakeCommandGate implements PaperStartupCoordinator.CommandGate {
     private int registerCalls;
+    private int unregisterCalls;
     private boolean registered;
     private CommandRegistrationFailure registrationFailure;
 
@@ -339,14 +585,14 @@ class PaperStartupCoordinatorTest {
 
     @Override
     public void unregister() {
+      unregisterCalls++;
       registered = false;
     }
   }
 
   private static final class RecordingEvents implements PaperStartupCoordinator.EventSink {
     private final List<String> failures = new ArrayList<>();
-    private final List<String> warnings = new ArrayList<>();
-    private final List<String> availableStates = new ArrayList<>();
+    private final List<AgentHealth> availableHealth = new ArrayList<>();
 
     @Override
     public void failure(String stage, String code) {
@@ -354,13 +600,11 @@ class PaperStartupCoordinatorTest {
     }
 
     @Override
-    public void warning(String stage, String code) {
-      warnings.add(stage + ":" + code);
-    }
+    public void warning(String stage, String code) {}
 
     @Override
-    public void available(AgentDiagnostics.State state) {
-      availableStates.add(state.name());
+    public void available(AgentHealth health) {
+      availableHealth.add(health);
     }
   }
 }

@@ -8,9 +8,9 @@ PAPER_URL="https://fill-data.papermc.io/v1/objects/${PAPER_SHA256}/paper-1.21.11
 CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/minecraft-agent-paper-smoke"
 PAPER_JAR="${CACHE_ROOT}/paper-1.21.11-${PAPER_BUILD}.jar"
 PLUGIN_JAR="${ROOT}/paper-plugin/build/libs/minecraft-agent-paper-0.1.0-SNAPSHOT.jar"
-TEST_TOKEN=phase-3-paper-smoke-token-0123456789abcdef
-WRONG_TOKEN=phase-3-paper-smoke-wrong-0123456789abcdef
-SELECTED_CASES=" ${PAPER_SMOKE_CASES:-authenticated unavailable wrong-token incompatible} "
+TEST_TOKEN=phase-4-paper-smoke-token-0123456789abcdef
+WRONG_TOKEN=phase-4-paper-smoke-wrong-0123456789abcdef
+SELECTED_CASES=" ${PAPER_SMOKE_CASES:-offline-lifecycle unavailable wrong-token incompatible} "
 WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/minecraft-agent-paper-smoke.XXXXXX")"
 RUNTIME_PID=""
 PAPER_PID=""
@@ -39,7 +39,7 @@ validate_selected_cases() {
   local selected
   for selected in $SELECTED_CASES; do
     case "$selected" in
-      authenticated | unavailable | wrong-token | incompatible) selected_count=$((selected_count + 1)) ;;
+      authenticated | offline-lifecycle | unavailable | wrong-token | incompatible) selected_count=$((selected_count + 1)) ;;
       *)
         printf 'Unknown Paper smoke case: %s\n' "$selected" >&2
         return 1
@@ -66,6 +66,77 @@ wait_for_log() {
   printf 'Timed out waiting for %s in %s\n' "$pattern" "$log_file" >&2
   [[ -f "$log_file" ]] && tail -n 120 "$log_file" >&2
   return 1
+}
+
+count_log_matches() {
+  local log_file=$1
+  local pattern=$2
+  if [[ ! -f "$log_file" ]]; then
+    printf '0\n'
+    return
+  fi
+  local count
+  count=$(rg -c "$pattern" "$log_file" || true)
+  printf '%s\n' "${count:-0}"
+}
+
+wait_for_log_count() {
+  local log_file=$1
+  local pattern=$2
+  local expected_count=$3
+  local timeout_seconds=$4
+  local deadline=$((SECONDS + timeout_seconds))
+  while ((SECONDS < deadline)); do
+    local actual_count
+    actual_count=$(count_log_matches "$log_file" "$pattern")
+    if ((actual_count >= expected_count)); then
+      return 0
+    fi
+    sleep 1
+  done
+  printf 'Timed out waiting for %s occurrences of %s in %s\n' \
+    "$expected_count" "$pattern" "$log_file" >&2
+  [[ -f "$log_file" ]] && tail -n 160 "$log_file" >&2
+  return 1
+}
+
+LAST_COMMAND_OUTPUT=""
+
+run_console_command() {
+  local server_log=$1
+  local command=$2
+  local expected_pattern=$3
+  local timeout_seconds=$4
+  local previous_size
+  previous_size=$(wc -c <"$server_log")
+  printf '%s\n' "$command" >&9
+
+  local deadline=$((SECONDS + timeout_seconds))
+  while ((SECONDS < deadline)); do
+    LAST_COMMAND_OUTPUT=$(tail -c "+$((previous_size + 1))" "$server_log")
+    if rg -q "$expected_pattern" <<<"$LAST_COMMAND_OUTPUT"; then
+      sleep 1
+      LAST_COMMAND_OUTPUT=$(tail -c "+$((previous_size + 1))" "$server_log")
+      return 0
+    fi
+    sleep 1
+  done
+  printf 'Timed out waiting for command %s to produce %s\n' "$command" "$expected_pattern" >&2
+  tail -n 160 "$server_log" >&2
+  return 1
+}
+
+run_offline_command() {
+  local server_log=$1
+  local command=$2
+  run_console_command "$server_log" "$command" 'AI offline$' 10
+  if [[ "$(rg -c 'AI offline$' <<<"$LAST_COMMAND_OUTPUT" || true)" != 1 ]] \
+    || rg -q 'Minecraft Agent:|Minecraft Agent health:|/agent \[|Unknown or incomplete command' \
+      <<<"$LAST_COMMAND_OUTPUT"; then
+    printf 'Offline command did not return exactly one safe response: %s\n' "$command" >&2
+    printf '%s\n' "$LAST_COMMAND_OUTPUT" >&2
+    return 1
+  fi
 }
 
 wait_with_timeout() {
@@ -232,7 +303,136 @@ run_paper_case() {
   PAPER_PID=""
   exec 9>&-
   exec 9<&-
+  assert_clean_plugin_disable "$server_log"
   printf 'paper-smoke case=%s result=passed\n' "$case_name"
+}
+
+prepare_paper_server() {
+  local server_root=$1
+  mkdir -p "${server_root}/plugins"
+  cp "$PLUGIN_JAR" "${server_root}/plugins/"
+  printf 'eula=true\n' >"${server_root}/eula.txt"
+  printf '%s\n' \
+    'online-mode=false' \
+    'max-players=1' \
+    'view-distance=2' \
+    'simulation-distance=2' \
+    'spawn-protection=0' \
+    'level-type=minecraft:flat' \
+    'generate-structures=false' \
+    'sync-chunk-writes=false' >"${server_root}/server.properties"
+}
+
+launch_paper() {
+  local server_root=$1
+  local server_log=$2
+  local paper_token=$3
+  local input_fifo=$4
+  rm -f "$input_fifo"
+  mkfifo "$input_fifo"
+  exec 9<>"$input_fifo"
+  (
+    cd "$server_root"
+    MINECRAFT_AGENT_SERVER_TOKEN="$paper_token" \
+      java -Xms256M -Xmx512M -Dpaper.disableStartupVersionCheck=true \
+      -jar "$PAPER_JAR" --nogui <"$input_fifo"
+  ) >"$server_log" 2>&1 &
+  PAPER_PID=$!
+  wait_for_log "$server_log" 'Done \(' 180
+}
+
+stop_paper() {
+  printf 'stop\n' >&9
+  wait_with_timeout "$PAPER_PID" 30
+  PAPER_PID=""
+  exec 9>&-
+  exec 9<&-
+}
+
+assert_clean_plugin_disable() {
+  local server_log=$1
+  if rg -q 'Error occurred while disabling MinecraftAgent|Exception.*MinecraftAgent' "$server_log"; then
+    printf 'MinecraftAgent did not disable cleanly\n' >&2
+    tail -n 120 "$server_log" >&2
+    return 1
+  fi
+}
+
+run_offline_lifecycle_case() {
+  local case_root=$1
+  local server_root="${case_root}/server"
+  local first_log="${case_root}/paper-first.log"
+  local restart_log="${case_root}/paper-restart.log"
+  local input_fifo="${case_root}/console.input"
+  prepare_paper_server "$server_root"
+
+  launch_paper "$server_root" "$first_log" "$TEST_TOKEN" "$input_fifo"
+  wait_for_log "$first_log" 'event=startup_ready health=DEGRADED' 20
+  run_console_command "$first_log" 'agent doctor' 'Warning: OPTIONAL_CAPABILITY_UNAVAILABLE$' 10
+  if ! rg -q 'Minecraft Agent health: DEGRADED$' <<<"$LAST_COMMAND_OUTPUT"; then
+    printf 'Online doctor did not report DEGRADED health\n' >&2
+    printf '%s\n' "$LAST_COMMAND_OUTPUT" >&2
+    return 1
+  fi
+  run_offline_command "$first_log" 'agent off'
+  wait_for_log "$first_log" 'event=agent_offline reason=MANUAL' 20
+  run_offline_command "$first_log" 'agent doctor'
+  run_offline_command "$first_log" 'agent unknown'
+
+  local state_file="${server_root}/plugins/MinecraftAgent/state/agent-state.yml"
+  if [[ ! -f "$state_file" ]] || ! rg -q '^desired-mode: DISABLED$' "$state_file"; then
+    printf 'Manual Offline state was not persisted\n' >&2
+    [[ -f "$state_file" ]] && cat "$state_file" >&2
+    return 1
+  fi
+  if [[ "$(stat -c '%a' "$state_file")" != 600 ]]; then
+    printf 'Offline state file is not mode 0600\n' >&2
+    stat "$state_file" >&2
+    return 1
+  fi
+  stop_paper
+  assert_clean_plugin_disable "$first_log"
+
+  launch_paper "$server_root" "$restart_log" "$TEST_TOKEN" "$input_fifo"
+  wait_for_log "$restart_log" 'event=agent_offline reason=MANUAL' 20
+  run_offline_command "$restart_log" 'agent'
+  run_offline_command "$restart_log" 'minecraftagent:agent doctor'
+  run_offline_command "$restart_log" 'agent unknown'
+
+  local ready_count
+  local online_count
+  ready_count=$(count_log_matches "$restart_log" 'event=startup_ready health=DEGRADED')
+  online_count=$(count_log_matches "$restart_log" 'AI online$')
+  printf 'agent on\n' >&9
+  wait_for_log_count "$restart_log" 'event=startup_ready health=DEGRADED' $((ready_count + 1)) 20
+  wait_for_log_count "$restart_log" 'AI online$' $((online_count + 1)) 10
+  printf 'agent\n' >&9
+  wait_for_log "$restart_log" 'Minecraft Agent: ONLINE$' 10
+
+  stop_runtime
+  wait_for_log "$restart_log" 'code=RUNTIME_CONNECTION_LOST' 20
+  run_offline_command "$restart_log" 'agent doctor'
+
+  run_console_command \
+    "$restart_log" 'agent on' 'AI remains offline\. Check the server console\.$' 20
+  if ! rg -q 'AI startup check started\.$' <<<"$LAST_COMMAND_OUTPUT" \
+    || rg -q 'AI online$' <<<"$LAST_COMMAND_OUTPUT"; then
+    printf 'Failed recovery did not preserve the safe on contract\n' >&2
+    printf '%s\n' "$LAST_COMMAND_OUTPUT" >&2
+    return 1
+  fi
+  run_offline_command "$restart_log" 'agent doctor'
+
+  start_runtime actual "$TEST_TOKEN" "$case_root"
+  ready_count=$(count_log_matches "$restart_log" 'event=startup_ready health=DEGRADED')
+  online_count=$(count_log_matches "$restart_log" 'AI online$')
+  printf 'agent on\n' >&9
+  wait_for_log_count "$restart_log" 'event=startup_ready health=DEGRADED' $((ready_count + 1)) 20
+  wait_for_log_count "$restart_log" 'AI online$' $((online_count + 1)) 10
+
+  stop_paper
+  assert_clean_plugin_disable "$restart_log"
+  printf 'paper-smoke case=offline-lifecycle result=passed\n'
 }
 
 validate_selected_cases
@@ -261,6 +461,14 @@ if case_enabled authenticated; then
   mkdir -p "$case_root"
   start_runtime actual "$TEST_TOKEN" "$case_root"
   run_paper_case authenticated "$TEST_TOKEN" 'event=startup_ready health=DEGRADED' present
+  stop_runtime
+fi
+
+if case_enabled offline-lifecycle; then
+  case_root="${WORK_ROOT}/offline-lifecycle"
+  mkdir -p "$case_root"
+  start_runtime actual "$TEST_TOKEN" "$case_root"
+  run_offline_lifecycle_case "$case_root"
   stop_runtime
 fi
 

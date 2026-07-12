@@ -66,4 +66,16 @@ class StateDirectoryProbeTest {
         assertThrows(StartupFailure.class, () -> probe.verify(temporaryDirectory, broad));
     assertEquals(StartupFailure.Code.STATE_DIRECTORY_UNSAFE, broadFailure.code());
   }
+
+  @Test
+  void rejectsAnOverbroadPluginDataRoot() throws Exception {
+    Files.setPosixFilePermissions(temporaryDirectory, PosixFilePermissions.fromString("rwxr-xr-x"));
+
+    var failure =
+        assertThrows(
+            StartupFailure.class,
+            () -> probe.verify(temporaryDirectory, temporaryDirectory.resolve("state")));
+
+    assertEquals(StartupFailure.Code.STATE_DIRECTORY_UNSAFE, failure.code());
+  }
 }

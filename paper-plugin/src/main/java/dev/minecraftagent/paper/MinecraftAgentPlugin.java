@@ -1,12 +1,18 @@
 package dev.minecraftagent.paper;
 
+import dev.minecraftagent.paper.command.AdminToggleAuthorizer;
 import dev.minecraftagent.paper.command.AgentCommand;
-import dev.minecraftagent.paper.command.AgentDiagnostics;
+import dev.minecraftagent.paper.command.AgentControl;
 import dev.minecraftagent.paper.command.PaperCommandRegistration;
+import dev.minecraftagent.paper.lifecycle.AdminPolicy;
+import dev.minecraftagent.paper.lifecycle.AgentHealth;
+import dev.minecraftagent.paper.lifecycle.AgentStatus;
 import dev.minecraftagent.paper.lifecycle.CoreReadiness;
+import dev.minecraftagent.paper.lifecycle.OfflineReason;
 import dev.minecraftagent.paper.lifecycle.PaperStartupCoordinator;
 import dev.minecraftagent.paper.startup.LocalStartupChecks;
 import dev.minecraftagent.paper.startup.StartupFailure;
+import dev.minecraftagent.paper.state.FileDesiredModeStore;
 import dev.minecraftagent.paper.transport.JavaHttpRuntimeConnector;
 import dev.minecraftagent.paper.transport.RuntimeConnectionSettings;
 import java.io.IOException;
@@ -19,6 +25,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
 import org.bukkit.Bukkit;
@@ -33,7 +40,6 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
 
   private final AtomicReference<PaperStartupCoordinator> coordinatorReference =
       new AtomicReference<>();
-  private PaperStartupCoordinator coordinator;
 
   @Override
   public void onEnable() {
@@ -41,11 +47,12 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     var configPath = dataDirectory.resolve("config.yml");
     var minecraftVersion = getServer().getMinecraftVersion();
     var componentVersion = getPluginMeta().getVersion();
+    var stateDirectoryReference = new AtomicReference<Path>();
+    var desiredModeStoreReference = new AtomicReference<FileDesiredModeStore>();
     var worker =
         Executors.newSingleThreadExecutor(
             runnable -> {
               var thread = new Thread(runnable, "minecraft-agent-paper-startup");
-              thread.setDaemon(true);
               return thread;
             });
     var localChecks = new LocalStartupChecks();
@@ -57,15 +64,42 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
             getServer()::getOnlinePlayers,
             Bukkit::isPrimaryThread,
             code -> logWarning("command-registration", code));
+    AgentControl control =
+        new AgentControl() {
+          @Override
+          public void turnOff() {
+            var current = coordinatorReference.get();
+            if (current != null) {
+              current.turnOff();
+            }
+          }
+
+          @Override
+          public RecoveryRequest turnOn() {
+            var current = coordinatorReference.get();
+            if (current == null) {
+              return new RecoveryRequest(
+                  RecoveryDisposition.UNAVAILABLE, CompletableFuture.completedFuture(false));
+            }
+            return current.turnOn();
+          }
+        };
     var command =
         new AgentCommand(
             this,
             () -> {
               var current = coordinatorReference.get();
-              return current == null ? AgentDiagnostics.starting() : current.diagnostics();
-            });
+              return current == null ? AgentStatus.unregistered(null) : current.diagnostics();
+            },
+            control,
+            new AdminToggleAuthorizer(
+                () -> {
+                  var current = coordinatorReference.get();
+                  return current == null ? AdminPolicy.locked() : current.adminPolicy();
+                }),
+            task -> getServer().getScheduler().runTask(this, task));
 
-    coordinator =
+    var coordinator =
         new PaperStartupCoordinator(
             worker,
             () -> {
@@ -89,7 +123,24 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
                       runtime.handshakeTimeout());
               var warnings =
                   result.warnings().stream().map(warning -> warning.code().name()).toList();
-              return new CoreReadiness(settings, warnings);
+              var checkedStateDirectory = result.config().stateDirectory();
+              var trustedStateDirectory = stateDirectoryReference.get();
+              if (trustedStateDirectory == null) {
+                stateDirectoryReference.set(checkedStateDirectory);
+                desiredModeStoreReference.set(new FileDesiredModeStore(checkedStateDirectory));
+              } else if (!trustedStateDirectory.equals(checkedStateDirectory)) {
+                throw new StartupFailure(
+                    StartupFailure.Code.STATE_DIRECTORY_UNSAFE, StartupFailure.Stage.STATE);
+              }
+              var desiredModeStore = desiredModeStoreReference.get();
+              var desiredMode = desiredModeStore.load();
+              var policy = result.config().securityPolicy();
+              return new CoreReadiness(
+                  settings,
+                  warnings,
+                  desiredMode,
+                  desiredModeStore,
+                  new AdminPolicy(result.config().owners(), policy.allowOpToggle()));
             },
             connector,
             task -> getServer().getScheduler().runTask(this, task),
@@ -117,8 +168,13 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
               }
 
               @Override
-              public void available(AgentDiagnostics.State state) {
-                getLogger().info("event=startup_ready health=" + state.name());
+              public void available(AgentHealth health) {
+                getLogger().info("event=startup_ready health=" + health.name());
+              }
+
+              @Override
+              public void offline(OfflineReason reason) {
+                getLogger().info("event=agent_offline reason=" + reason.name());
               }
             });
     coordinatorReference.set(coordinator);
@@ -132,7 +188,6 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     if (current != null) {
       current.close();
     }
-    coordinator = null;
   }
 
   private void logWarning(String stage, String code) {
