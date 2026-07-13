@@ -1,10 +1,11 @@
 # Progress
 
-Last updated: 2026-07-12
+Last updated: 2026-07-13
 
 ## Current status
 
-Phase 0 through Phase 4 are complete. Phase 5 basic conversation is next.
+Phase 0 through Phase 5 are complete. Phase 6 sessions, resume, and explicit
+modules are next.
 
 ## Locked decisions
 
@@ -22,9 +23,8 @@ Phase 0 through Phase 4 are complete. Phase 5 basic conversation is next.
   semantic validation treats reassembly as a separate validation layer.
 - The optional Fabric client must load without Litematica or MaLiLib.
 - Gradle and npm work is run serially on this constrained host.
-- Phase 2 uses an injectable fake provider adapter for readiness tests. Production
-  provider network calls remain fail closed until request state, policy, and
-  request binding are testable.
+- Provider injection is code-only for tests and smoke. Production uses the
+  OpenAI Responses adapter; no configuration value can select a fake provider.
 - Phase 3 uses `paper.hello` followed by `runtime.hello`; the Runtime echoes
   Paper's challenge and selects exact protocol `1.0`. Both sides enforce the
   shared HMAC golden transcript and a cross-connection replay window.
@@ -38,6 +38,11 @@ Phase 0 through Phase 4 are complete. Phase 5 basic conversation is next.
   remains invalid after a later recovery.
 - Toggle authorization is local console, a configured Owner UUID, or a live OP
   with `minecraftagent.admin.toggle` when `allow-op-toggle` is explicitly enabled.
+- Phase 5 keeps one live Paper request per player and 64 globally. Runtime
+  independently enforces configured concurrency, FIFO queue, per-player
+  cooldown, and an in-memory daily request limit.
+- Phase 5 replies are literal private text. Paper installs no ordinary-chat
+  listener and revalidates the request epoch and connection at final delivery.
 
 ## Phase 0: repository scaffold
 
@@ -153,10 +158,11 @@ Completed:
       ENABLED; malformed, aliased, duplicated, unknown, symlinked, non-private,
       or non-regular state fails closed. Writes use a forced `0600` temporary,
       atomic replacement, and a private `0700` directory.
-- [x] `/agent off` first enters STOPPING and closes admission, detaches the
-      authenticated connection, invokes request/proposal/operation/client cleanup
-      ports with exception isolation, persists DISABLED off-thread, then enters
-      OFFLINE. A persistence failure never returns Online.
+- [x] `/agent off` first enters STOPPING and closes admission, invokes
+      request/proposal/operation/client cleanup while the connection is available,
+      then detaches the authenticated connection. Cleanup ports isolate
+      exceptions; Paper persists DISABLED off-thread, then enters OFFLINE. A
+      persistence failure never returns Online.
 - [x] `/agent on` is asynchronous and reruns configuration, platform, security,
       state, descriptor, optional capability, protocol, token, and Runtime checks.
       It persists ENABLED before publishing ONLINE; failure returns the exact safe
@@ -175,9 +181,37 @@ Completed:
       restart remaining Offline, explicit recovery, Runtime-loss command retention,
       recovery against a restarted Runtime, and clean identity-only unregistration.
 
+## Phase 5: basic conversation
+
+Completed:
+
+- [x] Protocol 1.0 has closed `agent.complete`, `agent.error`, and
+      `agent.cancel` payloads. All initiating requests use
+      `messageId == requestId`; all terminal/cancel messages retain correlation.
+- [x] The authenticated WebSocket remains open after hello, caps application
+      frames at 64 KiB, rejects binary/duplicate/stale/replayed/wrong-direction
+      traffic, and uses a bounded serialized Paper send queue.
+- [x] Runtime has an injectable provider boundary and a production OpenAI
+      Responses implementation with model readiness, `store: false`, no tools,
+      bounded response reads, fixed safe errors, and AbortSignal support.
+- [x] Runtime enforces configured concurrent/queued work, FIFO activation,
+      one outstanding request per player, cooldown, in-memory daily limits,
+      timeout, cancellation, and late-provider suppression.
+- [x] `/agent say <message>` is available to ordinary players through
+      `minecraftagent.use`; identity comes only from the actual `Player`, and
+      Phase 5 fixes session null, module general, and client capabilities off.
+- [x] Paper owns the live correlation record, permits one request per player and
+      64 globally, and binds request, player, server, connection, and Offline
+      epoch through the final main-thread reply boundary.
+- [x] Completion/error fallback is sent with literal `Component.text` only to
+      the online requesting UUID. No chat listener or broadcast path exists.
+- [x] Timeout, send failure, quit, Offline, Runtime loss, and disable remove the
+      record exactly once and issue best-effort cancellation. Old, duplicate,
+      wrong-player, wrong-session, and late terminal messages have no effect.
+
 ## Verification
 
-Verified serially on 2026-07-12:
+Verified serially on 2026-07-13:
 
 ```bash
 cd agent-runtime
@@ -194,16 +228,18 @@ cd ..
 
 Results:
 
-- Runtime: 8 Vitest files, 59 tests passed; TypeScript build, ESLint, and
+- Runtime: 10 Vitest files, 80 tests passed; TypeScript build, ESLint, and
   Prettier passed; full and production-only npm audits reported 0
   vulnerabilities.
-- Paper: build and Spotless passed; 120 tests passed, including 38 shared dynamic
+- Paper: build and Spotless passed; 152 tests passed, including 45 shared dynamic
   Schema/HMAC cases plus strict desired-state parsing/atomic persistence,
   operational epoch invalidation, Owner/OP/console authorization, cancellable
-  real-WebSocket handshakes, lifecycle/persistence races, command-map
-  transactions, exact Offline output, doctor output, and descriptor tests.
-- Fabric: remapped JAR build and Spotless passed; 39 tests passed, including the
-  same 38 shared protocol cases plus client metadata.
+  real-WebSocket handshake/application exchange, provider request correlation,
+  cancellation/timeout/late-response races, lifecycle/persistence races,
+  command-map transactions, private reply gating, exact Offline output, doctor
+  output, and descriptor tests.
+- Fabric: remapped JAR build and Spotless passed; 46 tests passed, including the
+  same 45 shared protocol cases plus client metadata.
 - Both JVM reports contain no remote Schema load, `UnknownHostException`,
   invalid-schema error, skipped test, or failed test.
 - Paper `1.21.11-132` JAR SHA-256
@@ -213,34 +249,34 @@ Results:
   online doctor degradation, exact per-command Offline output, `0600` DISABLED
   persistence, restart remaining Offline, successful on, Runtime-loss retention,
   failed on while Runtime was absent, successful on after Runtime restart, both
-  command labels, and exception-free plugin disable. No Paper, Runtime, or
+  command labels, Console `/agent say` isolation from the provider, and
+  exception-free plugin disable. No Paper, Runtime, or
   Gradle process remained.
-- Packaged Runtime preserved its compiled handshake endpoint, configuration
-  template, and protocol schemas. The production CLI still fails closed at
-  `PROVIDER_UNSUPPORTED` before binding because no production model provider
-  adapter exists.
+- Packaged Runtime preserved its compiled authenticated application endpoint,
+  OpenAI provider, configuration template, and protocol schemas.
 - All protocol JSON files parse successfully; Bash scripts pass `bash -n`.
 
 PowerShell scripts were reviewed for native exit-code propagation but were not
 executed because `pwsh` is unavailable on this Linux host. A graphical Fabric
-client, a real online player during late command registration, and Litematica
-were not started. Gradle reports Loom-originated deprecation warnings for future
+client, a real online player executing `/agent say`, and Litematica were not
+started. Ordinary-player UUID binding, primary-thread private reply, no
+broadcast, timeout, and concurrent-request behavior are covered by JVM tests;
+the pinned smoke only proves that Console cannot enter the model path. Gradle
+reports Loom-originated deprecation warnings for future
 Gradle 10 compatibility, but both builds pass on the locked Gradle 9.5.1
 wrapper. Node emits its documented ExperimentalWarning when the built-in SQLite
 module is loaded; it is not suppressed.
 
 ## Explicitly not implemented
 
-- Production model-provider network health adapter or any model request.
-- Runtime-Paper application messages, heartbeat, or automatic reconnect. The
-  transport accepts the authenticated hello only; Phase 4 recovery creates a
-  fresh authenticated connection only after explicit `/agent on`.
-- Request queues, proposal repositories, executable tools, and client transfers.
-  Phase 4 provides their mandatory cleanup ports and epoch validation contract,
-  but no such producer exists yet and no end-to-end cleanup is claimed.
+- Heartbeat or automatic reconnect. Phase 5 recovery still creates a fresh
+  authenticated connection only after explicit `/agent on`.
+- Proposal repositories, executable tools, and client transfers. The request
+  cleanup port is live; proposal, operation, and client-state ports remain empty.
 - SQLite migrations or repositories in either process; Phase 2 only owns the
   Runtime startup-readiness file and connection.
-- Session resume, module routing, rate limiting, or cost accounting.
+- Session/message persistence, resume, explicit module routing, durable rate
+  accounting, token/cost accounting, or monthly budget enforcement.
 - Tool registry/execution, policy enforcement, proposals, confirmation, or
   audit persistence.
 - Capability Pack discovery, approval, reload, or command execution.
@@ -257,11 +293,11 @@ The presence of a schema does not mark the corresponding feature implemented.
 
 ### Provider boundary
 
-Phase 2 proves the provider health interface and ordering with a fake adapter but
-does not perform a production provider request. The CLI intentionally refuses
-READY with `PROVIDER_UNSUPPORTED`; a fake provider cannot be selected through
-configuration. A real adapter must map authentication, model availability,
-unreachable, and timeout failures without logging request or response bodies.
+Phase 5 supplies one fixed OpenAI Responses adapter with safe status mapping,
+bounded bodies, timeout/cancellation, and no prompt/completion logging. It does
+not retry, stream, rotate providers, persist usage, or enforce the configured
+monthly budget. Provider account-side retention and policy remain an operator
+responsibility even though requests set `store: false`.
 
 ### Node SQLite stability
 
@@ -300,13 +336,13 @@ adapter.
 
 ## Next gates
 
-1. Implement Phase 5 `/agent say`, private replies, bounded per-player request
-   concurrency, cancellation, timeout handling, and fallback text.
-2. Bind every Phase 5 request and late Runtime response to an OperationalGate
-   epoch; Runtime application messages remain disabled until that validation is
-   present on both ingress and the final side-effect boundary.
-3. Preserve the Phase 2 startup gate when the production provider health adapter
-   is introduced for the first model-backed phase.
+1. Implement Phase 6 Runtime-owned sessions/messages, resume ownership checks,
+   explicit one-shot modules, context reduction, and server/player isolation.
+2. Add durable usage/cost accounting before treating daily/monthly limits as
+   restart-stable budgets.
+3. Add a real online-player integration lane for private `/agent say` delivery
+   and late dynamic command-tree refresh without increasing routine weak-host
+   resource usage.
 4. Add Gradle dependency-verification metadata before calling a release
    byte-for-byte reproducible; Paper 1.21.11 is available only through an
    upstream mutable snapshot coordinate.

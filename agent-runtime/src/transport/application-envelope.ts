@@ -1,0 +1,226 @@
+import { randomBytes, randomUUID } from "node:crypto";
+
+import type { SchemaRegistry } from "../protocol/schema-registry.js";
+import type {
+  AgentRequestInput,
+  AgentTerminalResponse,
+} from "../requests/agent-request-service.js";
+import { SUPPORTED_PROTOCOL_VERSION } from "../version.js";
+import { decodeCanonicalBase64Url } from "./handshake-authentication.js";
+import type { HandshakeReplayCache } from "./replay-cache.js";
+import { parseStrictJson } from "./strict-json.js";
+
+export const APPLICATION_CLOCK_SKEW_MILLISECONDS = 30_000;
+export const APPLICATION_MAXIMUM_BYTES = 64 * 1024;
+
+export type ApplicationFailureCode =
+  | "APPLICATION_MESSAGE_INVALID"
+  | "APPLICATION_MESSAGE_REPLAYED"
+  | "APPLICATION_MESSAGE_STALE"
+  | "SERVER_ID_MISMATCH"
+  | "UNSUPPORTED_MESSAGE_TYPE";
+
+export class ApplicationProtocolFailure extends Error {
+  public readonly code: ApplicationFailureCode;
+
+  public constructor(code: ApplicationFailureCode) {
+    super(code);
+    this.name = "ApplicationProtocolFailure";
+    this.code = code;
+  }
+}
+
+export interface AgentCancelInput {
+  readonly requestId: string;
+  readonly playerUuid: string;
+  readonly reason:
+    | "PLAYER_DISCONNECTED"
+    | "PAPER_TIMEOUT"
+    | "AGENT_OFFLINE"
+    | "RUNTIME_DISCONNECTED";
+}
+
+export type PaperApplicationMessage =
+  | { readonly type: "agent.request"; readonly request: AgentRequestInput }
+  | { readonly type: "agent.cancel"; readonly cancellation: AgentCancelInput };
+
+export interface ApplicationEnvelopeProtocolOptions {
+  readonly serverId: string;
+  readonly schemaRegistry: SchemaRegistry;
+  readonly replayCache: HandshakeReplayCache;
+  readonly now?: () => Date;
+  readonly randomBytes?: (size: number) => Buffer;
+  readonly randomUuid?: () => string;
+}
+
+interface EnvelopeRecord extends Record<string, unknown> {
+  readonly protocolVersion: string;
+  readonly messageId: string;
+  readonly requestId: string;
+  readonly serverId: string;
+  readonly type: string;
+  readonly timestamp: string;
+  readonly nonce: string;
+  readonly payload: Record<string, unknown>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function invalid(): ApplicationProtocolFailure {
+  return new ApplicationProtocolFailure("APPLICATION_MESSAGE_INVALID");
+}
+
+function envelopeRecord(value: unknown): EnvelopeRecord {
+  if (!isRecord(value) || !isRecord(value["payload"])) {
+    throw invalid();
+  }
+  return value as EnvelopeRecord;
+}
+
+export class ApplicationEnvelopeProtocol {
+  readonly #serverId: string;
+  readonly #schemaRegistry: SchemaRegistry;
+  readonly #replayCache: HandshakeReplayCache;
+  readonly #now: () => Date;
+  readonly #randomBytes: (size: number) => Buffer;
+  readonly #randomUuid: () => string;
+
+  public constructor(options: ApplicationEnvelopeProtocolOptions) {
+    this.#serverId = options.serverId;
+    this.#schemaRegistry = options.schemaRegistry;
+    this.#replayCache = options.replayCache;
+    this.#now = options.now ?? (() => new Date());
+    this.#randomBytes = options.randomBytes ?? randomBytes;
+    this.#randomUuid = options.randomUuid ?? randomUUID;
+  }
+
+  public parse(source: string): PaperApplicationMessage {
+    let document: unknown;
+    try {
+      document = parseStrictJson(source);
+    } catch {
+      throw invalid();
+    }
+    const envelope = envelopeRecord(document);
+    if (envelope.protocolVersion !== SUPPORTED_PROTOCOL_VERSION) {
+      throw invalid();
+    }
+    if (envelope.type !== "agent.request" && envelope.type !== "agent.cancel") {
+      throw new ApplicationProtocolFailure("UNSUPPORTED_MESSAGE_TYPE");
+    }
+    if (!this.#schemaRegistry.validate("envelope.schema.json", envelope).valid) {
+      throw invalid();
+    }
+    if (envelope.serverId !== this.#serverId) {
+      throw new ApplicationProtocolFailure("SERVER_ID_MISMATCH");
+    }
+
+    const now = this.#now();
+    const timestamp = Date.parse(envelope.timestamp);
+    if (
+      !Number.isFinite(timestamp) ||
+      Math.abs(now.getTime() - timestamp) > APPLICATION_CLOCK_SKEW_MILLISECONDS
+    ) {
+      throw new ApplicationProtocolFailure("APPLICATION_MESSAGE_STALE");
+    }
+    const nonce = decodeCanonicalBase64Url(envelope.nonce);
+    if (nonce === undefined || nonce.length < 16) {
+      throw invalid();
+    }
+
+    const payloadSchema =
+      envelope.type === "agent.request" ? "agent-request.schema.json" : "agent-cancel.schema.json";
+    if (!this.#schemaRegistry.validate(payloadSchema, envelope.payload).valid) {
+      throw invalid();
+    }
+
+    let message: PaperApplicationMessage;
+    if (envelope.type === "agent.request") {
+      const clientCapabilities = envelope.payload["clientCapabilities"];
+      const features =
+        isRecord(clientCapabilities) && isRecord(clientCapabilities["features"])
+          ? clientCapabilities["features"]
+          : undefined;
+      if (
+        envelope.messageId !== envelope.requestId ||
+        envelope.payload["sessionId"] !== null ||
+        envelope.payload["module"] !== "general" ||
+        !isRecord(clientCapabilities) ||
+        clientCapabilities["connected"] !== false ||
+        clientCapabilities["clientProtocolVersion"] !== null ||
+        features === undefined ||
+        features["overlay"] !== 0 ||
+        features["itemIcons"] !== 0 ||
+        features["recipeView"] !== 0 ||
+        features["litematicaPreview"] !== 0 ||
+        features["litematicaMaterialList"] !== 0
+      ) {
+        throw invalid();
+      }
+      message = {
+        type: "agent.request",
+        request: {
+          requestId: envelope.requestId,
+          playerUuid: String(envelope.payload["playerUuid"]),
+          sessionId: null,
+          module: "general",
+          message: String(envelope.payload["message"]),
+        },
+      };
+    } else {
+      message = {
+        type: "agent.cancel",
+        cancellation: {
+          requestId: envelope.requestId,
+          playerUuid: String(envelope.payload["playerUuid"]),
+          reason: envelope.payload["reason"] as AgentCancelInput["reason"],
+        },
+      };
+    }
+
+    if (!this.#replayCache.accept(envelope.messageId, envelope.nonce, now.getTime())) {
+      throw new ApplicationProtocolFailure("APPLICATION_MESSAGE_REPLAYED");
+    }
+    return message;
+  }
+
+  public createResponse(
+    requestId: string,
+    response: AgentTerminalResponse,
+  ): Record<string, unknown> {
+    const payloadSchema =
+      response.type === "agent.complete" ? "agent-complete.schema.json" : "agent-error.schema.json";
+    if (!this.#schemaRegistry.validate(payloadSchema, response.payload).valid) {
+      throw new Error(`Runtime generated an invalid ${response.type} payload.`);
+    }
+
+    let messageId: string | undefined;
+    for (let attempt = 0; attempt < 8 && messageId === undefined; attempt += 1) {
+      const candidate = this.#randomUuid();
+      if (candidate !== requestId) {
+        messageId = candidate;
+      }
+    }
+    if (messageId === undefined) {
+      throw new Error("Unable to allocate a distinct response message ID.");
+    }
+
+    const responseTimestamp = this.#now().toISOString();
+    const envelope: Record<string, unknown> = {
+      protocolVersion: SUPPORTED_PROTOCOL_VERSION,
+      messageId,
+      requestId,
+      serverId: this.#serverId,
+      type: response.type,
+      timestamp: responseTimestamp,
+      nonce: this.#randomBytes(16).toString("base64url"),
+      payload: response.payload,
+    };
+    if (!this.#schemaRegistry.validate("envelope.schema.json", envelope).valid) {
+      throw new Error(`Runtime generated an invalid ${response.type} envelope.`);
+    }
+    return envelope;
+  }
+}

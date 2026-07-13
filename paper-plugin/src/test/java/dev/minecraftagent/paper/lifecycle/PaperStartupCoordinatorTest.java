@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.minecraftagent.paper.command.AgentControl.RecoveryDisposition;
 import dev.minecraftagent.paper.command.CommandRegistrationFailure;
+import dev.minecraftagent.paper.request.RuntimeApplicationLifecycle;
 import dev.minecraftagent.paper.startup.StartupFailure;
 import dev.minecraftagent.paper.state.DesiredModeStore;
 import dev.minecraftagent.paper.transport.AuthenticatedRuntimeConnection;
@@ -320,6 +321,55 @@ class PaperStartupCoordinatorTest {
     assertEquals(AgentState.UNREGISTERED, coordinator.diagnostics().state());
     assertEquals("MAIN_THREAD_SCHEDULE_FAILED", coordinator.diagnostics().failureCode());
     assertEquals(0, commands.registerCalls);
+    coordinator.close();
+  }
+
+  @Test
+  void connectionClosedDuringApplicationAttachCannotPublishOnline() throws Exception {
+    var worker = Executors.newSingleThreadExecutor();
+    var connector = new FakeConnector();
+    var commands = new FakeCommandGate();
+    var events = new RecordingEvents();
+    var store = new FakeStore(DesiredMode.ENABLED);
+    var main = new QueuedMainThread();
+    var gate = new OperationalGate();
+    var detachCalls = new AtomicInteger();
+    var applications =
+        new RuntimeApplicationLifecycle() {
+          @Override
+          public void attach(AuthenticatedRuntimeConnection connection, String serverId) {
+            connection.close();
+          }
+
+          @Override
+          public void detach(AuthenticatedRuntimeConnection connection) {
+            detachCalls.incrementAndGet();
+          }
+        };
+    var coordinator =
+        new PaperStartupCoordinator(
+            worker,
+            () ->
+                new CoreReadiness(
+                    settings(), List.of(), store.load(), store, new AdminPolicy(Set.of(), false)),
+            connector,
+            main,
+            commands,
+            () -> true,
+            events,
+            OfflineCleanup.empty(),
+            gate,
+            applications);
+
+    coordinator.start();
+    connector.completeNext();
+    await(main::hasTasks);
+    main.drain();
+
+    assertEquals(AgentState.UNREGISTERED, coordinator.diagnostics().state());
+    assertEquals("RUNTIME_CONNECTION_LOST", coordinator.diagnostics().failureCode());
+    assertEquals(1, detachCalls.get());
+    assertFalse(commands.registered);
     coordinator.close();
   }
 

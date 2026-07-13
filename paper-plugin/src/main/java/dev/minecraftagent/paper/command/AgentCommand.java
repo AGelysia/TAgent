@@ -3,7 +3,9 @@ package dev.minecraftagent.paper.command;
 import dev.minecraftagent.paper.lifecycle.AgentHealth;
 import dev.minecraftagent.paper.lifecycle.AgentState;
 import dev.minecraftagent.paper.lifecycle.AgentStatus;
+import dev.minecraftagent.paper.request.AgentRequestGateway;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -12,10 +14,12 @@ import java.util.function.Supplier;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.PluginIdentifiableCommand;
+import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
 public final class AgentCommand extends Command implements PluginIdentifiableCommand {
   public static final String PERMISSION = "minecraftagent.command.agent";
+  public static final String USE_PERMISSION = "minecraftagent.use";
   public static final String TOGGLE_PERMISSION = "minecraftagent.admin.toggle";
 
   private static final String OFFLINE_MESSAGE = "AI offline";
@@ -27,10 +31,16 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
       "AI remains offline. Check the server console.";
   private static final String PERMISSION_DENIED_MESSAGE =
       "You do not have permission to use this command.";
+  private static final String PLAYER_ONLY_MESSAGE = "This command can only be used by a player.";
+  private static final String REQUEST_ACTIVE_MESSAGE = "AI request already in progress.";
+  private static final String REQUEST_UNAVAILABLE_MESSAGE = "AI unavailable. Try again later.";
+  private static final String MESSAGE_INVALID_MESSAGE =
+      "AI message must contain 1 to 4096 characters.";
 
   private final Plugin plugin;
   private final Supplier<AgentStatus> status;
   private final AgentControl control;
+  private final AgentRequestGateway requests;
   private final ToggleAuthorizer toggleAuthorizer;
   private final Consumer<Runnable> replyDispatcher;
 
@@ -40,10 +50,31 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
       AgentControl control,
       ToggleAuthorizer toggleAuthorizer,
       Consumer<Runnable> replyDispatcher) {
-    super("agent", "Controls Minecraft Agent readiness", "/agent [doctor|off|on]", List.of());
+    this(
+        plugin,
+        status,
+        control,
+        (playerId, message) -> AgentRequestGateway.Submission.RUNTIME_UNAVAILABLE,
+        toggleAuthorizer,
+        replyDispatcher);
+  }
+
+  public AgentCommand(
+      Plugin plugin,
+      Supplier<AgentStatus> status,
+      AgentControl control,
+      AgentRequestGateway requests,
+      ToggleAuthorizer toggleAuthorizer,
+      Consumer<Runnable> replyDispatcher) {
+    super(
+        "agent",
+        "Controls Minecraft Agent readiness",
+        "/agent [say <message>|doctor|off|on]",
+        List.of());
     this.plugin = Objects.requireNonNull(plugin);
     this.status = Objects.requireNonNull(status);
     this.control = Objects.requireNonNull(control);
+    this.requests = Objects.requireNonNull(requests);
     this.toggleAuthorizer = Objects.requireNonNull(toggleAuthorizer);
     this.replyDispatcher = Objects.requireNonNull(replyDispatcher);
   }
@@ -76,6 +107,11 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
       return true;
     }
 
+    if (arguments.length >= 1 && arguments[0].equalsIgnoreCase("say")) {
+      say(sender, arguments);
+      return true;
+    }
+
     if (!sender.hasPermission(PERMISSION)) {
       sender.sendMessage(PERMISSION_DENIED_MESSAGE);
       return true;
@@ -105,8 +141,11 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
       return List.of();
     }
 
-    var candidates = new ArrayList<String>(2);
+    var candidates = new ArrayList<String>(3);
     if (status.get().state() == AgentState.ONLINE) {
+      if (sender.hasPermission(USE_PERMISSION)) {
+        candidates.add("say");
+      }
       if (sender.hasPermission(PERMISSION)) {
         candidates.add("doctor");
       }
@@ -141,6 +180,32 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
                                     ? ONLINE_MESSAGE
                                     : RECOVERY_FAILED_MESSAGE)));
       }
+    }
+  }
+
+  private void say(CommandSender sender, String[] arguments) {
+    if (!sender.hasPermission(USE_PERMISSION)) {
+      sender.sendMessage(PERMISSION_DENIED_MESSAGE);
+      return;
+    }
+    if (!(sender instanceof Player player)) {
+      sender.sendMessage(PLAYER_ONLY_MESSAGE);
+      return;
+    }
+    if (arguments.length < 2) {
+      sender.sendMessage(getUsage());
+      return;
+    }
+
+    var message = String.join(" ", Arrays.copyOfRange(arguments, 1, arguments.length));
+    switch (requests.submit(player.getUniqueId(), message)) {
+      case ACCEPTED -> {
+        // The terminal response is delivered privately by AgentRequestService.
+      }
+      case ALREADY_ACTIVE -> sender.sendMessage(REQUEST_ACTIVE_MESSAGE);
+      case OFFLINE -> sender.sendMessage(OFFLINE_MESSAGE);
+      case RUNTIME_UNAVAILABLE -> sender.sendMessage(REQUEST_UNAVAILABLE_MESSAGE);
+      case INVALID_MESSAGE -> sender.sendMessage(MESSAGE_INVALID_MESSAGE);
     }
   }
 

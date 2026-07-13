@@ -52,6 +52,7 @@ afterEach(async () => {
       .splice(0)
       .map((directory) => rm(directory, { recursive: true, force: true })),
   );
+  vi.restoreAllMocks();
 });
 
 describe("runtime bootstrap", () => {
@@ -232,16 +233,22 @@ describe("runtime bootstrap", () => {
     expect(logs).not.toContain("provider leaked");
   });
 
-  it("fails closed when no production provider adapter is injected", async () => {
+  it("uses the production OpenAI health adapter when no test adapter is injected", async () => {
     const directory = await fixtureDirectory();
     const configPath = await writeRuntimeConfig(directory);
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ id: "test-model", object: "model" }), { status: 200 }),
+      );
 
-    await expect(
-      bootstrap({ configPath, environment: runtimeEnvironment() }),
-    ).rejects.toMatchObject({
-      code: "PROVIDER_UNSUPPORTED",
-      field: "/model/provider",
-    });
+    const result = await bootstrap({ configPath, environment: runtimeEnvironment() });
+    try {
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      expect(fetchSpy.mock.calls[0]?.[0]).toBe("https://api.openai.com/v1/models/test-model");
+    } finally {
+      await result.app.close();
+    }
   });
 
   it.each([

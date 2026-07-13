@@ -12,11 +12,13 @@ import {
 import type { ModelProviderHealthCheck } from "../src/health/model-provider.js";
 import { RuntimeLogger } from "../src/observability/runtime-logger.js";
 import { SchemaRegistry } from "../src/protocol/schema-registry.js";
+import type { ModelProvider } from "../src/providers/model-provider.js";
 import {
   createHandshakeProof,
   verifyHandshakeProof,
   type HandshakeProofFields,
 } from "../src/transport/handshake-authentication.js";
+import { APPLICATION_MAXIMUM_BYTES } from "../src/transport/application-envelope.js";
 import { HANDSHAKE_MAXIMUM_BYTES } from "../src/transport/paper-handshake.js";
 import {
   findAvailablePort,
@@ -45,6 +47,11 @@ interface PaperHelloOptions {
 interface CloseDetails {
   readonly code: number;
   readonly reason: string;
+}
+
+interface StartFixtureOptions {
+  readonly logger?: RuntimeLogger;
+  readonly modelProvider?: ModelProvider;
 }
 
 function healthyProvider(): ModelProviderHealthCheck {
@@ -95,13 +102,62 @@ function paperHello(options: PaperHelloOptions = {}): Record<string, unknown> {
   };
 }
 
+function agentRequest(
+  message: string,
+  playerUuid = "44444444-4444-4444-8444-444444444444",
+): Record<string, unknown> {
+  const requestId = uuid();
+  return {
+    protocolVersion: "1.0",
+    messageId: requestId,
+    requestId,
+    serverId: "test-server",
+    type: "agent.request",
+    timestamp: NOW.toISOString(),
+    nonce: Buffer.alloc(16, nextUuidSuffix).toString("base64url"),
+    payload: {
+      sessionId: null,
+      playerUuid,
+      module: "general",
+      message,
+      clientCapabilities: {
+        connected: false,
+        clientProtocolVersion: null,
+        features: {
+          overlay: 0,
+          itemIcons: 0,
+          recipeView: 0,
+          litematicaPreview: 0,
+          litematicaMaterialList: 0,
+        },
+      },
+    },
+  };
+}
+
+function agentCancel(request: Record<string, unknown>): Record<string, unknown> {
+  return {
+    protocolVersion: "1.0",
+    messageId: uuid(),
+    requestId: request["requestId"],
+    serverId: "test-server",
+    type: "agent.cancel",
+    timestamp: NOW.toISOString(),
+    nonce: Buffer.alloc(16, nextUuidSuffix).toString("base64url"),
+    payload: {
+      playerUuid: asRecord(request["payload"])["playerUuid"],
+      reason: "PLAYER_DISCONNECTED",
+    },
+  };
+}
+
 async function createConfig(port: number): Promise<string> {
   const directory = await temporaryRuntimeDirectory();
   temporaryDirectories.push(directory);
   return writeRuntimeConfig(directory, validRuntimeConfig(port));
 }
 
-async function startFixture(options: { readonly logger?: RuntimeLogger } = {}): Promise<{
+async function startFixture(options: StartFixtureOptions = {}): Promise<{
   readonly runtime: StartRuntimeResult;
   readonly url: string;
 }> {
@@ -110,7 +166,9 @@ async function startFixture(options: { readonly logger?: RuntimeLogger } = {}): 
   const runtime = await startRuntime({
     configPath,
     environment: runtimeEnvironment(),
-    modelProviderHealthCheck: healthyProvider(),
+    ...(options.modelProvider === undefined
+      ? { modelProviderHealthCheck: healthyProvider() }
+      : { modelProvider: options.modelProvider }),
     now: () => NOW,
     ...(options.logger === undefined ? {} : { logger: options.logger }),
   });
@@ -184,6 +242,7 @@ afterEach(async () => {
       .splice(0)
       .map((directory) => rm(directory, { recursive: true, force: true })),
   );
+  vi.restoreAllMocks();
 });
 
 describe("Paper WebSocket handshake", () => {
@@ -321,7 +380,7 @@ describe("Paper WebSocket handshake", () => {
     expect(asRecord(await exchange(valid, paperHello()))["type"]).toBe("runtime.hello");
   });
 
-  it("rejects duplicate-key JSON, binary input, and payloads over 16 KiB", async () => {
+  it("rejects duplicate-key JSON, binary input, and bounded handshake payloads", async () => {
     const { url } = await startFixture();
     const source = JSON.stringify(paperHello());
     const duplicateSource = source.replace(
@@ -349,7 +408,12 @@ describe("Paper WebSocket handshake", () => {
       oversized,
       `"${"x".repeat(HANDSHAKE_MAXIMUM_BYTES)}"`,
     );
-    expect(oversizedClose.code).toBe(1009);
+    expect(oversizedClose).toEqual({ code: 1008, reason: "HANDSHAKE_INVALID" });
+
+    const transportOversized = await openClient(url);
+    expect(
+      (await sendAndClose(transportOversized, `"${"x".repeat(APPLICATION_MAXIMUM_BYTES)}"`)).code,
+    ).toBe(1009);
 
     const valid = await openClient(url);
     expect(asRecord(await exchange(valid, paperHello()))["type"]).toBe("runtime.hello");
@@ -382,5 +446,154 @@ describe("Paper WebSocket handshake", () => {
 
     const socket = await openClient(`ws://127.0.0.1:${String(port)}/agent`);
     expect(await nextClose(socket)).toEqual({ code: 1008, reason: "RUNTIME_NOT_READY" });
+  });
+
+  it("serves multiple private Agent requests over one authenticated connection", async () => {
+    const generate = vi.fn().mockImplementation(async ({ input }: { readonly input: string }) => ({
+      fallbackText: `answer:${input}`,
+    }));
+    const modelProvider: ModelProvider = {
+      check: vi.fn().mockResolvedValue({ ok: true }),
+      generate,
+    };
+    const { url } = await startFixture({ modelProvider });
+    const socket = await openClient(url);
+    await exchange(socket, paperHello());
+
+    const firstRequest = agentRequest("first private prompt");
+    const first = asRecord(await exchange(socket, firstRequest));
+    const firstPayload = asRecord(first["payload"]);
+    const secondRequest = agentRequest(
+      "second private prompt",
+      "55555555-5555-4555-8555-555555555555",
+    );
+    const second = asRecord(await exchange(socket, secondRequest));
+
+    const registry = await SchemaRegistry.load();
+    expect(registry.validate("envelope.schema.json", first).valid).toBe(true);
+    expect(registry.validate("agent-complete.schema.json", firstPayload).valid).toBe(true);
+    expect(first).toMatchObject({
+      requestId: firstRequest["requestId"],
+      serverId: "test-server",
+      type: "agent.complete",
+    });
+    expect(first["messageId"]).not.toBe(firstRequest["requestId"]);
+    expect(firstPayload).toEqual({
+      sessionId: null,
+      playerUuid: "44444444-4444-4444-8444-444444444444",
+      fallbackText: "answer:first private prompt",
+      structuredViews: [],
+    });
+    expect(second).toMatchObject({
+      requestId: secondRequest["requestId"],
+      type: "agent.complete",
+      payload: { fallbackText: "answer:second private prompt" },
+    });
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("cancels an active request, releases it, and keeps the application channel open", async () => {
+    let generation = 0;
+    let reportStarted: (() => void) | undefined;
+    let reportAborted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      reportStarted = resolve;
+    });
+    const aborted = new Promise<void>((resolve) => {
+      reportAborted = resolve;
+    });
+    const modelProvider: ModelProvider = {
+      check: vi.fn().mockResolvedValue({ ok: true }),
+      generate: vi.fn(async ({ signal }) => {
+        generation += 1;
+        if (generation > 1) {
+          return { fallbackText: "replacement answer" };
+        }
+        reportStarted?.();
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              reportAborted?.();
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      }),
+    };
+    const { url } = await startFixture({ modelProvider });
+    const socket = await openClient(url);
+    await exchange(socket, paperHello());
+    const pending = agentRequest("cancel me");
+    socket.send(JSON.stringify(pending));
+    await started;
+
+    socket.send(JSON.stringify(agentCancel(pending)));
+    await aborted;
+    const replacement = agentRequest("replacement", "55555555-5555-4555-8555-555555555555");
+    const response = asRecord(await exchange(socket, replacement));
+
+    expect(response).toMatchObject({
+      requestId: replacement["requestId"],
+      type: "agent.complete",
+      payload: { fallbackText: "replacement answer" },
+    });
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("closes on replayed, binary, and not-yet-supported client capability messages", async () => {
+    const modelProvider: ModelProvider = {
+      check: vi.fn().mockResolvedValue({ ok: true }),
+      generate: vi.fn().mockResolvedValue({ fallbackText: "answer" }),
+    };
+
+    const replayFixture = await startFixture({ modelProvider });
+    const replaySocket = await openClient(replayFixture.url);
+    await exchange(replaySocket, paperHello());
+    const repeated = agentRequest("one request");
+    expect(asRecord(await exchange(replaySocket, repeated))["type"]).toBe("agent.complete");
+    expect(await sendAndClose(replaySocket, JSON.stringify(repeated))).toEqual({
+      code: 1008,
+      reason: "APPLICATION_MESSAGE_REPLAYED",
+    });
+
+    const binaryFixture = await startFixture({ modelProvider });
+    const binarySocket = await openClient(binaryFixture.url);
+    await exchange(binarySocket, paperHello());
+    expect(
+      await sendAndClose(binarySocket, Buffer.from(JSON.stringify(agentRequest("binary"))), true),
+    ).toEqual({ code: 1008, reason: "APPLICATION_MESSAGE_INVALID" });
+
+    const capabilityFixture = await startFixture({ modelProvider });
+    const capabilitySocket = await openClient(capabilityFixture.url);
+    await exchange(capabilitySocket, paperHello());
+    const unsupportedCapabilities = agentRequest("future client");
+    const capabilities = asRecord(
+      asRecord(unsupportedCapabilities["payload"])["clientCapabilities"],
+    );
+    capabilities["connected"] = true;
+    capabilities["clientProtocolVersion"] = "1.0";
+    expect(await sendAndClose(capabilitySocket, JSON.stringify(unsupportedCapabilities))).toEqual({
+      code: 1008,
+      reason: "APPLICATION_MESSAGE_INVALID",
+    });
+    expect(modelProvider.generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps legacy health-only injection fail closed without an implicit provider fetch", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const { url } = await startFixture();
+    const socket = await openClient(url);
+    await exchange(socket, paperHello());
+
+    const response = asRecord(await exchange(socket, agentRequest("must not leave runtime")));
+
+    expect(response).toMatchObject({
+      type: "agent.error",
+      payload: { code: "MODEL_UNAVAILABLE", retryable: true },
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

@@ -8,8 +8,9 @@ configuration and readiness controls. Phase 3 adds Paper-side strict startup
 checks, authenticated hello handling, non-executable core descriptors, and a
 conditional command-registration boundary. Phase 4 adds persistent Offline
 state, epoch-based admission, explicit cleanup ports, and authorized recovery.
-It still does not provide model requests, typed tool execution, proposals, or
-Capability Pack loading.
+Phase 5 adds bounded private model requests, literal text replies, rate limits,
+timeout, and cancellation. It still does not provide typed tool execution,
+proposals, or Capability Pack loading.
 
 The governing rule is:
 
@@ -63,22 +64,23 @@ sent to the Fabric client.
 
 Protocol 1.0 defines an HMAC-SHA-256 challenge/proof handshake. Every envelope
 also carries a UUID `messageId`, UUID `requestId`, timestamp, and unpredictable
-nonce. The schema validates their shape. The Phase 3 Paper client applies these
-behavioral controls before command registration:
+nonce. The schema validates their shape. Paper and Runtime apply these
+behavioral controls before dispatch:
 
 - Verify the HMAC proof without logging secret material.
 - Enforce a small clock-skew window.
-- Reject a handshake nonce or message ID already present in the bounded replay
-  cache.
+- Reject a handshake or application nonce/message ID already present in the
+  bounded replay cache.
 - Bind the Runtime reply to Paper's request ID, challenge, server ID, selected
   protocol, and expected component direction.
 - Bound message size before parsing, require strict UTF-8 and duplicate-key
   rejection, and validate closed fields afterward.
 
-Live tool-message correlation is a Phase 7 execution requirement; Phase 3 does
-not accept or execute tool calls. The Runtime endpoint accepts only the
-authenticated hello, and the pinned Paper `1.21.11-132` smoke proves that narrow
-channel. It is not evidence of an agent-request or tool-execution channel.
+After authentication, Phase 5 permits only `agent.request`/`agent.cancel` from
+Paper and `agent.complete`/`agent.error` from Runtime. Each terminal message is
+bound to the active connection, server ID, request ID, actual player UUID, null
+Phase 5 session, and issuing Offline epoch. Live tool-message correlation is a
+Phase 7 execution requirement; every tool/proposal/view type remains rejected.
 
 Loopback binding limits remote exposure but does not protect against another
 local process. Token file permissions, log redaction, and host account security
@@ -246,6 +248,14 @@ arguments, and message content by default. Session access always includes both
 server ID and player UUID. Command suggestions and resume identifiers are
 filtered to the requesting player.
 
+Phase 5 does not persist prompts or completions. The OpenAI request sets
+`store: false`, Runtime logs only fixed event/error metadata, and Paper renders
+the validated fallback as literal text rather than parsing formatting or click
+events. Server operators must separately disable or protect Paper's global
+player-command logging if questions are sensitive: the server may log the full
+`/agent say <message>` command before plugin code can selectively redact it.
+Client command history is likewise outside the plugin's control.
+
 Document retrieval is confined to configured roots, rejects traversal and
 symlink escapes, and marks document text as untrusted content in model context.
 Live unrestricted web access is not part of the design.
@@ -269,18 +279,18 @@ are rejected. Created directories are `0700`; SQLite and probe files are `0600`.
 Startup logs serialize only fixed event names, stable codes, stages, and known
 field paths. Provider exceptions and configuration values are discarded. The
 loopback `/health` response is a cached readiness snapshot with no model name,
-path, secret, raw error, or repeated external check. Phase 2 has no production
-provider network adapter, so the default CLI fails closed before listening.
+path, secret, raw error, or repeated external check. Phase 5's production
+provider performs a bounded model lookup during readiness and a bounded
+Responses request only for admitted player work.
 
 ## Current enforcement gap
 
-At the Phase 4 boundary, Paper-side startup, the Runtime-Paper authenticated
-hello, descriptor readiness, conditional registration, persistent Offline
-state, recovery, and epoch gate exist and have been exercised on Paper
-`1.21.11-132`. Request-path permission enforcement, proposal repositories,
+At the Phase 5 boundary, Paper-side startup, authenticated application channel,
+conditional registration, persistent Offline state, epoch gate, private
+conversation, request cancellation, and Runtime provider limits exist. The
+request cleanup port has a real producer; proposal, operation, and client-state
+ports remain empty. Session ownership/persistence, proposal repositories,
 Phase 7 typed tool execution, the Phase 9 capability loader, audit storage,
-client payload handling, and world mutation remain absent. The four cleanup
-ports have no producers yet; their tests prove ordering, exception isolation,
-and epoch invalidation, not proposal/tool/client end-to-end behavior. Protocol
-schemas and readiness descriptors remain necessary contracts, not a complete
-execution security implementation.
+client payload handling, and world mutation remain absent. Protocol schemas and
+readiness descriptors remain necessary contracts, not a complete execution
+security implementation.

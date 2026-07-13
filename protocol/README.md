@@ -28,6 +28,9 @@ The Phase 1 payload registry is:
 | ------------------------------ | ----------------------------- |
 | `runtime.hello`, `paper.hello` | `handshake.schema.json`       |
 | `agent.request`                | `agent-request.schema.json`   |
+| `agent.complete`               | `agent-complete.schema.json`  |
+| `agent.error`                  | `agent-error.schema.json`     |
+| `agent.cancel`                 | `agent-cancel.schema.json`    |
 | `tool.call`                    | `tool-call.schema.json`       |
 | `tool.result`                  | `tool-result.schema.json`     |
 | `proposal.create`              | `proposal.schema.json`        |
@@ -61,6 +64,9 @@ network handler.
 - `messageId` is unique for every sent message. `requestId` is copied to every
   response, delta, tool call, result, and view belonging to one request. For an
   uncorrelated initiating message, use the same new UUID for both fields.
+- `agent.cancel` is correlated by the original `requestId` and trusted player
+  identity. Cancellation is idempotent: an unknown, completed, or already
+  cancelled request has no effect, and a late terminal response is discarded.
 - The receiver checks an allowed clock-skew window and stores accepted nonces
   until that window expires. A repeated nonce or message ID is rejected before
   payload handling. The nonce contains at least 128 bits from a CSPRNG and is

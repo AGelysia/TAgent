@@ -2,14 +2,14 @@
 
 ## Status and scope
 
-This document records the target architecture and decisions through Phase 4.
+This document records the target architecture and decisions through Phase 5.
 The repository contains build scaffolding, protocol contracts, the Runtime
 configuration/readiness boundary, and Paper-side Phase 3 startup, authenticated
-hello, core-descriptor, conditional-command, and Phase 4 Offline lifecycle
-components. Production model access, operational tool execution, application
-repositories, client views, and Litematica integration remain later work. The
-conditional command and Offline recovery paths have been validated on the pinned
-Paper `1.21.11-132` server artifact.
+hello, core-descriptor, conditional-command, Phase 4 Offline lifecycle, and
+Phase 5 private conversation components. Operational tool execution,
+application repositories, client views, and Litematica integration remain later
+work. The conditional command and Offline recovery paths have been validated on
+the pinned Paper `1.21.11-132` server artifact.
 
 The implementation has three deployable components:
 
@@ -78,6 +78,7 @@ dev.minecraftagent.paper
   command          command tree, Offline gate, sender authorization
   transport        authenticated Runtime connection
   protocol         DTO conversion and schema validation
+  request          live player requests, timeout, cancellation, and private reply
   tool             catalog and execution state machine
   policy           risk and permission intersection
   proposal         frozen proposals and confirmation
@@ -134,7 +135,7 @@ src
 
 Runtime policy is defense in depth. It does not replace Paper's final policy.
 
-Phase 2 implements only the Runtime startup boundary. It parses restricted YAML,
+Phase 2 established the Runtime startup boundary. It parses restricted YAML,
 performs post-parse whole-scalar environment substitution, validates with Zod,
 checks private state paths and Capability Schema availability, opens a
 Runtime-owned SQLite readiness connection, and invokes an injected provider
@@ -142,9 +143,12 @@ health port. The final loopback `listen()` is the port check; no pre-bind probe 
 used. Only a successful final bind changes local health from `STARTING` to
 `READY`.
 
-The production provider health implementation is intentionally absent. The
-default adapter fails with `PROVIDER_UNSUPPORTED`; test-only injection proves
-ordering without creating a configurable fake-health bypass.
+Phase 5 supplies the production OpenAI Responses adapter. Startup checks the
+configured model without generating an answer, and accepted requests use a
+bounded non-streaming text call with provider storage disabled. Runtime owns a
+FIFO queue, a concurrency cap, one outstanding request per player, cooldown,
+an in-memory daily request limit, provider timeout, and cooperative abort. The
+monthly budget and durable usage accounting remain later work.
 
 ### Fabric client
 
@@ -216,6 +220,8 @@ self-check.
   budget. Hash validation alone does not make a multi-tick write atomic.
 - Runtime request concurrency, queue length, context size, and build size are
   configuration limits rather than assumptions.
+- Paper independently caps live correlations at 64 and keeps at most one live
+  request per player. Network and model completion never block the server thread.
 - Client decompression and reassembly enforce compressed and decompressed byte
   limits before allocating large buffers. Rendering changes are scheduled onto
   the client render thread.
@@ -266,16 +272,40 @@ atomically persists ENABLED before publishing ONLINE. Runtime loss retains
 desired ENABLED and requires an explicit `/agent on`; there is no Phase 4
 auto-reconnect.
 
-## Current Phase 4 boundary
+## Phase 5 private conversation
 
-The following remain outside the Phase 4 implementation boundary:
+[ADR 0003](adr/0003-phase5-private-conversation-channel.md) selects the
+authenticated application channel and Paper-owned request lifecycle.
+`/agent say <message>` is the only Phase 5 conversation entry point. It is
+available to ordinary players through `minecraftagent.use`, derives identity
+from the actual `Player`, fixes the module to `general`, and does not install a
+chat listener. Paper creates the request ID and binds it to the authenticated
+connection, configured server ID, player UUID, null Phase 5 session, and the
+current `OperationalGate` permit.
 
-- Production provider health requests and model calls. The Runtime WebSocket
-  endpoint implements authentication only; agent and tool traffic remain
-  unsupported.
+The authenticated WebSocket remains open after hello. Application messages are
+capped at 64 KiB, strict UTF-8/JSON decoded, replay checked, direction checked,
+and validated against their type-specific schemas. Paper accepts only
+`agent.complete` and `agent.error`; Runtime accepts only `agent.request` and
+`agent.cancel`. Structured views remain empty until the client channel exists.
+
+Completion, error, send failure, timeout, player quit, Offline transition,
+Runtime loss, and plugin disable compete for one live record. Removing that
+record is the single terminal transition. Paper revalidates the original epoch
+and connection immediately before scheduling a literal `Component.text` reply
+to the player UUID. Unknown, duplicated, late, wrong-player, old-connection, or
+old-epoch terminal messages cannot produce a reply.
+
+## Current Phase 5 boundary
+
+The following remain outside the Phase 5 implementation boundary:
+
 - Runtime application repositories/migrations and every Paper database.
-- `/agent` request routing, proposals, and tool execution. The current command
-  surface is readiness, doctor, and authorized Offline toggles only.
+- Session/message persistence, resume, explicit modules, context reduction,
+  durable usage accounting, and monthly budget enforcement begin in Phase 6 or
+  later.
+- Proposals and tool execution remain unsupported; the application channel
+  rejects their reserved message types.
 - The six core tool entries are non-executable readiness descriptors. Real
   typed tools and Paper adapters are Phase 7.
 - Capability Pack loading and command-backed capability execution are Phase 9.

@@ -34,6 +34,36 @@ export {
   type ModelProviderHealthResult,
 } from "./health/model-provider.js";
 export {
+  ModelGenerationError,
+  modelGenerationFailureCodes,
+  UnsupportedModelProvider,
+  type ModelGenerationFailureCode,
+  type ModelGenerationRequest,
+  type ModelGenerationResult,
+  type ModelGenerationUsage,
+  type ModelProvider,
+} from "./providers/model-provider.js";
+export {
+  OpenAiResponsesProvider,
+  type OpenAiResponsesProviderOptions,
+} from "./providers/openai-responses-provider.js";
+export {
+  AgentRequestService,
+  type AgentCompletionPayload,
+  type AgentErrorCode,
+  type AgentErrorPayload,
+  type AgentRequestInput,
+  type AgentRequestServiceOptions,
+  type AgentTerminalResponse,
+} from "./requests/agent-request-service.js";
+export {
+  RequestAdmissionController,
+  type RequestAdmissionDecision,
+  type RequestAdmissionEntry,
+  type RequestAdmissionLimits,
+  type RequestAdmissionRejection,
+} from "./requests/request-admission.js";
+export {
   runtimeHealthCheckNames,
   RuntimeHealthState,
   type RuntimeHealthStatus,

@@ -9,14 +9,18 @@ import dev.minecraftagent.paper.lifecycle.AgentState;
 import dev.minecraftagent.paper.lifecycle.AgentStatus;
 import dev.minecraftagent.paper.lifecycle.DesiredMode;
 import dev.minecraftagent.paper.lifecycle.OfflineReason;
+import dev.minecraftagent.paper.request.AgentRequestGateway;
 import java.lang.reflect.Proxy;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import org.bukkit.command.CommandSender;
+import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.junit.jupiter.api.Test;
 
@@ -48,8 +52,10 @@ class AgentCommandTest {
     assertTrue(command.execute(sender, "agent", new String[] {"doctor"}));
     assertTrue(command.execute(sender, "agent", new String[] {"unknown"}));
     assertTrue(command.execute(sender, "agent", new String[] {"on", "extra"}));
+    assertTrue(command.execute(sender, "agent", new String[] {"say", "secret"}));
 
-    assertEquals(List.of("AI offline", "AI offline", "AI offline", "AI offline"), messages);
+    assertEquals(
+        List.of("AI offline", "AI offline", "AI offline", "AI offline", "AI offline"), messages);
     assertEquals(0, authorizationCalls[0]);
     assertEquals(0, control.offCalls);
     assertEquals(0, control.onCalls);
@@ -187,7 +193,78 @@ class AgentCommandTest {
     command.execute(sender, "agent", new String[0]);
     command.execute(sender, "agent", new String[] {"unknown"});
 
-    assertEquals(List.of("Minecraft Agent: ONLINE", "/agent [doctor|off|on]"), messages);
+    assertEquals(
+        List.of("Minecraft Agent: ONLINE", "/agent [say <message>|doctor|off|on]"), messages);
+  }
+
+  @Test
+  void ordinaryPlayerSayUsesActualUuidAndJoinsOnlyExplicitArguments() {
+    var messages = new ArrayList<String>();
+    var requests = new RecordingRequests();
+    var playerId = UUID.randomUUID();
+    var command =
+        command(healthy(), new RecordingControl(), requests, ignored -> false, Runnable::run);
+
+    command.execute(
+        player(messages, playerId, Set.of(AgentCommand.USE_PERMISSION)),
+        "agent",
+        new String[] {"say", "private", "question"});
+
+    assertEquals(playerId, requests.playerId);
+    assertEquals("private question", requests.message);
+    assertTrue(messages.isEmpty());
+  }
+
+  @Test
+  void sayRequiresUsePermissionPlayerSenderAndMessage() {
+    var deniedMessages = new ArrayList<String>();
+    var command =
+        command(
+            healthy(),
+            new RecordingControl(),
+            new RecordingRequests(),
+            ignored -> false,
+            Runnable::run);
+    command.execute(
+        player(deniedMessages, UUID.randomUUID(), Set.of()),
+        "agent",
+        new String[] {"say", "hello"});
+    assertEquals(List.of("You do not have permission to use this command."), deniedMessages);
+
+    var consoleMessages = new ArrayList<String>();
+    command.execute(sender(consoleMessages, true), "agent", new String[] {"say", "hello"});
+    assertEquals(List.of("This command can only be used by a player."), consoleMessages);
+
+    var emptyMessages = new ArrayList<String>();
+    command.execute(
+        player(emptyMessages, UUID.randomUUID(), Set.of(AgentCommand.USE_PERMISSION)),
+        "agent",
+        new String[] {"say"});
+    assertEquals(List.of("/agent [say <message>|doctor|off|on]"), emptyMessages);
+  }
+
+  @Test
+  void sayMapsRequestAdmissionFailuresToStablePrivateOutput() {
+    var expected =
+        java.util.Map.of(
+            AgentRequestGateway.Submission.ALREADY_ACTIVE,
+            "AI request already in progress.",
+            AgentRequestGateway.Submission.OFFLINE,
+            "AI offline",
+            AgentRequestGateway.Submission.RUNTIME_UNAVAILABLE,
+            "AI unavailable. Try again later.",
+            AgentRequestGateway.Submission.INVALID_MESSAGE,
+            "AI message must contain 1 to 4096 characters.");
+    for (var entry : expected.entrySet()) {
+      var messages = new ArrayList<String>();
+      AgentRequestGateway requests = (playerId, message) -> entry.getKey();
+      command(healthy(), new RecordingControl(), requests, ignored -> false, Runnable::run)
+          .execute(
+              player(messages, UUID.randomUUID(), Set.of(AgentCommand.USE_PERMISSION)),
+              "agent",
+              new String[] {"say", "hello"});
+      assertEquals(List.of(entry.getValue()), messages);
+    }
   }
 
   @Test
@@ -198,7 +275,7 @@ class AgentCommandTest {
     var onlineAuthorized =
         command(healthy(), new RecordingControl(), ignored -> true, Runnable::run);
     assertEquals(
-        List.of("doctor", "off"),
+        List.of("say", "doctor", "off"),
         onlineAuthorized.tabComplete(permitted, "agent", new String[] {""}));
     assertEquals(List.of("off"), onlineAuthorized.tabComplete(denied, "agent", new String[] {"o"}));
 
@@ -242,6 +319,15 @@ class AgentCommandTest {
     return new AgentCommand(plugin(), () -> status, control, authorizer, dispatcher);
   }
 
+  private static AgentCommand command(
+      AgentStatus status,
+      AgentControl control,
+      AgentRequestGateway requests,
+      ToggleAuthorizer authorizer,
+      java.util.function.Consumer<Runnable> dispatcher) {
+    return new AgentCommand(plugin(), () -> status, control, requests, authorizer, dispatcher);
+  }
+
   private static AgentStatus healthy() {
     return new AgentStatus(
         AgentState.ONLINE, DesiredMode.ENABLED, AgentHealth.HEALTHY, null, null, List.of());
@@ -273,6 +359,33 @@ class AgentCommandTest {
             (proxy, method, arguments) -> {
               if (method.getName().equals("hasPermission")) {
                 return permission;
+              }
+              if (method.getName().equals("sendMessage") && arguments != null) {
+                for (var argument : arguments) {
+                  if (argument instanceof String message) {
+                    messages.add(message);
+                  } else if (argument instanceof String[] batch) {
+                    messages.addAll(List.of(batch));
+                  }
+                }
+              }
+              return defaultValue(method.getReturnType());
+            });
+  }
+
+  private static Player player(List<String> messages, UUID playerId, Set<String> permissions) {
+    return (Player)
+        Proxy.newProxyInstance(
+            Player.class.getClassLoader(),
+            new Class<?>[] {Player.class},
+            (proxy, method, arguments) -> {
+              if (method.getName().equals("getUniqueId")) {
+                return playerId;
+              }
+              if (method.getName().equals("hasPermission")) {
+                return arguments != null
+                    && arguments.length == 1
+                    && permissions.contains(String.valueOf(arguments[0]));
               }
               if (method.getName().equals("sendMessage") && arguments != null) {
                 for (var argument : arguments) {
@@ -321,6 +434,18 @@ class AgentCommandTest {
     public RecoveryRequest turnOn() {
       onCalls++;
       return recovery;
+    }
+  }
+
+  private static final class RecordingRequests implements AgentRequestGateway {
+    private UUID playerId;
+    private String message;
+
+    @Override
+    public Submission submit(UUID playerId, String message) {
+      this.playerId = playerId;
+      this.message = message;
+      return Submission.ACCEPTED;
     }
   }
 

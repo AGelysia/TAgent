@@ -8,8 +8,8 @@ PAPER_URL="https://fill-data.papermc.io/v1/objects/${PAPER_SHA256}/paper-1.21.11
 CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/minecraft-agent-paper-smoke"
 PAPER_JAR="${CACHE_ROOT}/paper-1.21.11-${PAPER_BUILD}.jar"
 PLUGIN_JAR="${ROOT}/paper-plugin/build/libs/minecraft-agent-paper-0.1.0-SNAPSHOT.jar"
-TEST_TOKEN=phase-4-paper-smoke-token-0123456789abcdef
-WRONG_TOKEN=phase-4-paper-smoke-wrong-0123456789abcdef
+TEST_TOKEN=phase-5-paper-smoke-token-0123456789abcdef
+WRONG_TOKEN=phase-5-paper-smoke-wrong-0123456789abcdef
 SELECTED_CASES=" ${PAPER_SMOKE_CASES:-offline-lifecycle unavailable wrong-token incompatible} "
 WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/minecraft-agent-paper-smoke.XXXXXX")"
 RUNTIME_PID=""
@@ -189,7 +189,7 @@ start_runtime() {
       'model:' \
       '  provider: openai' \
       '  apiKey: ${OPENAI_API_KEY}' \
-      '  model: phase-3-smoke-model' \
+      '  model: phase-5-smoke-model' \
       '  timeoutSeconds: 2' \
       'storage:' \
       '  sqlitePath: ./data/runtime.db' \
@@ -212,7 +212,7 @@ start_runtime() {
     (
       cd "$ROOT/agent-runtime"
       MINECRAFT_AGENT_SERVER_TOKEN="$runtime_token" \
-        OPENAI_API_KEY=phase-3-paper-smoke-api-key-0123456789 \
+        OPENAI_API_KEY=phase-5-paper-smoke-api-key-0123456789 \
         node scripts/smoke-runtime.mjs "$config_path"
     ) >"$runtime_log" 2>&1 &
   elif [[ "$mode" == incompatible ]]; then
@@ -372,6 +372,13 @@ run_offline_lifecycle_case() {
   if ! rg -q 'Minecraft Agent health: DEGRADED$' <<<"$LAST_COMMAND_OUTPUT"; then
     printf 'Online doctor did not report DEGRADED health\n' >&2
     printf '%s\n' "$LAST_COMMAND_OUTPUT" >&2
+    return 1
+  fi
+  run_console_command \
+    "$first_log" 'agent say phase5-smoke-question' 'This command can only be used by a player\.$' 10
+  if rg -q 'phase5-smoke-question|Paper smoke response\.' "${case_root}/runtime.log"; then
+    printf 'Console /agent say reached the model provider\n' >&2
+    tail -n 120 "${case_root}/runtime.log" >&2
     return 1
   fi
   run_offline_command "$first_log" 'agent off'

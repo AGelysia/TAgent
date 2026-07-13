@@ -43,6 +43,7 @@
         "agent.delta",
         "agent.complete",
         "agent.error",
+        "agent.cancel",
         "view.publish",
         "view.clear",
         "tool.call",

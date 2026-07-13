@@ -16,8 +16,12 @@ import java.net.URI;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -54,6 +58,81 @@ class JavaHttpRuntimeConnectorTest {
     assertTrue(connection.isOpen());
     assertFalse(connection.whenClosed().toCompletableFuture().isDone());
     connection.close();
+    connection.whenClosed().toCompletableFuture().get(1, TimeUnit.SECONDS);
+    assertFalse(connection.isOpen());
+  }
+
+  @Test
+  void exchangesMultipleApplicationMessagesAfterAuthentication() throws Exception {
+    runtime = FakeRuntime.start(Mode.ACCEPT, TOKEN);
+    var connection = connect(runtime.port()).toCompletableFuture().get(3, TimeUnit.SECONDS);
+    var received = java.util.Collections.synchronizedList(new ArrayList<String>());
+    connection.setApplicationHandler(received::add);
+
+    connection.sendApplication("paper-one").toCompletableFuture().get(1, TimeUnit.SECONDS);
+    connection.sendApplication("paper-two").toCompletableFuture().get(1, TimeUnit.SECONDS);
+    await(() -> runtime.applicationMessages().size() == 2);
+
+    runtime.sendApplication("runtime-one");
+    runtime.sendApplication("runtime-two");
+    await(() -> received.size() == 2);
+
+    assertEquals(List.of("paper-one", "paper-two"), runtime.applicationMessages());
+    assertEquals(List.of("runtime-one", "runtime-two"), received);
+    assertTrue(connection.isOpen());
+  }
+
+  @Test
+  void closesWhenApplicationMessageArrivesBeforeHandlerBinding() throws Exception {
+    runtime = FakeRuntime.start(Mode.ACCEPT, TOKEN);
+    var connection = connect(runtime.port()).toCompletableFuture().get(3, TimeUnit.SECONDS);
+
+    runtime.sendApplication("unexpected");
+
+    connection.whenClosed().toCompletableFuture().get(1, TimeUnit.SECONDS);
+    assertFalse(connection.isOpen());
+  }
+
+  @Test
+  void closesWhenApplicationHandlerThrows() throws Exception {
+    runtime = FakeRuntime.start(Mode.ACCEPT, TOKEN);
+    var connection = connect(runtime.port()).toCompletableFuture().get(3, TimeUnit.SECONDS);
+    connection.setApplicationHandler(
+        ignored -> {
+          throw new IllegalArgumentException("invalid application envelope");
+        });
+
+    runtime.sendApplication("invalid");
+
+    connection.whenClosed().toCompletableFuture().get(1, TimeUnit.SECONDS);
+    assertFalse(connection.isOpen());
+  }
+
+  @Test
+  void rejectsOversizedOutboundApplicationMessageWithoutWritingIt() throws Exception {
+    runtime = FakeRuntime.start(Mode.ACCEPT, TOKEN);
+    var connection = connect(runtime.port()).toCompletableFuture().get(3, TimeUnit.SECONDS);
+    connection.setApplicationHandler(ignored -> {});
+
+    var failure =
+        assertFailure(
+            connection.sendApplication(
+                "x".repeat(JavaHttpRuntimeConnector.MAX_APPLICATION_BYTES + 1)),
+            "APPLICATION_MESSAGE_TOO_LARGE");
+
+    assertEquals("protocol", failure.stage());
+    assertEquals(List.of(), runtime.applicationMessages());
+    assertTrue(connection.isOpen());
+  }
+
+  @Test
+  void closesOnOversizedInboundApplicationMessage() throws Exception {
+    runtime = FakeRuntime.start(Mode.ACCEPT, TOKEN);
+    var connection = connect(runtime.port()).toCompletableFuture().get(3, TimeUnit.SECONDS);
+    connection.setApplicationHandler(ignored -> {});
+
+    runtime.sendApplication("x".repeat(JavaHttpRuntimeConnector.MAX_APPLICATION_BYTES + 1));
+
     connection.whenClosed().toCompletableFuture().get(1, TimeUnit.SECONDS);
     assertFalse(connection.isOpen());
   }
@@ -175,8 +254,7 @@ class JavaHttpRuntimeConnectorTest {
   }
 
   private static RuntimeConnectionFailure assertFailure(
-      java.util.concurrent.CompletionStage<AuthenticatedRuntimeConnection> stage, String code)
-      throws Exception {
+      java.util.concurrent.CompletionStage<?> stage, String code) throws Exception {
     try {
       stage.toCompletableFuture().get(3, TimeUnit.SECONDS);
       throw new AssertionError("connection unexpectedly succeeded");
@@ -225,6 +303,9 @@ class JavaHttpRuntimeConnectorTest {
     private final CountDownLatch started = new CountDownLatch(1);
     private final Mode mode;
     private final String token;
+    private final Set<WebSocket> authenticated = ConcurrentHashMap.newKeySet();
+    private final List<String> applicationMessages =
+        java.util.Collections.synchronizedList(new ArrayList<>());
 
     private FakeRuntime(Mode mode, String token) {
       super(new InetSocketAddress("127.0.0.1", 0), 1);
@@ -245,6 +326,17 @@ class JavaHttpRuntimeConnectorTest {
       return getPort();
     }
 
+    List<String> applicationMessages() {
+      synchronized (applicationMessages) {
+        return List.copyOf(applicationMessages);
+      }
+    }
+
+    void sendApplication(String message) {
+      var connection = authenticated.stream().findFirst().orElseThrow();
+      connection.send(message);
+    }
+
     @Override
     public void onOpen(WebSocket connection, ClientHandshake handshake) {
       if (!"/agent".equals(handshake.getResourceDescriptor())) {
@@ -253,10 +345,16 @@ class JavaHttpRuntimeConnectorTest {
     }
 
     @Override
-    public void onClose(WebSocket connection, int code, String reason, boolean remote) {}
+    public void onClose(WebSocket connection, int code, String reason, boolean remote) {
+      authenticated.remove(connection);
+    }
 
     @Override
     public void onMessage(WebSocket connection, String message) {
+      if (authenticated.contains(connection)) {
+        applicationMessages.add(message);
+        return;
+      }
       if (mode == Mode.SILENT) {
         return;
       }
@@ -278,6 +376,7 @@ class JavaHttpRuntimeConnectorTest {
                 "\\{\\\"protocolVersion\\\":\\\"1.0\\\"",
                 "{\\\"protocolVersion\\\":\\\"1.0\\\",\\\"protocolVersion\\\":\\\"1.0\\\"");
       }
+      authenticated.add(connection);
       connection.send(encoded);
     }
 

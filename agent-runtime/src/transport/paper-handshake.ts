@@ -7,7 +7,14 @@ import type { RawData, WebSocket } from "ws";
 
 import type { RuntimeHealthState } from "../health/runtime-health.js";
 import type { SchemaRegistry } from "../protocol/schema-registry.js";
+import type { AgentRequestService } from "../requests/agent-request-service.js";
 import { runtimeIdentity, SUPPORTED_PROTOCOL_VERSION } from "../version.js";
+import {
+  APPLICATION_MAXIMUM_BYTES,
+  ApplicationEnvelopeProtocol,
+  ApplicationProtocolFailure,
+  type ApplicationFailureCode,
+} from "./application-envelope.js";
 import {
   createHandshakeProof,
   decodeCanonicalBase64Url,
@@ -65,6 +72,7 @@ export interface PaperHandshakeServiceOptions {
   readonly serverToken: string;
   readonly schemaRegistry: SchemaRegistry;
   readonly health: RuntimeHealthState;
+  readonly agentRequests: AgentRequestService;
   readonly now?: () => Date;
   readonly randomBytes?: (size: number) => Buffer;
   readonly randomUuid?: () => string;
@@ -95,7 +103,10 @@ function rawDataBuffer(data: RawData): Buffer {
   return Buffer.from(data);
 }
 
-function closeWithCode(socket: WebSocket, code: HandshakeFailureCode): void {
+function closeWithCode(
+  socket: WebSocket,
+  code: HandshakeFailureCode | ApplicationFailureCode,
+): void {
   if (socket.readyState === socket.OPEN) {
     socket.close(1008, code);
   } else if (socket.readyState !== socket.CLOSED) {
@@ -124,6 +135,8 @@ export class PaperHandshakeService {
   readonly #randomBytes: (size: number) => Buffer;
   readonly #randomUuid: () => string;
   readonly #replayCache: HandshakeReplayCache;
+  readonly #agentRequests: AgentRequestService;
+  readonly #applicationProtocol: ApplicationEnvelopeProtocol;
   readonly #connections = new Set<WebSocket>();
   #authenticatedSocket: WebSocket | undefined;
   #closed = false;
@@ -142,6 +155,15 @@ export class PaperHandshakeService {
         ttlMilliseconds: REPLAY_CACHE_TTL_MILLISECONDS,
         maximumEntries: REPLAY_CACHE_MAXIMUM_ENTRIES,
       });
+    this.#agentRequests = options.agentRequests;
+    this.#applicationProtocol = new ApplicationEnvelopeProtocol({
+      serverId: options.serverId,
+      schemaRegistry: options.schemaRegistry,
+      replayCache: this.#replayCache,
+      ...(options.now === undefined ? {} : { now: options.now }),
+      ...(options.randomBytes === undefined ? {} : { randomBytes: options.randomBytes }),
+      ...(options.randomUuid === undefined ? {} : { randomUuid: options.randomUuid }),
+    });
   }
 
   public accept(socket: WebSocket): void {
@@ -159,7 +181,8 @@ export class PaperHandshakeService {
     }
 
     this.#connections.add(socket);
-    let messageHandled = false;
+    let handshakeAttempted = false;
+    let authenticated = false;
     const timeout = setTimeout(() => {
       closeWithCode(socket, "HANDSHAKE_TIMEOUT");
     }, HANDSHAKE_TIMEOUT_MILLISECONDS);
@@ -170,14 +193,19 @@ export class PaperHandshakeService {
       this.#connections.delete(socket);
       if (this.#authenticatedSocket === socket) {
         this.#authenticatedSocket = undefined;
+        this.#agentRequests.cancelAll();
       }
     });
     socket.on("message", (data, isBinary) => {
-      if (messageHandled) {
-        closeWithCode(socket, "UNSUPPORTED_MESSAGE_TYPE");
+      if (authenticated) {
+        this.#handleApplicationMessage(socket, data, isBinary);
         return;
       }
-      messageHandled = true;
+      if (handshakeAttempted) {
+        closeWithCode(socket, "HANDSHAKE_INVALID");
+        return;
+      }
+      handshakeAttempted = true;
       clearTimeout(timeout);
 
       try {
@@ -185,6 +213,7 @@ export class PaperHandshakeService {
           throw new HandshakeFailure("HANDSHAKE_INVALID");
         }
         const response = this.#authenticate(rawDataBuffer(data), socket);
+        authenticated = true;
         socket.send(JSON.stringify(response), (error) => {
           // Node's write callback can supply null at runtime even though ws types it as undefined.
           if (error !== undefined && error !== null) {
@@ -207,10 +236,61 @@ export class PaperHandshakeService {
     }
     this.#connections.clear();
     this.#authenticatedSocket = undefined;
+    this.#agentRequests.close();
   }
 
   public get authenticated(): boolean {
     return this.#authenticatedSocket !== undefined;
+  }
+
+  #handleApplicationMessage(socket: WebSocket, data: RawData, isBinary: boolean): void {
+    try {
+      if (isBinary || this.#authenticatedSocket !== socket) {
+        throw new ApplicationProtocolFailure("APPLICATION_MESSAGE_INVALID");
+      }
+      const bytes = rawDataBuffer(data);
+      if (bytes.length > APPLICATION_MAXIMUM_BYTES) {
+        throw new ApplicationProtocolFailure("APPLICATION_MESSAGE_INVALID");
+      }
+      let source: string;
+      try {
+        source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        throw new ApplicationProtocolFailure("APPLICATION_MESSAGE_INVALID");
+      }
+
+      const message = this.#applicationProtocol.parse(source);
+      if (message.type === "agent.cancel") {
+        this.#agentRequests.cancel(message.cancellation.requestId, message.cancellation.playerUuid);
+        return;
+      }
+      this.#agentRequests.submit(message.request, (terminal) => {
+        if (this.#authenticatedSocket !== socket || socket.readyState !== socket.OPEN) {
+          return;
+        }
+        let response: Record<string, unknown>;
+        try {
+          response = this.#applicationProtocol.createResponse(message.request.requestId, terminal);
+        } catch {
+          socket.terminate();
+          return;
+        }
+        try {
+          socket.send(JSON.stringify(response), (error) => {
+            if (error !== undefined && error !== null) {
+              socket.terminate();
+            }
+          });
+        } catch {
+          socket.terminate();
+        }
+      });
+    } catch (error) {
+      closeWithCode(
+        socket,
+        error instanceof ApplicationProtocolFailure ? error.code : "APPLICATION_MESSAGE_INVALID",
+      );
+    }
   }
 
   #authenticate(bytes: Buffer, socket: WebSocket): Record<string, unknown> {
@@ -353,7 +433,7 @@ export async function registerPaperHandshakeRoute(
   const service = new PaperHandshakeService(options);
   await app.register(websocket, {
     options: {
-      maxPayload: HANDSHAKE_MAXIMUM_BYTES,
+      maxPayload: APPLICATION_MAXIMUM_BYTES,
       perMessageDeflate: false,
     },
   });

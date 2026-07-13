@@ -17,10 +17,14 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 public final class JavaHttpRuntimeConnector implements RuntimeConnector {
   static final int MAX_HANDSHAKE_BYTES = 16 * 1024;
+  static final int MAX_APPLICATION_BYTES = 64 * 1024;
+  static final int MAX_PENDING_APPLICATION_SENDS = 64;
 
   private final HttpClient httpClient;
   private final HandshakeCodec codec;
@@ -173,7 +177,11 @@ public final class JavaHttpRuntimeConnector implements RuntimeConnector {
     return current;
   }
 
-  private static String strictUtf8(CharSequence text) {
+  private static String strictUtf8(
+      CharSequence text, int maximumBytes, String tooLargeCode, String invalidCode, String stage) {
+    if (text.length() > maximumBytes) {
+      throw new RuntimeConnectionFailure(tooLargeCode, stage);
+    }
     try {
       var encoder =
           StandardCharsets.UTF_8
@@ -181,14 +189,14 @@ public final class JavaHttpRuntimeConnector implements RuntimeConnector {
               .onMalformedInput(CodingErrorAction.REPORT)
               .onUnmappableCharacter(CodingErrorAction.REPORT);
       var encoded = encoder.encode(CharBuffer.wrap(text));
-      if (encoded.remaining() > MAX_HANDSHAKE_BYTES) {
-        throw new RuntimeConnectionFailure("HANDSHAKE_MESSAGE_TOO_LARGE", "authentication");
+      if (encoded.remaining() > maximumBytes) {
+        throw new RuntimeConnectionFailure(tooLargeCode, stage);
       }
       var bytes = new byte[encoded.remaining()];
       encoded.get(bytes);
       return new String(bytes, StandardCharsets.UTF_8);
     } catch (CharacterCodingException error) {
-      throw new RuntimeConnectionFailure("HANDSHAKE_MESSAGE_INVALID", "authentication");
+      throw new RuntimeConnectionFailure(invalidCode, stage);
     }
   }
 
@@ -196,9 +204,10 @@ public final class JavaHttpRuntimeConnector implements RuntimeConnector {
     private final CompletableFuture<String> firstMessage = new CompletableFuture<>();
     private final CompletableFuture<Void> closed = new CompletableFuture<>();
     private final StringBuilder fragments = new StringBuilder();
-    private final AtomicBoolean receivedMessage = new AtomicBoolean();
+    private final AtomicReference<Consumer<String>> applicationHandler = new AtomicReference<>();
     private volatile WebSocket socket;
     private volatile boolean authenticated;
+    private boolean receivedHandshake;
 
     void attach(WebSocket socket) {
       this.socket = socket;
@@ -213,8 +222,23 @@ public final class JavaHttpRuntimeConnector implements RuntimeConnector {
       return closed;
     }
 
-    void markAuthenticated() {
+    synchronized void markAuthenticated() {
+      if (!receivedHandshake || authenticated) {
+        throw new IllegalStateException("Invalid WebSocket authentication transition");
+      }
+      fragments.setLength(0);
       authenticated = true;
+      var current = socket;
+      if (current != null) {
+        current.request(1);
+      }
+    }
+
+    void setApplicationHandler(Consumer<String> handler) {
+      Objects.requireNonNull(handler);
+      if (!applicationHandler.compareAndSet(null, handler)) {
+        throw new IllegalStateException("Application handler is already bound");
+      }
     }
 
     @Override
@@ -223,34 +247,46 @@ public final class JavaHttpRuntimeConnector implements RuntimeConnector {
     }
 
     @Override
-    public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
-      if (receivedMessage.get() || fragments.length() + data.length() > MAX_HANDSHAKE_BYTES) {
+    public synchronized CompletionStage<?> onText(
+        WebSocket webSocket, CharSequence data, boolean last) {
+      if (authenticated) {
+        return onApplicationText(webSocket, data, last);
+      }
+      if (receivedHandshake || fragments.length() + data.length() > MAX_HANDSHAKE_BYTES) {
         fail(
             new RuntimeConnectionFailure(
-                receivedMessage.get() ? "HANDSHAKE_MESSAGE_INVALID" : "HANDSHAKE_MESSAGE_TOO_LARGE",
+                receivedHandshake ? "HANDSHAKE_MESSAGE_INVALID" : "HANDSHAKE_MESSAGE_TOO_LARGE",
                 "authentication"));
-        webSocket.abort();
+        abortSocket(webSocket);
         return null;
       }
       fragments.append(data);
-      if (last) {
-        receivedMessage.set(true);
-        try {
-          firstMessage.complete(strictUtf8(fragments));
-        } catch (RuntimeConnectionFailure failure) {
-          fail(failure);
-          webSocket.abort();
-          return null;
-        }
+      if (!last) {
+        webSocket.request(1);
+        return null;
       }
-      webSocket.request(1);
+      receivedHandshake = true;
+      try {
+        firstMessage.complete(
+            strictUtf8(
+                fragments,
+                MAX_HANDSHAKE_BYTES,
+                "HANDSHAKE_MESSAGE_TOO_LARGE",
+                "HANDSHAKE_MESSAGE_INVALID",
+                "authentication"));
+      } catch (RuntimeConnectionFailure failure) {
+        fail(failure);
+        abortSocket(webSocket);
+      }
       return null;
     }
 
     @Override
     public CompletionStage<?> onBinary(WebSocket webSocket, ByteBuffer data, boolean last) {
-      fail(new RuntimeConnectionFailure("HANDSHAKE_MESSAGE_INVALID", "authentication"));
-      webSocket.abort();
+      if (!authenticated) {
+        fail(new RuntimeConnectionFailure("HANDSHAKE_MESSAGE_INVALID", "authentication"));
+      }
+      abortSocket(webSocket);
       return null;
     }
 
@@ -271,6 +307,53 @@ public final class JavaHttpRuntimeConnector implements RuntimeConnector {
 
     private void fail(RuntimeConnectionFailure failure) {
       firstMessage.completeExceptionally(failure);
+    }
+
+    private CompletionStage<?> onApplicationText(
+        WebSocket webSocket, CharSequence data, boolean last) {
+      if (fragments.length() + data.length() > MAX_APPLICATION_BYTES) {
+        abortSocket(webSocket);
+        return null;
+      }
+      fragments.append(data);
+      if (!last) {
+        webSocket.request(1);
+        return null;
+      }
+
+      String message;
+      try {
+        message =
+            strictUtf8(
+                fragments,
+                MAX_APPLICATION_BYTES,
+                "APPLICATION_MESSAGE_TOO_LARGE",
+                "APPLICATION_MESSAGE_INVALID",
+                "protocol");
+      } catch (RuntimeConnectionFailure failure) {
+        abortSocket(webSocket);
+        return null;
+      } finally {
+        fragments.setLength(0);
+      }
+      var handler = applicationHandler.get();
+      if (handler == null) {
+        abortSocket(webSocket);
+        return null;
+      }
+      try {
+        handler.accept(message);
+      } catch (RuntimeException error) {
+        abortSocket(webSocket);
+        return null;
+      }
+      webSocket.request(1);
+      return null;
+    }
+
+    private void abortSocket(WebSocket webSocket) {
+      webSocket.abort();
+      closed.complete(null);
     }
 
     private static RuntimeConnectionFailure closeFailure(int statusCode, String reason) {
@@ -307,6 +390,8 @@ public final class JavaHttpRuntimeConnector implements RuntimeConnector {
     private final WebSocket socket;
     private final HandshakeListener listener;
     private final AtomicBoolean open = new AtomicBoolean(true);
+    private final AtomicInteger pendingSends = new AtomicInteger();
+    private CompletableFuture<Void> sendTail = CompletableFuture.completedFuture(null);
 
     private JavaHttpAuthenticatedConnection(WebSocket socket, HandshakeListener listener) {
       this.socket = socket;
@@ -322,6 +407,69 @@ public final class JavaHttpRuntimeConnector implements RuntimeConnector {
     @Override
     public CompletionStage<Void> whenClosed() {
       return listener.closed();
+    }
+
+    @Override
+    public CompletionStage<Void> sendApplication(String message) {
+      Objects.requireNonNull(message);
+      try {
+        strictUtf8(
+            message,
+            MAX_APPLICATION_BYTES,
+            "APPLICATION_MESSAGE_TOO_LARGE",
+            "APPLICATION_MESSAGE_INVALID",
+            "protocol");
+      } catch (RuntimeConnectionFailure failure) {
+        return CompletableFuture.failedFuture(failure);
+      }
+      if (!isOpen()) {
+        return CompletableFuture.failedFuture(
+            new RuntimeConnectionFailure("RUNTIME_CONNECTION_LOST", "runtime-connect"));
+      }
+      if (pendingSends.incrementAndGet() > MAX_PENDING_APPLICATION_SENDS) {
+        pendingSends.decrementAndGet();
+        return CompletableFuture.failedFuture(
+            new RuntimeConnectionFailure("APPLICATION_SEND_QUEUE_FULL", "protocol"));
+      }
+
+      CompletableFuture<Void> result;
+      synchronized (this) {
+        result =
+            sendTail
+                .thenCompose(
+                    ignored -> {
+                      if (!isOpen()) {
+                        return CompletableFuture.<Void>failedFuture(
+                            new RuntimeConnectionFailure(
+                                "RUNTIME_CONNECTION_LOST", "runtime-connect"));
+                      }
+                      try {
+                        return socket.sendText(message, true).thenApply(sent -> (Void) null);
+                      } catch (RuntimeException error) {
+                        return CompletableFuture.<Void>failedFuture(
+                            new RuntimeConnectionFailure(
+                                "RUNTIME_CONNECTION_LOST", "runtime-connect"));
+                      }
+                    })
+                .toCompletableFuture();
+        sendTail = result;
+      }
+      result.whenComplete(
+          (ignored, error) -> {
+            pendingSends.decrementAndGet();
+            if (error != null) {
+              close();
+            }
+          });
+      return result;
+    }
+
+    @Override
+    public void setApplicationHandler(Consumer<String> handler) {
+      if (!isOpen()) {
+        throw new IllegalStateException("Runtime connection is closed");
+      }
+      listener.setApplicationHandler(handler);
     }
 
     @Override

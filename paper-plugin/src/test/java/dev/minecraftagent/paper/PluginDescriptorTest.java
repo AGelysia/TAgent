@@ -15,6 +15,12 @@ class PluginDescriptorTest {
       assertNotNull(stream);
       var descriptor = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
       assertTrue(descriptor.contains("main: dev.minecraftagent.paper.MinecraftAgentPlugin"));
+      assertTrue(descriptor.contains("minecraftagent.use:"));
+      assertTrue(
+          descriptor.contains(
+              "minecraftagent.use:\n"
+                  + "    description: Allows a player to ask Minecraft Agent private questions\n"
+                  + "    default: true"));
       assertTrue(descriptor.contains("minecraftagent.command.agent:"));
       assertTrue(descriptor.contains("minecraftagent.admin.toggle:"));
       assertTrue(

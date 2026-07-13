@@ -5,21 +5,21 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { asRuntimeStartupError, RuntimeStartupError } from "./startup-error.js";
 import { loadRuntimeConfig, type LoadRuntimeConfigOptions } from "../config/runtime-config.js";
 import { checkLogDirectory } from "../health/filesystem.js";
-import {
-  checkModelProvider,
-  type ModelProviderHealthCheck,
-  UnsupportedProductionProviderHealthCheck,
-} from "../health/model-provider.js";
+import { checkModelProvider, type ModelProviderHealthCheck } from "../health/model-provider.js";
 import { registerHealthRoute, RuntimeHealthState } from "../health/runtime-health.js";
 import { checkRuntimeSqlite, type RuntimeSqliteHandle } from "../health/sqlite.js";
 import { RuntimeLogger } from "../observability/runtime-logger.js";
 import { SchemaRegistry } from "../protocol/schema-registry.js";
+import { UnsupportedModelProvider, type ModelProvider } from "../providers/model-provider.js";
+import { OpenAiResponsesProvider } from "../providers/openai-responses-provider.js";
+import { AgentRequestService } from "../requests/agent-request-service.js";
 import { registerPaperHandshakeRoute } from "../transport/paper-handshake.js";
 import { runtimeIdentity, type RuntimeIdentity } from "../version.js";
 
 export interface BootstrapOptions extends LoadRuntimeConfigOptions {
   readonly logger?: RuntimeLogger;
   readonly modelProviderHealthCheck?: ModelProviderHealthCheck;
+  readonly modelProvider?: ModelProvider;
   readonly protocolRoot?: string;
   readonly now?: () => Date;
 }
@@ -51,8 +51,16 @@ export function createRuntimeApp(health?: RuntimeHealthState): FastifyInstance {
 async function checkProtocolSchema(protocolRoot?: string): Promise<SchemaRegistry> {
   try {
     const registry = await SchemaRegistry.load(protocolRoot);
-    if (!registry.schemaReferences.includes("capability.schema.json")) {
-      throw new Error("Capability schema alias is unavailable");
+    const requiredSchemas = [
+      "agent-cancel.schema.json",
+      "agent-complete.schema.json",
+      "agent-error.schema.json",
+      "agent-request.schema.json",
+      "capability.schema.json",
+      "envelope.schema.json",
+    ];
+    if (requiredSchemas.some((schema) => !registry.schemaReferences.includes(schema))) {
+      throw new Error("A required protocol schema alias is unavailable");
     }
     return registry;
   } catch (error) {
@@ -80,17 +88,27 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
     const schemaRegistry = await checkProtocolSchema(options.protocolRoot);
     sqlite = await checkRuntimeSqlite(loaded.paths.rootDirectory, loaded.paths.sqlite);
 
-    const providerHealthCheck =
-      options.modelProviderHealthCheck ?? new UnsupportedProductionProviderHealthCheck();
+    const provider =
+      options.modelProvider ??
+      (options.modelProviderHealthCheck === undefined
+        ? new OpenAiResponsesProvider()
+        : new UnsupportedModelProvider());
+    const providerHealthCheck = options.modelProviderHealthCheck ?? provider;
     await checkModelProvider(loaded.config, providerHealthCheck);
 
     const health = new RuntimeHealthState(options.now?.().toISOString());
+    const agentRequests = new AgentRequestService({
+      provider,
+      config: loaded.config,
+      ...(options.now === undefined ? {} : { now: () => options.now?.().getTime() ?? Date.now() }),
+    });
     app = createRuntimeApp();
     await registerPaperHandshakeRoute(app, {
       serverId: loaded.config.server.id,
       serverToken: loaded.config.transport.serverToken,
       schemaRegistry,
       health,
+      agentRequests,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     registerHealthRoute(app, health);

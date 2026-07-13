@@ -22,6 +22,57 @@
       ]
     },
     {
+      "id": "envelope.agent-complete.valid",
+      "category": "valid",
+      "file": "valid/envelope-agent-complete.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        },
+        {
+          "schema": "agent-complete.schema.json",
+          "documentPointer": "/payload",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "envelope.agent-error.valid",
+      "category": "valid",
+      "file": "valid/envelope-agent-error.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        },
+        {
+          "schema": "agent-error.schema.json",
+          "documentPointer": "/payload",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "envelope.agent-cancel.valid",
+      "category": "valid",
+      "file": "valid/envelope-agent-cancel.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        },
+        {
+          "schema": "agent-cancel.schema.json",
+          "documentPointer": "/payload",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
       "id": "handshake.valid",
       "category": "valid",
       "file": "valid/handshake.json",
@@ -354,6 +405,54 @@
       "validations": [
         {
           "schema": "agent-request.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "agent-complete.missing-fallback-text",
+      "category": "missing_field",
+      "file": "invalid/agent-complete-missing-fallback-text.json",
+      "validations": [
+        {
+          "schema": "agent-complete.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "agent-complete.blank-fallback-text",
+      "category": "over_limit",
+      "file": "invalid/agent-complete-blank-fallback-text.json",
+      "validations": [
+        {
+          "schema": "agent-complete.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "agent-error.extra-field",
+      "category": "unexpected_field",
+      "file": "invalid/agent-error-extra-field.json",
+      "validations": [
+        {
+          "schema": "agent-error.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "agent-cancel.reason-invalid",
+      "category": "invalid_value",
+      "file": "invalid/agent-cancel-reason-invalid.json",
+      "validations": [
+        {
+          "schema": "agent-cancel.schema.json",
           "documentPointer": "",
           "expectedValid": false
         }

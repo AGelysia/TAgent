@@ -8,8 +8,12 @@ import dev.minecraftagent.paper.lifecycle.AdminPolicy;
 import dev.minecraftagent.paper.lifecycle.AgentHealth;
 import dev.minecraftagent.paper.lifecycle.AgentStatus;
 import dev.minecraftagent.paper.lifecycle.CoreReadiness;
+import dev.minecraftagent.paper.lifecycle.OfflineCleanup;
 import dev.minecraftagent.paper.lifecycle.OfflineReason;
+import dev.minecraftagent.paper.lifecycle.OperationalGate;
 import dev.minecraftagent.paper.lifecycle.PaperStartupCoordinator;
+import dev.minecraftagent.paper.request.AgentPlayerListener;
+import dev.minecraftagent.paper.request.AgentRequestService;
 import dev.minecraftagent.paper.startup.LocalStartupChecks;
 import dev.minecraftagent.paper.startup.StartupFailure;
 import dev.minecraftagent.paper.state.FileDesiredModeStore;
@@ -24,10 +28,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
+import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -40,6 +46,8 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
 
   private final AtomicReference<PaperStartupCoordinator> coordinatorReference =
       new AtomicReference<>();
+  private final AtomicReference<AgentRequestService> requestServiceReference =
+      new AtomicReference<>();
 
   @Override
   public void onEnable() {
@@ -50,13 +58,29 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     var stateDirectoryReference = new AtomicReference<Path>();
     var desiredModeStoreReference = new AtomicReference<FileDesiredModeStore>();
     var worker =
-        Executors.newSingleThreadExecutor(
+        Executors.newSingleThreadScheduledExecutor(
             runnable -> {
-              var thread = new Thread(runnable, "minecraft-agent-paper-startup");
+              var thread = new Thread(runnable, "minecraft-agent-paper-io");
               return thread;
             });
     var localChecks = new LocalStartupChecks();
     var connector = new JavaHttpRuntimeConnector(worker);
+    var operationalGate = new OperationalGate();
+    var requests =
+        new AgentRequestService(
+            operationalGate,
+            Duration.ofSeconds(90),
+            worker,
+            task -> getServer().getScheduler().runTask(this, task),
+            (playerId, message) -> {
+              var player = getServer().getPlayer(playerId);
+              if (player != null && player.isOnline()) {
+                player.sendMessage(Component.text(message));
+              }
+            },
+            code -> getLogger().warning("event=request_warning code=" + code));
+    requestServiceReference.set(requests);
+    getServer().getPluginManager().registerEvents(new AgentPlayerListener(requests), this);
 
     var registration =
         new PaperCommandRegistration(
@@ -92,6 +116,7 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
               return current == null ? AgentStatus.unregistered(null) : current.diagnostics();
             },
             control,
+            requests,
             new AdminToggleAuthorizer(
                 () -> {
                   var current = coordinatorReference.get();
@@ -176,7 +201,11 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
               public void offline(OfflineReason reason) {
                 getLogger().info("event=agent_offline reason=" + reason.name());
               }
-            });
+            },
+            new OfflineCleanup(
+                requests, (epoch, reason) -> {}, (epoch, reason) -> {}, (epoch, reason) -> {}),
+            operationalGate,
+            requests);
     coordinatorReference.set(coordinator);
     coordinator.start();
     getLogger().info("event=startup_started");
@@ -187,6 +216,10 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     var current = coordinatorReference.getAndSet(null);
     if (current != null) {
       current.close();
+    }
+    var requests = requestServiceReference.getAndSet(null);
+    if (requests != null) {
+      requests.close();
     }
   }
 

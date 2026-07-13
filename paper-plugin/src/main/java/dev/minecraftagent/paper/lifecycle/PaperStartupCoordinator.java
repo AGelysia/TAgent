@@ -2,6 +2,7 @@ package dev.minecraftagent.paper.lifecycle;
 
 import dev.minecraftagent.paper.command.AgentControl;
 import dev.minecraftagent.paper.command.CommandRegistrationFailure;
+import dev.minecraftagent.paper.request.RuntimeApplicationLifecycle;
 import dev.minecraftagent.paper.startup.StartupFailure;
 import dev.minecraftagent.paper.state.DesiredModeStore;
 import dev.minecraftagent.paper.transport.AuthenticatedRuntimeConnection;
@@ -65,7 +66,8 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
       new AtomicReference<>(AgentStatus.unregistered(null));
   private final AtomicReference<AdminPolicy> adminPolicy =
       new AtomicReference<>(AdminPolicy.locked());
-  private final OperationalGate operationalGate = new OperationalGate();
+  private final OperationalGate operationalGate;
+  private final RuntimeApplicationLifecycle runtimeApplications;
   private final CompletableFuture<Void> initialCompletion = new CompletableFuture<>();
 
   private AuthenticatedRuntimeConnection activeConnection;
@@ -89,7 +91,9 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
         commandGate,
         pluginEnabled,
         events,
-        OfflineCleanup.empty());
+        OfflineCleanup.empty(),
+        new OperationalGate(),
+        RuntimeApplicationLifecycle.empty());
   }
 
   public PaperStartupCoordinator(
@@ -101,6 +105,30 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
       BooleanSupplier pluginEnabled,
       EventSink events,
       OfflineCleanup offlineCleanup) {
+    this(
+        worker,
+        coreSelfCheck,
+        runtimeConnector,
+        mainThread,
+        commandGate,
+        pluginEnabled,
+        events,
+        offlineCleanup,
+        new OperationalGate(),
+        RuntimeApplicationLifecycle.empty());
+  }
+
+  public PaperStartupCoordinator(
+      ExecutorService worker,
+      CoreSelfCheck coreSelfCheck,
+      RuntimeConnector runtimeConnector,
+      MainThreadExecutor mainThread,
+      CommandGate commandGate,
+      BooleanSupplier pluginEnabled,
+      EventSink events,
+      OfflineCleanup offlineCleanup,
+      OperationalGate operationalGate,
+      RuntimeApplicationLifecycle runtimeApplications) {
     this.worker = Objects.requireNonNull(worker);
     this.coreSelfCheck = Objects.requireNonNull(coreSelfCheck);
     this.runtimeConnector = Objects.requireNonNull(runtimeConnector);
@@ -109,6 +137,8 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
     this.pluginEnabled = Objects.requireNonNull(pluginEnabled);
     this.events = Objects.requireNonNull(events);
     this.offlineCleanup = Objects.requireNonNull(offlineCleanup);
+    this.operationalGate = Objects.requireNonNull(operationalGate);
+    this.runtimeApplications = Objects.requireNonNull(runtimeApplications);
   }
 
   public synchronized void start() {
@@ -153,8 +183,8 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
     publish(AgentStatus.stopping());
     cancelCurrentAttempt();
     var epoch = operationalGate.epoch();
-    detachAndCloseActiveConnection();
     reportCleanupFailures(offlineCleanup.quiesce(epoch, OfflineReason.MANUAL));
+    detachAndCloseActiveConnection();
 
     var store = desiredModeStore;
     var persistence =
@@ -200,8 +230,9 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
     }
     generation.incrementAndGet();
     cancelCurrentAttempt();
-    detachAndCloseActiveConnection();
     operationalGate.transitionTo(AgentState.UNREGISTERED);
+    reportCleanupFailures(offlineCleanup.quiesce(operationalGate.epoch(), OfflineReason.MANUAL));
+    detachAndCloseActiveConnection();
     if (commandRegistered) {
       commandGate.unregister();
       commandRegistered = false;
@@ -340,6 +371,25 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
       }
     }
 
+    var shouldBecomeOnline =
+        attempt.kind != AttemptKind.INITIAL
+            || candidate.readiness().desiredMode() != DesiredMode.DISABLED;
+    if (shouldBecomeOnline) {
+      try {
+        runtimeApplications.attach(connection, candidate.readiness().runtimeSettings().serverId());
+      } catch (RuntimeException error) {
+        finishFailure(
+            attempt, new RuntimeConnectionFailure("APPLICATION_CHANNEL_UNAVAILABLE", "protocol"));
+        return;
+      }
+      if (!connection.isOpen()) {
+        runtimeApplications.detach(connection);
+        finishFailure(
+            attempt, new RuntimeConnectionFailure("RUNTIME_CONNECTION_LOST", "runtime-connect"));
+        return;
+      }
+    }
+
     desiredModeStore = candidate.readiness().desiredModeStore();
     adminPolicy.set(candidate.readiness().adminPolicy());
     attempt.connectionAttempt.set(null);
@@ -434,6 +484,7 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
             desired, OfflineReason.RUNTIME_UNAVAILABLE, "RUNTIME_CONNECTION_LOST", warnings));
     reportCleanupFailures(
         offlineCleanup.quiesce(operationalGate.epoch(), OfflineReason.RUNTIME_UNAVAILABLE));
+    runtimeApplications.detach(connection);
     events.failure("runtime-connect", "RUNTIME_CONNECTION_LOST");
     events.offline(OfflineReason.RUNTIME_UNAVAILABLE);
   }
@@ -458,6 +509,7 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
     var connection = activeConnection;
     activeConnection = null;
     if (connection != null) {
+      runtimeApplications.detach(connection);
       connection.close();
     }
   }

@@ -4,15 +4,16 @@
 
 Protocol 1.0 defines contracts for two separate links:
 
-1. Paper to the local Agent Runtime over an authenticated WebSocket. Phase 3
-   implements only the `paper.hello` to `runtime.hello` authentication exchange.
+1. Paper to the local Agent Runtime over an authenticated WebSocket. Phase 5
+   keeps the Phase 3 hello exchange and enables `agent.request`,
+   `agent.complete`, `agent.error`, and `agent.cancel` after authentication.
 2. Paper to the optional Fabric client over versioned Minecraft custom payloads
    in a later phase.
 
-Phase 1 owns JSON Schemas, fixtures, and cross-language contract tests. Phase 3
-opens the loopback Runtime-Paper socket and authenticates hello messages against
-those contracts. It still does not register Fabric payload handlers or execute
-agent, tool, proposal, control, or view messages.
+Phase 1 owns JSON Schemas, fixtures, and cross-language contract tests. Phase 5
+adds closed terminal and cancellation payloads and keeps the socket open for a
+strictly bounded conversation channel. It still does not register Fabric
+payload handlers or execute tool, proposal, control, or view messages.
 
 The canonical schema source is `protocol/schemas/`. JVM builds copy those files
 as resources; the TypeScript Runtime loads the same files through its schema
@@ -29,7 +30,7 @@ Every Runtime-Paper message uses this shape:
 ```json
 {
   "protocolVersion": "1.0",
-  "messageId": "00000000-0000-4000-8000-000000000001",
+  "messageId": "00000000-0000-4000-8000-000000000002",
   "requestId": "00000000-0000-4000-8000-000000000002",
   "serverId": "survival-main",
   "type": "agent.request",
@@ -59,9 +60,11 @@ the ID of an unrelated player request. A sender must not reuse a request ID for
 unrelated operations.
 
 The nonce is not an authentication mechanism by itself. Schema validation only
-checks its representation. Phase 3 handshake receivers enforce a bounded clock
-window and a bounded TTL replay cache shared across connections; a new socket
-therefore cannot make a previously accepted hello reusable.
+checks its representation. Handshake and application receivers enforce a
+bounded clock window and a bounded TTL replay cache shared across connections;
+a new socket therefore cannot make a previously accepted envelope reusable.
+Handshake messages are capped at 16 KiB. Authenticated application messages are
+capped at 64 KiB before strict UTF-8 and JSON parsing.
 
 ## Validation order
 
@@ -92,9 +95,11 @@ tuple `(requestId, toolCallId)`.
 retry. Proposal confirmation and write execution require Paper-owned durable
 idempotency state in later phases.
 
-Cancellation, timeout, `/agent off`, Runtime disconnect, and terminal agent
-messages close a request. A late tool call receives a stable rejection and is
-never executed.
+Cancellation, timeout, `/agent off`, player disconnect, Runtime disconnect, and
+terminal agent messages close a request. `agent.cancel` reuses the original
+request ID and carries the Paper-derived player UUID; unknown or repeated
+cancellation has no effect. Late completion, error, or tool traffic is never
+delivered or executed.
 
 ## Handshake
 
@@ -123,6 +128,9 @@ Phase 1 includes or targets these closed contracts:
 | ------------------ | --------------------------------------------------------------------- |
 | `handshake`        | Runtime-Paper version and authentication negotiation                  |
 | `agent-request`    | Session, actual player identity, module, message, and client features |
+| `agent-complete`   | Correlated private fallback text and bounded structured views        |
+| `agent-error`      | Correlated stable error code, safe fallback text, and retry hint      |
+| `agent-cancel`     | Correlated Paper-originated cancellation reason                       |
 | `tool-call`        | Typed tool identity, closed arguments, and bounded loop sequence      |
 | `tool-result`      | Status, source, trust label, result, or stable error                  |
 | `proposal`         | Frozen write intent and integrity hashes                              |
@@ -132,9 +140,12 @@ Phase 1 includes or targets these closed contracts:
 | `build-preview`    | Bounded target projection and transform metadata                      |
 | `capability`       | Declarative Capability Pack manifest                                  |
 
-Schemas can exist before their behavior. Through Phase 3 the hello payload is
-the only live Runtime-Paper message. The implementation does not publish a view,
-call a tool, create a proposal, or load a capability.
+Schemas can exist before their behavior. Phase 5 enables only the three agent
+terminal/request payloads and cancellation after hello. A request has
+`sessionId: null`, module `general`, and no connected-client features. A
+completion always contains non-empty `fallbackText`; Phase 5 emits an empty
+`structuredViews` array. The implementation does not publish a view, call a
+tool, create a proposal, or load a capability.
 
 ## Client views
 
@@ -216,5 +227,5 @@ with paths relative to `protocol/`. Java and TypeScript validators must agree on
 every fixture. Semantic rules cover behavior not expressible in JSON Schema,
 including protocol matching and transfer reassembly/hash verification.
 
-Phase 1 verification is still in progress. Test outcomes belong in
-`docs/progress.md` only after the responsible build has actually run.
+Test outcomes belong in `docs/progress.md` only after the responsible build has
+actually run.

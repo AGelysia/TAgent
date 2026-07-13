@@ -7,9 +7,15 @@ if (configPath === undefined) {
 
 const runtime = await startRuntime({
   configPath,
-  modelProviderHealthCheck: {
+  modelProvider: {
     async check() {
       return { ok: true };
+    },
+    async generate({ signal }) {
+      if (signal.aborted) {
+        throw signal.reason;
+      }
+      return { fallbackText: "Paper smoke response." };
     },
   },
 });

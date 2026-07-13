@@ -1,6 +1,6 @@
 # Operations
 
-## Phase 0-4 purpose
+## Phase 0-5 purpose
 
 The repository remains a development implementation, not a deployable Minecraft
 Agent service. Its useful operations are build, format, contract, readiness,
@@ -8,11 +8,12 @@ and focused integration tests. The Runtime has strict configuration, local
 filesystem/SQLite/Schema checks, an injectable provider-health port, and a
 loopback `/health` route. Paper Phase 3 adds strict startup inputs, a
 Paper-initiated authenticated Runtime hello, non-executable core descriptors,
-conditional `/agent` registration, and persistent emergency Offline controls.
+conditional `/agent` registration, persistent emergency Offline controls, and
+the Phase 5 private `/agent say` request path.
 The Fabric artifact remains an entry-point scaffold.
 
 No real API key, production server token, model account, or Litematica
-installation is required for automated Phase 0-4 checks. Tests use temporary
+installation is required for automated Phase 0-5 checks. Tests use temporary
 secrets, private temporary directories, ephemeral loopback ports, fake provider
 adapters, and a fake incompatible Runtime. The exact Paper `1.21.11-132` server
 is used by the Phase 3 decision smoke; successful and token-mismatch cases use
@@ -44,7 +45,7 @@ org.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m
 
 Run one build at a time. Do not run Gradle and npm checks concurrently. Avoid
 Docker, Testcontainers, a local Paper server, or a graphical Fabric client for
-routine Phase 0-4 validation. The pinned Paper smoke is a short, explicit
+routine Phase 0-5 validation. The pinned Paper smoke is a short, explicit
 exception and must not be left running on this host.
 
 If memory pressure appears, keep the one-worker policy and run each subproject
@@ -106,11 +107,10 @@ npm run build
 npm test
 ```
 
-`npm start` executes the Phase 2 startup gate. The production provider adapter
-is deliberately absent, so a fully valid local configuration still exits
-nonzero with `PROVIDER_UNSUPPORTED` and never binds a port. Tests inject a fake
-provider to verify that a successful final `listen()` is the only transition to
-READY. Do not configure a fake provider in production.
+`npm start` executes the startup gate and uses the production OpenAI Responses
+adapter. Readiness performs `GET /v1/models/{model}` with the configured timeout;
+only a successful result permits the final loopback bind. Tests inject a fake
+provider through code only; there is no configuration switch for one.
 
 ## Runtime configuration
 
@@ -143,7 +143,7 @@ config + secrets
   -> log directory write/delete probe
   -> Capability Schema load
   -> SQLite read/integrity/rollback-write probe
-  -> injected provider health check with timeout
+  -> configured provider model lookup with timeout
   -> Fastify ready
   -> final listen on 127.0.0.1
   -> READY
@@ -219,7 +219,8 @@ with it; a live recovery rejects a directory change instead of splitting writes
 between two stores.
 
 `/agent off` closes admission immediately, invalidates the current work epoch,
-detaches Runtime, invokes all cleanup ports, then writes DISABLED on the worker.
+cancels live requests while the Runtime link is still available, detaches the
+Runtime, then writes DISABLED on the worker.
 Until ONLINE, every command other than an exact one-argument `on` or `off`
 returns exactly `AI offline`. `/agent on` returns immediately, repeats the full
 local check and authenticated handshake, persists ENABLED, and only then returns
@@ -249,6 +250,35 @@ All six are read-only, closed-schema, and non-executable. Phase 3 supplies no
 tool invocation or Minecraft adapter. Typed tools begin in Phase 7. Inspecting
 the optional capability directory does not load packs; the Capability Pack
 loader remains Phase 9.
+
+## Paper Phase 5 private conversation
+
+Ordinary players receive `minecraftagent.use` by default and may run:
+
+```text
+/agent say <message>
+```
+
+The command accepts only a real online `Player`; console and RCON cannot supply
+a UUID. Paper does not listen to ordinary chat. A player may have only one live
+request, Paper caps all live correlations at 64, and Runtime additionally
+enforces `limits.maxConcurrentRequests`, `maxQueuedRequests`,
+`perPlayerCooldownSeconds`, and `dailyRequestsPerPlayer`. The daily counter is
+memory-only in Phase 5 and resets with the Runtime; monthly budget enforcement
+is not yet active.
+
+Runtime uses `model.timeoutSeconds`; Paper has an independent 90-second hard
+deadline. A timeout, player quit, `/agent off`, Runtime disconnect, or plugin
+disable removes the live request and sends a best-effort cancellation. Replies
+are scheduled on the primary thread, look up the online player again by UUID,
+and use literal text. They are never broadcast.
+
+The provider request is non-streaming, disables provider storage, exposes no
+tools, caps the response body, and never places prompt, completion, API key, or
+provider error body in Runtime logs. Paper's global player-command logging may
+still record the complete `/agent say` command before the plugin runs. Review
+and disable that server-level facility when player questions are sensitive;
+the plugin cannot reliably redact only one command from an upstream log.
 
 ## Protocol contracts
 
@@ -286,7 +316,7 @@ warning for plan compatibility and should not be used. A group/world-writable
 configuration is always rejected. Inline secrets additionally require a private
 configuration file; inline secrets and broad read permissions may not be combined.
 
-## Phase 3-4 Paper validation
+## Phase 3-5 Paper validation
 
 [ADR 0001](adr/0001-phase3-conditional-command-registration.md) records the
 selected public `Server#getCommandMap` late-registration design. API-level unit
@@ -317,7 +347,7 @@ The exact commands, artifact hash, and outcomes are recorded in
 `docs/progress.md`. An initial core failure has no command recovery path; fix it
 externally and restart.
 
-## Troubleshooting Phase 0-4
+## Troubleshooting Phase 0-5
 
 ### Dependency resolution fails
 
@@ -345,10 +375,10 @@ or raw peer message. Check the strict Paper configuration, state permissions,
 fake or local Runtime availability, token match, and protocol version, then
 restart. There is no initial `/agent on` path.
 
-After registration, Phase 4 adds only readiness, doctor, and Offline toggles.
-Model requests, typed tool execution, proposals, Capability Packs, client
-payloads, overlays, and Litematica adapters remain later phases. The Fabric
-entry point is still a scaffold.
+After registration, Phase 5 adds private `/agent say` model requests. Typed tool
+execution, proposals, Capability Packs, client payloads, overlays, and
+Litematica adapters remain later phases. The Fabric entry point is still a
+scaffold.
 
 ### `/agent` exists but returns `AI offline`
 
@@ -357,12 +387,12 @@ loss, or a failed recovery. Check the stable console code and Runtime first.
 An authorized local console, Owner, or explicitly enabled OP may run `/agent on`.
 Do not delete or loosen permissions on the state file as a recovery shortcut.
 
-### Runtime exits with `PROVIDER_UNSUPPORTED`
+### Runtime exits during provider health
 
-That is the expected Phase 2 production behavior. Local configuration, Schema,
-log, and SQLite checks completed, but no real provider health adapter is wired.
-Do not replace it with a configurable always-healthy adapter. Production model
-access remains a later phase.
+Phase 5 requires the configured API key and model to pass the production model
+lookup. Use the stable `PROVIDER_AUTH_FAILED`, `MODEL_UNAVAILABLE`,
+`PROVIDER_UNAVAILABLE`, `MODEL_HEALTH_FAILED`, or `PROVIDER_TIMEOUT` diagnostic.
+Do not log the key or upstream response body while debugging.
 
 ### Runtime exits before provider health
 

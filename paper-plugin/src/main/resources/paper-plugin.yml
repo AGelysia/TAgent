@@ -6,6 +6,9 @@ api-version: '1.21'
 authors:
   - Minecraft Agent contributors
 permissions:
+  minecraftagent.use:
+    description: Allows a player to ask Minecraft Agent private questions
+    default: true
   minecraftagent.command.agent:
     description: Allows access to the Minecraft Agent status command
     default: op
