@@ -15,6 +15,8 @@ import dev.minecraftagent.paper.protocol.AgentProtocolCodec.AgentError;
 import dev.minecraftagent.paper.protocol.AgentProtocolCodec.AgentErrorCode;
 import dev.minecraftagent.paper.protocol.AgentProtocolCodec.CancelReason;
 import dev.minecraftagent.paper.protocol.AgentProtocolCodec.Completion;
+import dev.minecraftagent.paper.protocol.AgentProtocolCodec.SessionResumed;
+import dev.minecraftagent.paper.request.AgentModule;
 import dev.minecraftagent.paper.transport.RuntimeConnectionFailure;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -29,6 +31,7 @@ class AgentProtocolCodecTest {
   private static final Instant NOW = Instant.parse("2026-07-11T08:00:01Z");
   private static final UUID REQUEST_ID = UUID.fromString("22222222-2222-4222-8222-222222222222");
   private static final UUID PLAYER_UUID = UUID.fromString("44444444-4444-4444-8444-444444444444");
+  private static final UUID SESSION_ID = UUID.fromString("71717171-7171-4171-8171-717171717171");
 
   @Test
   void encodesSchemaValidGeneralRequestWithTrustedIdentityAndNoClient() throws Exception {
@@ -49,6 +52,33 @@ class AgentProtocolCodecTest {
         false, document.path("payload").path("clientCapabilities").path("connected").asBoolean());
     assertTrue(
         document.path("payload").path("clientCapabilities").path("clientProtocolVersion").isNull());
+  }
+
+  @Test
+  void encodesSelectedSessionAndOneShotModule() throws Exception {
+    var source =
+        codec()
+            .encodeRequest(
+                REQUEST_ID, PLAYER_UUID, SESSION_ID, AgentModule.RECIPE, "Comparator recipe");
+    var document = JSON.readTree(source);
+
+    assertSchema("envelope.schema.json", document);
+    assertSchema("agent-request.schema.json", document.path("payload"));
+    assertEquals(SESSION_ID.toString(), document.path("payload").path("sessionId").asText());
+    assertEquals("recipe", document.path("payload").path("module").asText());
+  }
+
+  @Test
+  void encodesSchemaValidLatestAndExplicitResumeRequests() throws Exception {
+    var latest = JSON.readTree(codec().encodeResume(REQUEST_ID, PLAYER_UUID, null));
+    assertSchema("envelope.schema.json", latest);
+    assertSchema("session-resume.schema.json", latest.path("payload"));
+    assertEquals("session.resume", latest.path("type").asText());
+    assertTrue(latest.path("payload").path("sessionId").isNull());
+
+    var explicit = JSON.readTree(codec().encodeResume(REQUEST_ID, PLAYER_UUID, SESSION_ID));
+    assertSchema("session-resume.schema.json", explicit.path("payload"));
+    assertEquals(SESSION_ID.toString(), explicit.path("payload").path("sessionId").asText());
   }
 
   @Test
@@ -80,6 +110,16 @@ class AgentProtocolCodecTest {
     assertEquals(PLAYER_UUID, error.playerUuid());
     assertEquals(AgentErrorCode.MODEL_TIMEOUT, error.code());
     assertTrue(error.retryable());
+  }
+
+  @Test
+  void decodesStrictSessionResumedFixture() throws Exception {
+    var source =
+        fixture("envelope-session-resumed.json").replace("2026-07-13T08:00:02Z", NOW.toString());
+    var resumed = assertInstanceOf(SessionResumed.class, codec().decode(source));
+
+    assertEquals(PLAYER_UUID, resumed.playerUuid());
+    assertEquals(SESSION_ID, resumed.sessionId());
   }
 
   @Test

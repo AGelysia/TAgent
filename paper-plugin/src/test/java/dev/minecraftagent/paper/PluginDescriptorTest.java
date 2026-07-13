@@ -22,6 +22,11 @@ class PluginDescriptorTest {
                   + "    description: Allows a player to ask Minecraft Agent private questions\n"
                   + "    default: true"));
       assertTrue(descriptor.contains("minecraftagent.command.agent:"));
+      assertTrue(
+          descriptor.contains(
+              "minecraftagent.module:\n"
+                  + "    description: Allows a player to route one request through an explicit Agent module\n"
+                  + "    default: true"));
       assertTrue(descriptor.contains("minecraftagent.admin.toggle:"));
       assertTrue(
           descriptor.contains(

@@ -264,13 +264,15 @@ export class PaperHandshakeService {
         this.#agentRequests.cancel(message.cancellation.requestId, message.cancellation.playerUuid);
         return;
       }
-      this.#agentRequests.submit(message.request, (terminal) => {
+      const requestId =
+        message.type === "session.resume" ? message.resume.requestId : message.request.requestId;
+      const respond = (terminal: Parameters<ApplicationEnvelopeProtocol["createResponse"]>[1]) => {
         if (this.#authenticatedSocket !== socket || socket.readyState !== socket.OPEN) {
           return;
         }
         let response: Record<string, unknown>;
         try {
-          response = this.#applicationProtocol.createResponse(message.request.requestId, terminal);
+          response = this.#applicationProtocol.createResponse(requestId, terminal);
         } catch {
           socket.terminate();
           return;
@@ -284,7 +286,12 @@ export class PaperHandshakeService {
         } catch {
           socket.terminate();
         }
-      });
+      };
+      if (message.type === "session.resume") {
+        this.#agentRequests.resume(message.resume, respond);
+      } else {
+        this.#agentRequests.submit(message.request, respond);
+      }
     } catch (error) {
       closeWithCode(
         socket,

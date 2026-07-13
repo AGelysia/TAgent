@@ -13,4 +13,12 @@ public interface AgentRequestGateway {
   }
 
   Submission submit(UUID playerId, String message);
+
+  default Submission submitModule(UUID playerId, AgentModule module, String message) {
+    return Submission.RUNTIME_UNAVAILABLE;
+  }
+
+  default Submission resume(UUID playerId, UUID sessionId) {
+    return Submission.RUNTIME_UNAVAILABLE;
+  }
 }

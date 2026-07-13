@@ -25,6 +25,8 @@ limits:
   maxConcurrentRequests: 4
   maxQueuedRequests: 32
   maxToolRounds: 8
+  maxContextMessages: 30
+  maxContextCharacters: 32768
   perPlayerCooldownSeconds: 3
   dailyRequestsPerPlayer: 100
   monthlyBudgetUsd: 50

@@ -243,8 +243,7 @@ export class OpenAiResponsesProvider implements ModelProvider {
         signal: request.signal,
         body: JSON.stringify({
           model: request.model,
-          instructions:
-            "Answer the player's Minecraft question as concise plain text. Do not claim to have changed the server or player state.",
+          instructions: request.instructions,
           input: request.input,
           max_output_tokens: request.maxOutputTokens,
           store: false,

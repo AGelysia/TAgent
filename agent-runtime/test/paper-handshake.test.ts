@@ -151,6 +151,23 @@ function agentCancel(request: Record<string, unknown>): Record<string, unknown> 
   };
 }
 
+function sessionResume(
+  sessionId: string | null,
+  playerUuid = "44444444-4444-4444-8444-444444444444",
+): Record<string, unknown> {
+  const requestId = uuid();
+  return {
+    protocolVersion: "1.0",
+    messageId: requestId,
+    requestId,
+    serverId: "test-server",
+    type: "session.resume",
+    timestamp: NOW.toISOString(),
+    nonce: Buffer.alloc(16, nextUuidSuffix).toString("base64url"),
+    payload: { playerUuid, sessionId },
+  };
+}
+
 async function createConfig(port: number): Promise<string> {
   const directory = await temporaryRuntimeDirectory();
   temporaryDirectories.push(directory);
@@ -449,9 +466,11 @@ describe("Paper WebSocket handshake", () => {
   });
 
   it("serves multiple private Agent requests over one authenticated connection", async () => {
-    const generate = vi.fn().mockImplementation(async ({ input }: { readonly input: string }) => ({
-      fallbackText: `answer:${input}`,
-    }));
+    const generate = vi
+      .fn()
+      .mockImplementation(async ({ input }: Parameters<ModelProvider["generate"]>[0]) => ({
+        fallbackText: `answer:${input.at(-1)?.content ?? "missing"}`,
+      }));
     const modelProvider: ModelProvider = {
       check: vi.fn().mockResolvedValue({ ok: true }),
       generate,
@@ -479,7 +498,7 @@ describe("Paper WebSocket handshake", () => {
     });
     expect(first["messageId"]).not.toBe(firstRequest["requestId"]);
     expect(firstPayload).toEqual({
-      sessionId: null,
+      sessionId: expect.any(String),
       playerUuid: "44444444-4444-4444-8444-444444444444",
       fallbackText: "answer:first private prompt",
       structuredViews: [],
@@ -539,6 +558,35 @@ describe("Paper WebSocket handshake", () => {
       requestId: replacement["requestId"],
       type: "agent.complete",
       payload: { fallbackText: "replacement answer" },
+    });
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("resumes only sessions owned by the authenticated server player", async () => {
+    const modelProvider: ModelProvider = {
+      check: vi.fn().mockResolvedValue({ ok: true }),
+      generate: vi.fn().mockResolvedValue({ fallbackText: "stored answer" }),
+    };
+    const { url } = await startFixture({ modelProvider });
+    const socket = await openClient(url);
+    await exchange(socket, paperHello());
+    const completion = asRecord(await exchange(socket, agentRequest("persist me")));
+    const sessionId = String(asRecord(completion["payload"])["sessionId"]);
+
+    expect(asRecord(await exchange(socket, sessionResume(sessionId)))).toMatchObject({
+      type: "session.resumed",
+      payload: {
+        playerUuid: "44444444-4444-4444-8444-444444444444",
+        sessionId,
+      },
+    });
+    expect(
+      asRecord(
+        await exchange(socket, sessionResume(sessionId, "55555555-5555-4555-8555-555555555555")),
+      ),
+    ).toMatchObject({
+      type: "agent.error",
+      payload: { code: "SESSION_NOT_FOUND" },
     });
     expect(socket.readyState).toBe(WebSocket.OPEN);
   });

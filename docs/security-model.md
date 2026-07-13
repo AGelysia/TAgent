@@ -9,8 +9,9 @@ checks, authenticated hello handling, non-executable core descriptors, and a
 conditional command-registration boundary. Phase 4 adds persistent Offline
 state, epoch-based admission, explicit cleanup ports, and authorized recovery.
 Phase 5 adds bounded private model requests, literal text replies, rate limits,
-timeout, and cancellation. It still does not provide typed tool execution,
-proposals, or Capability Pack loading.
+timeout, and cancellation. Phase 6 adds Runtime-owned sessions, owner-filtered
+resume, bounded model context, and explicit one-shot modules. It still does not
+provide typed tool execution, proposals, or Capability Pack loading.
 
 The governing rule is:
 
@@ -76,11 +77,14 @@ behavioral controls before dispatch:
 - Bound message size before parsing, require strict UTF-8 and duplicate-key
   rejection, and validate closed fields afterward.
 
-After authentication, Phase 5 permits only `agent.request`/`agent.cancel` from
-Paper and `agent.complete`/`agent.error` from Runtime. Each terminal message is
-bound to the active connection, server ID, request ID, actual player UUID, null
-Phase 5 session, and issuing Offline epoch. Live tool-message correlation is a
-Phase 7 execution requirement; every tool/proposal/view type remains rejected.
+After authentication, Phase 6 permits `agent.request`, `agent.cancel`, and
+`session.resume` from Paper and `agent.complete`, `agent.error`, and
+`session.resumed` from Runtime. Each terminal message is bound to the active
+connection, server ID, request ID, actual player UUID, expected session
+relationship, and issuing Offline epoch. Resume lookup uses server ID and player
+UUID in the same repository query; it does not reveal whether a rejected ID
+belongs to another owner. Live tool-message correlation is a Phase 7 execution
+requirement; every tool/proposal/view type remains rejected.
 
 Loopback binding limits remote exposure but does not protect against another
 local process. Token file permissions, log redaction, and host account security
@@ -245,13 +249,19 @@ Runtime copy is informational.
 
 Logs redact API keys, server tokens, HMAC proofs, sensitive capability
 arguments, and message content by default. Session access always includes both
-server ID and player UUID. Command suggestions and resume identifiers are
-filtered to the requesting player.
+server ID and player UUID. Session identifiers are never offered through command
+completion.
 
-Phase 5 does not persist prompts or completions. The OpenAI request sets
-`store: false`, Runtime logs only fixed event/error metadata, and Paper renders
-the validated fallback as literal text rather than parsing formatting or click
-events. Server operators must separately disable or protect Paper's global
+Phase 6 persists prompts and completions only when
+`privacy.storeConversations` is enabled. Each successful exchange is written
+atomically to Runtime's private SQLite store; failed, timed-out, or cancelled
+work leaves no partial turn. Session lookup always uses the authenticated server
+ID and actual player UUID in the query, and absent or foreign sessions share one
+safe response. Disabling conversation storage writes no prompt or completion and
+disables resume. In both modes, the OpenAI request sets `store: false`, Runtime
+logs only fixed event/error metadata, and Paper renders the validated fallback as
+literal text rather than parsing formatting or click events. Server operators
+must separately disable or protect Paper's global
 player-command logging if questions are sensitive: the server may log the full
 `/agent say <message>` command before plugin code can selectively redact it.
 Client command history is likewise outside the plugin's control.
@@ -279,18 +289,19 @@ are rejected. Created directories are `0700`; SQLite and probe files are `0600`.
 Startup logs serialize only fixed event names, stable codes, stages, and known
 field paths. Provider exceptions and configuration values are discarded. The
 loopback `/health` response is a cached readiness snapshot with no model name,
-path, secret, raw error, or repeated external check. Phase 5's production
+path, secret, raw error, or repeated external check. Phase 6's production
 provider performs a bounded model lookup during readiness and a bounded
 Responses request only for admitted player work.
 
 ## Current enforcement gap
 
-At the Phase 5 boundary, Paper-side startup, authenticated application channel,
+At the Phase 6 boundary, Paper-side startup, authenticated application channel,
 conditional registration, persistent Offline state, epoch gate, private
-conversation, request cancellation, and Runtime provider limits exist. The
+conversation, request cancellation, Runtime-owned sessions, owner-filtered
+resume, one-shot modules, bounded context, and Runtime provider limits exist. The
 request cleanup port has a real producer; proposal, operation, and client-state
-ports remain empty. Session ownership/persistence, proposal repositories,
-Phase 7 typed tool execution, the Phase 9 capability loader, audit storage,
-client payload handling, and world mutation remain absent. Protocol schemas and
+ports remain empty. Proposal repositories, durable usage accounting, Phase 7
+typed tool execution, the Phase 9 capability loader, audit storage, client
+payload handling, and world mutation remain absent. Protocol schemas and
 readiness descriptors remain necessary contracts, not a complete execution
 security implementation.

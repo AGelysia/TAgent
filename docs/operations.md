@@ -1,6 +1,6 @@
 # Operations
 
-## Phase 0-5 purpose
+## Phase 0-6 purpose
 
 The repository remains a development implementation, not a deployable Minecraft
 Agent service. Its useful operations are build, format, contract, readiness,
@@ -8,12 +8,12 @@ and focused integration tests. The Runtime has strict configuration, local
 filesystem/SQLite/Schema checks, an injectable provider-health port, and a
 loopback `/health` route. Paper Phase 3 adds strict startup inputs, a
 Paper-initiated authenticated Runtime hello, non-executable core descriptors,
-conditional `/agent` registration, persistent emergency Offline controls, and
-the Phase 5 private `/agent say` request path.
+conditional `/agent` registration, persistent emergency Offline controls,
+private model requests, Runtime-owned sessions, resume, and explicit modules.
 The Fabric artifact remains an entry-point scaffold.
 
 No real API key, production server token, model account, or Litematica
-installation is required for automated Phase 0-5 checks. Tests use temporary
+installation is required for automated Phase 0-6 checks. Tests use temporary
 secrets, private temporary directories, ephemeral loopback ports, fake provider
 adapters, and a fake incompatible Runtime. The exact Paper `1.21.11-132` server
 is used by the Phase 3 decision smoke; successful and token-mismatch cases use
@@ -45,7 +45,7 @@ org.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m
 
 Run one build at a time. Do not run Gradle and npm checks concurrently. Avoid
 Docker, Testcontainers, a local Paper server, or a graphical Fabric client for
-routine Phase 0-5 validation. The pinned Paper smoke is a short, explicit
+routine Phase 0-6 validation. The pinned Paper smoke is a short, explicit
 exception and must not be left running on this host.
 
 If memory pressure appears, keep the one-worker policy and run each subproject
@@ -143,6 +143,7 @@ config + secrets
   -> log directory write/delete probe
   -> Capability Schema load
   -> SQLite read/integrity/rollback-write probe
+  -> Runtime schema migration and bounded retention cleanup
   -> configured provider model lookup with timeout
   -> Fastify ready
   -> final listen on 127.0.0.1
@@ -251,21 +252,42 @@ tool invocation or Minecraft adapter. Typed tools begin in Phase 7. Inspecting
 the optional capability directory does not load packs; the Capability Pack
 loader remains Phase 9.
 
-## Paper Phase 5 private conversation
+## Paper Phase 6 conversation commands
 
 Ordinary players receive `minecraftagent.use` by default and may run:
 
 ```text
 /agent say <message>
+/agent resume [session]
+/agent module list
+/agent module <name> <message>
 ```
 
-The command accepts only a real online `Player`; console and RCON cannot supply
-a UUID. Paper does not listen to ordinary chat. A player may have only one live
-request, Paper caps all live correlations at 64, and Runtime additionally
-enforces `limits.maxConcurrentRequests`, `maxQueuedRequests`,
+Question and resume forms accept only a real online `Player`; console and RCON
+cannot supply a UUID. `module list` is a non-conversation query and may be used
+by any permitted sender. Paper does not listen to ordinary chat. A player may
+have only one live request, Paper caps all live correlations at 64, and Runtime
+additionally enforces `limits.maxConcurrentRequests`, `maxQueuedRequests`,
 `perPlayerCooldownSeconds`, and `dailyRequestsPerPlayer`. The daily counter is
 memory-only in Phase 5 and resets with the Runtime; monthly budget enforcement
-is not yet active.
+is not yet active. `minecraftagent.module` is also granted by default and
+controls the two module forms.
+
+A successful stored reply selects its session for later `/agent say` requests.
+With no ID, `/agent resume` selects only that player's latest session on the
+configured server; an explicit ID must be a canonical UUID. IDs are never tab
+completed. A missing, foreign-player, or foreign-server session produces the
+same safe response. Module names are `general`, `recipe`, `guide`, `locate`,
+`build`, and `project`; a module applies only to that request, and the next
+ordinary question returns to `general`.
+
+Runtime commits only complete successful exchanges when
+`privacy.storeConversations` is true. `retentionDays: 0` keeps stored sessions
+without age-based cleanup; a positive value removes older sessions at startup.
+When storage is false, no prompt or answer is persisted, completions have no
+durable session ID, and resume reports that conversation storage is disabled.
+The context sent to the provider is limited by both `maxContextMessages` and
+`maxContextCharacters`.
 
 Runtime uses `model.timeoutSeconds`; Paper has an independent 90-second hard
 deadline. A timeout, player quit, `/agent off`, Runtime disconnect, or plugin
@@ -347,7 +369,7 @@ The exact commands, artifact hash, and outcomes are recorded in
 `docs/progress.md`. An initial core failure has no command recovery path; fix it
 externally and restart.
 
-## Troubleshooting Phase 0-5
+## Troubleshooting Phase 0-6
 
 ### Dependency resolution fails
 
@@ -375,10 +397,10 @@ or raw peer message. Check the strict Paper configuration, state permissions,
 fake or local Runtime availability, token match, and protocol version, then
 restart. There is no initial `/agent on` path.
 
-After registration, Phase 5 adds private `/agent say` model requests. Typed tool
-execution, proposals, Capability Packs, client payloads, overlays, and
-Litematica adapters remain later phases. The Fabric entry point is still a
-scaffold.
+After registration, Phase 6 adds private questions, resume, and explicit
+one-shot modules. Typed tool execution, proposals, Capability Packs, client
+payloads, overlays, and Litematica adapters remain later phases. The Fabric
+entry point is still a scaffold.
 
 ### `/agent` exists but returns `AI offline`
 
@@ -389,7 +411,7 @@ Do not delete or loosen permissions on the state file as a recovery shortcut.
 
 ### Runtime exits during provider health
 
-Phase 5 requires the configured API key and model to pass the production model
+Phase 6 requires the configured API key and model to pass the production model
 lookup. Use the stable `PROVIDER_AUTH_FAILED`, `MODEL_UNAVAILABLE`,
 `PROVIDER_UNAVAILABLE`, `MODEL_HEALTH_FAILED`, or `PROVIDER_TIMEOUT` diagnostic.
 Do not log the key or upstream response body while debugging.

@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import dev.minecraftagent.paper.request.AgentModule;
 import dev.minecraftagent.paper.transport.RuntimeConnectionFailure;
 import dev.minecraftagent.paper.transport.StrictJson;
 import java.nio.CharBuffer;
@@ -47,6 +48,7 @@ public final class AgentProtocolCodec {
       Set.of("sessionId", "playerUuid", "fallbackText", "structuredViews");
   private static final Set<String> ERROR_FIELDS =
       Set.of("playerUuid", "code", "fallbackText", "retryable");
+  private static final Set<String> SESSION_RESUMED_FIELDS = Set.of("sessionId", "playerUuid");
 
   private final String serverId;
   private final SecureRandom secureRandom;
@@ -67,8 +69,14 @@ public final class AgentProtocolCodec {
   }
 
   public String encodeRequest(UUID requestId, UUID playerUuid, String message) {
+    return encodeRequest(requestId, playerUuid, null, AgentModule.GENERAL, message);
+  }
+
+  public String encodeRequest(
+      UUID requestId, UUID playerUuid, UUID sessionId, AgentModule module, String message) {
     Objects.requireNonNull(requestId);
     Objects.requireNonNull(playerUuid);
+    Objects.requireNonNull(module);
     requireText(message, 4096);
 
     var features = new JsonObject();
@@ -84,13 +92,31 @@ public final class AgentProtocolCodec {
     clientCapabilities.add("features", features);
 
     var payload = new JsonObject();
-    payload.add("sessionId", JsonNull.INSTANCE);
+    if (sessionId == null) {
+      payload.add("sessionId", JsonNull.INSTANCE);
+    } else {
+      payload.addProperty("sessionId", sessionId.toString());
+    }
     payload.addProperty("playerUuid", playerUuid.toString());
-    payload.addProperty("module", "general");
+    payload.addProperty("module", module.protocolName());
     payload.addProperty("message", message);
     payload.add("clientCapabilities", clientCapabilities);
 
     return encodeEnvelope(requestId, requestId, "agent.request", payload);
+  }
+
+  public String encodeResume(UUID requestId, UUID playerUuid, UUID sessionId) {
+    Objects.requireNonNull(requestId);
+    Objects.requireNonNull(playerUuid);
+
+    var payload = new JsonObject();
+    payload.addProperty("playerUuid", playerUuid.toString());
+    if (sessionId == null) {
+      payload.add("sessionId", JsonNull.INSTANCE);
+    } else {
+      payload.addProperty("sessionId", sessionId.toString());
+    }
+    return encodeEnvelope(requestId, requestId, "session.resume", payload);
   }
 
   public String encodeCancel(UUID requestId, UUID playerUuid, CancelReason reason) {
@@ -135,6 +161,7 @@ public final class AgentProtocolCodec {
     return switch (string(root, "type")) {
       case "agent.complete" -> decodeCompletion(messageId, requestId, payload);
       case "agent.error" -> decodeError(messageId, requestId, payload);
+      case "session.resumed" -> decodeSessionResumed(messageId, requestId, payload);
       default -> throw failure("UNSUPPORTED_MESSAGE_TYPE");
     };
   }
@@ -163,6 +190,12 @@ public final class AgentProtocolCodec {
     var fallbackText = boundedText(payload, "fallbackText", 512);
     return new AgentError(
         messageId, requestId, playerUuid, code, fallbackText, bool(payload, "retryable"));
+  }
+
+  private SessionResumed decodeSessionResumed(UUID messageId, UUID requestId, JsonObject payload) {
+    requireFields(payload, SESSION_RESUMED_FIELDS);
+    return new SessionResumed(
+        messageId, requestId, uuid(payload, "sessionId"), uuid(payload, "playerUuid"));
   }
 
   private String encodeEnvelope(UUID messageId, UUID requestId, String type, JsonObject payload) {
@@ -350,10 +383,12 @@ public final class AgentProtocolCodec {
     MODEL_RESPONSE_INVALID,
     REQUEST_CANCELLED,
     REQUEST_LIMITED,
+    SESSION_NOT_FOUND,
+    CONVERSATION_STORAGE_DISABLED,
     RUNTIME_INTERNAL_ERROR
   }
 
-  public sealed interface InboundMessage permits Completion, AgentError {
+  public sealed interface InboundMessage permits Completion, AgentError, SessionResumed {
     UUID messageId();
 
     UUID requestId();
@@ -372,6 +407,9 @@ public final class AgentProtocolCodec {
       AgentErrorCode code,
       String fallbackText,
       boolean retryable)
+      implements InboundMessage {}
+
+  public record SessionResumed(UUID messageId, UUID requestId, UUID sessionId, UUID playerUuid)
       implements InboundMessage {}
 
   private static final class ReplayWindow {

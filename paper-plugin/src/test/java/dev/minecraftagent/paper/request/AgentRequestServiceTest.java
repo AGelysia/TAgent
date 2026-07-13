@@ -52,17 +52,19 @@ class AgentRequestServiceTest {
   void completionIsDeliveredOnlyThroughMainThreadAndLateDuplicateIsIgnored() {
     var fixture = new Fixture();
     var playerId = UUID.randomUUID();
+    var sessionId = UUID.randomUUID();
     fixture.service.submit(playerId, "Hello");
     var request = fixture.connection.sent.getFirst();
-    var completion = completion(request, playerId, "Private answer", null);
+    var completion = completion(request, playerId, "Private answer", sessionId);
 
     fixture.connection.deliver(completion);
     assertTrue(fixture.replies.isEmpty());
     assertEquals(0, fixture.service.activeRequestCount());
     fixture.main.drain();
     assertEquals(List.of(playerId + ":Private answer"), fixture.replies);
+    assertEquals(sessionId, fixture.service.currentSession(playerId));
 
-    fixture.connection.deliver(completion(request, playerId, "Late duplicate", null));
+    fixture.connection.deliver(completion(request, playerId, "Late duplicate", sessionId));
     fixture.main.drain();
     assertEquals(List.of(playerId + ":Private answer"), fixture.replies);
   }
@@ -74,7 +76,8 @@ class AgentRequestServiceTest {
     fixture.service.submit(playerId, "Hello");
 
     fixture.connection.deliver(
-        completion(fixture.connection.sent.getFirst(), playerId, "Stale answer", null));
+        completion(
+            fixture.connection.sent.getFirst(), playerId, "Stale answer", UUID.randomUUID()));
     fixture.gate.transitionTo(AgentState.STOPPING);
     fixture.main.drain();
 
@@ -82,23 +85,152 @@ class AgentRequestServiceTest {
   }
 
   @Test
-  void wrongPlayerOrPhaseFiveSessionClosesConnectionWithoutReply() {
-    for (var wrongPlayer : List.of(true, false)) {
-      var fixture = new Fixture();
-      var playerId = UUID.randomUUID();
-      fixture.service.submit(playerId, "Hello");
-      var responsePlayer = wrongPlayer ? UUID.randomUUID() : playerId;
-      var sessionId = wrongPlayer ? null : UUID.randomUUID();
+  void wrongPlayerClosesConnectionWithoutReply() {
+    var fixture = new Fixture();
+    var playerId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Hello");
 
-      fixture.connection.deliver(
-          completion(
-              fixture.connection.sent.getFirst(), responsePlayer, "Wrong binding", sessionId));
-      fixture.main.drain();
+    fixture.connection.deliver(
+        completion(
+            fixture.connection.sent.getFirst(),
+            UUID.randomUUID(),
+            "Wrong binding",
+            UUID.randomUUID()));
+    fixture.main.drain();
 
-      assertFalse(fixture.connection.isOpen());
-      assertTrue(fixture.replies.isEmpty());
-      assertEquals(List.of("RUNTIME_APPLICATION_BINDING_REJECTED"), fixture.events);
-    }
+    assertFalse(fixture.connection.isOpen());
+    assertTrue(fixture.replies.isEmpty());
+    assertEquals(List.of("RUNTIME_APPLICATION_BINDING_REJECTED"), fixture.events);
+  }
+
+  @Test
+  void selectedSessionMustMatchContinuationCompletion() {
+    var fixture = new Fixture();
+    var playerId = UUID.randomUUID();
+    var selectedSession = UUID.randomUUID();
+    fixture.service.submit(playerId, "First");
+    fixture.connection.deliver(
+        completion(fixture.connection.sent.getFirst(), playerId, "First answer", selectedSession));
+    fixture.service.submit(playerId, "Second");
+
+    fixture.connection.deliver(
+        completion(fixture.connection.sent.get(1), playerId, "Wrong session", UUID.randomUUID()));
+    fixture.main.drain();
+
+    assertFalse(fixture.connection.isOpen());
+    assertEquals(List.of("RUNTIME_APPLICATION_BINDING_REJECTED"), fixture.events);
+    assertEquals(List.of(playerId + ":First answer"), fixture.replies);
+  }
+
+  @Test
+  void nullableCompletionRemainsValidWhenConversationStorageIsDisabled() {
+    var fixture = new Fixture();
+    var playerId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Ephemeral question");
+
+    fixture.connection.deliver(
+        completion(fixture.connection.sent.getFirst(), playerId, "Ephemeral answer", null));
+    fixture.main.drain();
+
+    assertTrue(fixture.connection.isOpen());
+    assertEquals(List.of(playerId + ":Ephemeral answer"), fixture.replies);
+    assertEquals(null, fixture.service.currentSession(playerId));
+  }
+
+  @Test
+  void explicitModuleIsOneShotAndKeepsTheSelectedSession() {
+    var fixture = new Fixture();
+    var playerId = UUID.randomUUID();
+    var sessionId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Start");
+    fixture.connection.deliver(
+        completion(fixture.connection.sent.getFirst(), playerId, "Started", sessionId));
+
+    assertEquals(
+        AgentRequestGateway.Submission.ACCEPTED,
+        fixture.service.submitModule(playerId, AgentModule.RECIPE, "Comparator recipe"));
+    var moduleRequest = object(fixture.connection.sent.get(1)).getAsJsonObject("payload");
+    assertEquals(sessionId.toString(), moduleRequest.get("sessionId").getAsString());
+    assertEquals("recipe", moduleRequest.get("module").getAsString());
+    fixture.connection.deliver(
+        completion(fixture.connection.sent.get(1), playerId, "Recipe answer", sessionId));
+
+    fixture.service.submit(playerId, "Continue normally");
+    var nextRequest = object(fixture.connection.sent.get(2)).getAsJsonObject("payload");
+    assertEquals(sessionId.toString(), nextRequest.get("sessionId").getAsString());
+    assertEquals("general", nextRequest.get("module").getAsString());
+  }
+
+  @Test
+  void resumeLatestIsBoundAndFeedsTheNextGeneralRequest() {
+    var fixture = new Fixture();
+    var playerId = UUID.randomUUID();
+    var sessionId = UUID.randomUUID();
+
+    assertEquals(AgentRequestGateway.Submission.ACCEPTED, fixture.service.resume(playerId, null));
+    assertEquals(
+        AgentRequestGateway.Submission.ALREADY_ACTIVE,
+        fixture.service.submit(playerId, "Cannot overlap"));
+    var resume = object(fixture.connection.sent.getFirst());
+    assertEquals("session.resume", resume.get("type").getAsString());
+    assertTrue(resume.getAsJsonObject("payload").get("sessionId").isJsonNull());
+
+    fixture.connection.deliver(
+        sessionResumed(fixture.connection.sent.getFirst(), playerId, sessionId));
+    fixture.main.drain();
+    assertEquals(List.of(playerId + ":Resumed AI session " + sessionId + "."), fixture.replies);
+
+    fixture.service.submit(playerId, "Continue");
+    var query = object(fixture.connection.sent.get(1)).getAsJsonObject("payload");
+    assertEquals(sessionId.toString(), query.get("sessionId").getAsString());
+    assertEquals("general", query.get("module").getAsString());
+  }
+
+  @Test
+  void storageDisabledClearsOnlyTheStaleSelectedSession() {
+    var fixture = new Fixture();
+    var playerId = UUID.randomUUID();
+    var sessionId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Start");
+    fixture.connection.deliver(
+        completion(fixture.connection.sent.getFirst(), playerId, "Started", sessionId));
+    fixture.service.submit(playerId, "Continue");
+
+    fixture.connection.deliver(
+        error(
+            fixture.connection.sent.get(1),
+            playerId,
+            "CONVERSATION_STORAGE_DISABLED",
+            "Conversation storage is disabled."));
+    fixture.service.submit(playerId, "Fresh ephemeral request");
+
+    assertTrue(
+        object(fixture.connection.sent.get(2))
+            .getAsJsonObject("payload")
+            .get("sessionId")
+            .isJsonNull());
+  }
+
+  @Test
+  void runtimeReattachmentRetainsTheSelectedSession() {
+    var fixture = new Fixture();
+    var playerId = UUID.randomUUID();
+    var sessionId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Start");
+    fixture.connection.deliver(
+        completion(fixture.connection.sent.getFirst(), playerId, "Started", sessionId));
+
+    fixture.service.detach(fixture.connection);
+    var replacement = new FakeConnection();
+    fixture.service.attach(replacement, SERVER_ID);
+    fixture.service.submit(playerId, "After Runtime restart");
+
+    assertEquals(
+        sessionId.toString(),
+        object(replacement.sent.getFirst())
+            .getAsJsonObject("payload")
+            .get("sessionId")
+            .getAsString());
   }
 
   @Test
@@ -207,6 +339,42 @@ class AgentRequestServiceTest {
     response.addProperty("requestId", request.get("requestId").getAsString());
     response.addProperty("serverId", SERVER_ID);
     response.addProperty("type", "agent.complete");
+    response.addProperty("timestamp", Instant.now().toString());
+    response.addProperty(
+        "nonce",
+        Base64.getUrlEncoder()
+            .withoutPadding()
+            .encodeToString(
+                UUID.randomUUID().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    response.add("payload", payload);
+    return response;
+  }
+
+  private static JsonObject sessionResumed(String requestEnvelope, UUID playerId, UUID sessionId) {
+    var payload = new JsonObject();
+    payload.addProperty("playerUuid", playerId.toString());
+    payload.addProperty("sessionId", sessionId.toString());
+    return response(requestEnvelope, "session.resumed", payload);
+  }
+
+  private static JsonObject error(
+      String requestEnvelope, UUID playerId, String code, String fallbackText) {
+    var payload = new JsonObject();
+    payload.addProperty("playerUuid", playerId.toString());
+    payload.addProperty("code", code);
+    payload.addProperty("fallbackText", fallbackText);
+    payload.addProperty("retryable", false);
+    return response(requestEnvelope, "agent.error", payload);
+  }
+
+  private static JsonObject response(String requestEnvelope, String type, JsonObject payload) {
+    var request = object(requestEnvelope);
+    var response = new JsonObject();
+    response.addProperty("protocolVersion", "1.0");
+    response.addProperty("messageId", UUID.randomUUID().toString());
+    response.addProperty("requestId", request.get("requestId").getAsString());
+    response.addProperty("serverId", SERVER_ID);
+    response.addProperty("type", type);
     response.addProperty("timestamp", Instant.now().toString());
     response.addProperty(
         "nonce",

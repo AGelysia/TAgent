@@ -38,6 +38,7 @@ export {
   modelGenerationFailureCodes,
   UnsupportedModelProvider,
   type ModelGenerationFailureCode,
+  type ModelInputMessage,
   type ModelGenerationRequest,
   type ModelGenerationResult,
   type ModelGenerationUsage,
@@ -55,7 +56,29 @@ export {
   type AgentRequestInput,
   type AgentRequestServiceOptions,
   type AgentTerminalResponse,
+  type SessionResumeInput,
+  type SessionResumeResponse,
+  type SessionResumedPayload,
 } from "./requests/agent-request-service.js";
+export {
+  ModuleRegistry,
+  moduleIds,
+  type ModuleId,
+  type ModuleManifest,
+} from "./modules/module-manifest.js";
+export {
+  ConversationOwnershipError,
+  DisabledConversationRepository,
+  SqliteConversationRepository,
+  type CommitConversationExchange,
+  type ConversationMessage,
+  type ConversationOwner,
+  type ConversationRepository,
+  type ConversationSession,
+  type SqliteConversationRepositoryOptions,
+} from "./storage/conversation-repository.js";
+export { CURRENT_RUNTIME_SCHEMA_VERSION, migrateRuntimeStorage } from "./storage/migrations.js";
+export { buildContextWindow, type ContextWindowLimits } from "./sessions/context-window.js";
 export {
   RequestAdmissionController,
   type RequestAdmissionDecision,

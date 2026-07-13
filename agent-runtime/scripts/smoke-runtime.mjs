@@ -11,9 +11,12 @@ const runtime = await startRuntime({
     async check() {
       return { ok: true };
     },
-    async generate({ signal }) {
+    async generate({ signal, input }) {
       if (signal.aborted) {
         throw signal.reason;
+      }
+      if (input.at(-1)?.role !== "user") {
+        throw new Error("Smoke provider did not receive a bounded user context");
       }
       return { fallbackText: "Paper smoke response." };
     },

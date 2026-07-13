@@ -49,6 +49,7 @@ public final class AgentRequestService
 
   private static final String TIMEOUT_MESSAGE = "AI request timed out.";
   private static final String UNAVAILABLE_MESSAGE = "AI unavailable. Try again later.";
+  private static final String SESSION_RESUMED_PREFIX = "Resumed AI session ";
   private static final int MAX_ACTIVE_REQUESTS = 64;
 
   private final Object lock = new Object();
@@ -62,6 +63,7 @@ public final class AgentRequestService
   private final AtomicBoolean closed = new AtomicBoolean();
   private final Map<UUID, LiveRequest> requestsById = new HashMap<>();
   private final Map<UUID, LiveRequest> requestsByPlayer = new HashMap<>();
+  private final Map<UUID, UUID> currentSessionsByPlayer = new HashMap<>();
 
   public AgentRequestService(
       OperationalGate operationalGate,
@@ -102,10 +104,31 @@ public final class AgentRequestService
 
   @Override
   public Submission submit(UUID playerId, String message) {
+    return submitModule(playerId, AgentModule.GENERAL, message);
+  }
+
+  @Override
+  public Submission submitModule(UUID playerId, AgentModule module, String message) {
     Objects.requireNonNull(playerId);
+    Objects.requireNonNull(module);
     if (!validMessage(message)) {
       return Submission.INVALID_MESSAGE;
     }
+    return submitOperation(playerId, Operation.QUERY, module, message, null);
+  }
+
+  @Override
+  public Submission resume(UUID playerId, UUID sessionId) {
+    Objects.requireNonNull(playerId);
+    return submitOperation(playerId, Operation.RESUME, null, null, sessionId);
+  }
+
+  private Submission submitOperation(
+      UUID playerId,
+      Operation operation,
+      AgentModule module,
+      String message,
+      UUID requestedSessionId) {
     var permit = operationalGate.tryAcquire();
     if (permit.isEmpty()) {
       return Submission.OFFLINE;
@@ -115,8 +138,13 @@ public final class AgentRequestService
       return Submission.RUNTIME_UNAVAILABLE;
     }
 
-    var request = new LiveRequest(UUID.randomUUID(), playerId, permit.orElseThrow(), binding);
+    LiveRequest request;
     synchronized (lock) {
+      var sessionId =
+          operation == Operation.QUERY ? currentSessionsByPlayer.get(playerId) : requestedSessionId;
+      request =
+          new LiveRequest(
+              UUID.randomUUID(), playerId, permit.orElseThrow(), binding, operation, sessionId);
       if (closed.get()
           || connection.get() != binding
           || !binding.connection().isOpen()
@@ -135,9 +163,22 @@ public final class AgentRequestService
     }
 
     try {
+      var encoded =
+          operation == Operation.QUERY
+              ? binding
+                  .codec()
+                  .encodeRequest(
+                      request.requestId(),
+                      playerId,
+                      request.expectedSessionId(),
+                      Objects.requireNonNull(module),
+                      Objects.requireNonNull(message))
+              : binding
+                  .codec()
+                  .encodeResume(request.requestId(), playerId, request.expectedSessionId());
       binding
           .connection()
-          .sendApplication(binding.codec().encodeRequest(request.requestId(), playerId, message))
+          .sendApplication(encoded)
           .whenComplete(
               (ignored, error) -> {
                 if (error != null) {
@@ -181,6 +222,7 @@ public final class AgentRequestService
     Objects.requireNonNull(playerId);
     LiveRequest request;
     synchronized (lock) {
+      currentSessionsByPlayer.remove(playerId);
       request = requestsByPlayer.get(playerId);
       if (request == null || !remove(request)) {
         return;
@@ -216,11 +258,20 @@ public final class AgentRequestService
     }
     quiesce(operationalGate.epoch(), OfflineReason.MANUAL);
     connection.set(null);
+    synchronized (lock) {
+      currentSessionsByPlayer.clear();
+    }
   }
 
   int activeRequestCount() {
     synchronized (lock) {
       return requestsById.size();
+    }
+  }
+
+  UUID currentSession(UUID playerId) {
+    synchronized (lock) {
+      return currentSessionsByPlayer.get(playerId);
     }
   }
 
@@ -239,6 +290,7 @@ public final class AgentRequestService
     }
 
     LiveRequest request;
+    String reply;
     synchronized (lock) {
       request = requestsById.get(message.requestId());
       if (request == null) {
@@ -249,8 +301,7 @@ public final class AgentRequestService
         source.connection().close();
         return;
       }
-      if (message instanceof AgentProtocolCodec.Completion completion
-          && completion.sessionId() != null) {
+      if (!validResponse(request, message)) {
         events.event("RUNTIME_APPLICATION_BINDING_REJECTED");
         source.connection().close();
         return;
@@ -258,9 +309,21 @@ public final class AgentRequestService
       if (!operationalGate.revalidate(request.permit()) || !remove(request)) {
         return;
       }
+      if (message instanceof AgentProtocolCodec.Completion completion) {
+        if (completion.sessionId() != null) {
+          currentSessionsByPlayer.put(request.playerId(), completion.sessionId());
+        }
+      } else if (message instanceof AgentProtocolCodec.SessionResumed resumed) {
+        currentSessionsByPlayer.put(request.playerId(), resumed.sessionId());
+      } else if (message instanceof AgentProtocolCodec.AgentError error
+          && (error.code() == AgentProtocolCodec.AgentErrorCode.SESSION_NOT_FOUND
+              || error.code() == AgentProtocolCodec.AgentErrorCode.CONVERSATION_STORAGE_DISABLED)) {
+        clearStaleSession(request);
+      }
+      reply = responseText(message);
     }
     request.cancelTimeout();
-    dispatchBoundReply(request, fallbackText(message));
+    dispatchBoundReply(request, reply);
   }
 
   private void timeout(LiveRequest request) {
@@ -343,29 +406,71 @@ public final class AgentRequestService
         && message.codePoints().noneMatch(codePoint -> codePoint >= 0xd800 && codePoint <= 0xdfff);
   }
 
-  private static String fallbackText(AgentProtocolCodec.InboundMessage message) {
+  private static boolean validResponse(
+      LiveRequest request, AgentProtocolCodec.InboundMessage message) {
+    if (message instanceof AgentProtocolCodec.AgentError) {
+      return true;
+    }
+    if (request.operation() == Operation.QUERY
+        && message instanceof AgentProtocolCodec.Completion completion) {
+      return request.expectedSessionId() == null
+          || request.expectedSessionId().equals(completion.sessionId());
+    }
+    if (request.operation() == Operation.RESUME
+        && message instanceof AgentProtocolCodec.SessionResumed resumed) {
+      return request.expectedSessionId() == null
+          || request.expectedSessionId().equals(resumed.sessionId());
+    }
+    return false;
+  }
+
+  private void clearStaleSession(LiveRequest request) {
+    if (request.operation() == Operation.QUERY && request.expectedSessionId() != null) {
+      currentSessionsByPlayer.remove(request.playerId(), request.expectedSessionId());
+    } else if (request.operation() == Operation.RESUME && request.expectedSessionId() == null) {
+      currentSessionsByPlayer.remove(request.playerId());
+    }
+  }
+
+  private static String responseText(AgentProtocolCodec.InboundMessage message) {
     return switch (message) {
       case AgentProtocolCodec.Completion completion -> completion.fallbackText();
       case AgentProtocolCodec.AgentError error -> error.fallbackText();
+      case AgentProtocolCodec.SessionResumed resumed ->
+          SESSION_RESUMED_PREFIX + resumed.sessionId() + ".";
     };
   }
 
   private record ConnectionBinding(
       AuthenticatedRuntimeConnection connection, AgentProtocolCodec codec) {}
 
+  private enum Operation {
+    QUERY,
+    RESUME
+  }
+
   private static final class LiveRequest {
     private final UUID requestId;
     private final UUID playerId;
     private final OperationalGate.Permit permit;
     private final ConnectionBinding binding;
+    private final Operation operation;
+    private final UUID expectedSessionId;
     private final AtomicReference<Cancellable> timeout = new AtomicReference<>();
 
     private LiveRequest(
-        UUID requestId, UUID playerId, OperationalGate.Permit permit, ConnectionBinding binding) {
+        UUID requestId,
+        UUID playerId,
+        OperationalGate.Permit permit,
+        ConnectionBinding binding,
+        Operation operation,
+        UUID expectedSessionId) {
       this.requestId = requestId;
       this.playerId = playerId;
       this.permit = permit;
       this.binding = binding;
+      this.operation = operation;
+      this.expectedSessionId = expectedSessionId;
     }
 
     UUID requestId() {
@@ -382,6 +487,14 @@ public final class AgentRequestService
 
     ConnectionBinding binding() {
       return binding;
+    }
+
+    Operation operation() {
+      return operation;
+    }
+
+    UUID expectedSessionId() {
+      return expectedSessionId;
     }
 
     void timeout(Cancellable scheduled) {

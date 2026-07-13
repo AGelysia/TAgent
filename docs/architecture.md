@@ -2,14 +2,15 @@
 
 ## Status and scope
 
-This document records the target architecture and decisions through Phase 5.
+This document records the target architecture and decisions through Phase 6.
 The repository contains build scaffolding, protocol contracts, the Runtime
 configuration/readiness boundary, and Paper-side Phase 3 startup, authenticated
 hello, core-descriptor, conditional-command, Phase 4 Offline lifecycle, and
-Phase 5 private conversation components. Operational tool execution,
-application repositories, client views, and Litematica integration remain later
-work. The conditional command and Offline recovery paths have been validated on
-the pinned Paper `1.21.11-132` server artifact.
+Phase 5 private conversation components, and Phase 6 Runtime-owned conversations
+and module routing. Operational tool execution, Paper repositories, client
+views, and Litematica integration remain later work. The conditional command and
+Offline recovery paths have been validated on the pinned Paper `1.21.11-132`
+server artifact.
 
 The implementation has three deployable components:
 
@@ -296,14 +297,40 @@ and connection immediately before scheduling a literal `Component.text` reply
 to the player UUID. Unknown, duplicated, late, wrong-player, old-connection, or
 old-epoch terminal messages cannot produce a reply.
 
-## Current Phase 5 boundary
+## Phase 6 sessions and modules
 
-The following remain outside the Phase 5 implementation boundary:
+[ADR 0004](adr/0004-phase6-owned-sessions-and-one-shot-modules.md) selects a
+Runtime-owned versioned SQLite schema and dedicated resume exchange. A
+successful provider result commits the session and complete user/assistant pair
+in one short transaction. All lookups include authenticated server ID and actual
+player UUID, and recent context is ordered and bounded before model dispatch.
 
-- Runtime application repositories/migrations and every Paper database.
-- Session/message persistence, resume, explicit modules, context reduction,
-  durable usage accounting, and monthly budget enforcement begin in Phase 6 or
-  later.
+Paper keeps only the current in-memory session selection. A successful first
+reply or `session.resumed` updates it after the same request, player, connection,
+and epoch validation used by private replies. `/agent resume [session]` never
+becomes model input, and tab completion does not enumerate identifiers.
+
+The fixed Module Manifest resolves trusted instructions independently for each
+request. `/agent say` chooses `general`; `/agent module <name> <message>` chooses
+one explicit route for one request. Sessions do not store an active module and
+all Phase 6 module tool allowlists are empty.
+
+## Current Phase 6 boundary
+
+The implemented conversation boundary is:
+
+- Paper has no conversation database. Runtime exclusively owns the versioned
+  session/message schema and commits only complete successful exchanges.
+- Resume is a dedicated authenticated application exchange. Session lookup and
+  context reads always include server ID and player UUID.
+- The six fixed modules provide one-shot prompt routing with empty tool
+  allowlists. They do not persist an active route on the session.
+- Conversation storage can be disabled. That mode persists no message content,
+  returns no durable session, and rejects resume explicitly.
+
+The following remain outside the Phase 6 implementation boundary:
+
+- Durable usage accounting and monthly budget enforcement remain later work.
 - Proposals and tool execution remain unsupported; the application channel
   rejects their reserved message types.
 - The six core tool entries are non-executable readiness descriptors. Real

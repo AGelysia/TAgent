@@ -22,6 +22,127 @@
       ]
     },
     {
+      "id": "envelope.agent-request.resumed-module-valid",
+      "category": "valid",
+      "file": "valid/envelope-agent-request-resumed-module.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        },
+        {
+          "schema": "agent-request.schema.json",
+          "documentPointer": "/payload",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "envelope.session-resume.valid",
+      "category": "valid",
+      "file": "valid/envelope-session-resume.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        },
+        {
+          "schema": "session-resume.schema.json",
+          "documentPointer": "/payload",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "envelope.session-resume.latest-valid",
+      "category": "valid",
+      "file": "valid/envelope-session-resume-latest.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        },
+        {
+          "schema": "session-resume.schema.json",
+          "documentPointer": "/payload",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "envelope.session-resumed.valid",
+      "category": "valid",
+      "file": "valid/envelope-session-resumed.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        },
+        {
+          "schema": "session-resumed.schema.json",
+          "documentPointer": "/payload",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "session.agent-errors.valid",
+      "category": "valid",
+      "file": "valid/session-agent-errors.json",
+      "validations": [
+        {
+          "schema": "agent-error.schema.json",
+          "documentPointer": "/notFound",
+          "expectedValid": true
+        },
+        {
+          "schema": "agent-error.schema.json",
+          "documentPointer": "/storageDisabled",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "session-resume.session-id-invalid",
+      "category": "invalid_format",
+      "file": "invalid/session-resume-session-id-invalid.json",
+      "validations": [
+        {
+          "schema": "session-resume.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "session-resume.extra-field",
+      "category": "invalid_field",
+      "file": "invalid/session-resume-extra-field.json",
+      "validations": [
+        {
+          "schema": "session-resume.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "session-resumed.null-session-id",
+      "category": "invalid_type",
+      "file": "invalid/session-resumed-null-session-id.json",
+      "validations": [
+        {
+          "schema": "session-resumed.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
       "id": "envelope.agent-complete.valid",
       "category": "valid",
       "file": "valid/envelope-agent-complete.json",

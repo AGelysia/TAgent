@@ -10,11 +10,17 @@ export const modelGenerationFailureCodes = [
 
 export type ModelGenerationFailureCode = (typeof modelGenerationFailureCodes)[number];
 
+export interface ModelInputMessage {
+  readonly role: "user" | "assistant";
+  readonly content: string;
+}
+
 export interface ModelGenerationRequest {
   readonly provider: "openai";
   readonly model: string;
   readonly apiKey: string;
-  readonly input: string;
+  readonly instructions: string;
+  readonly input: readonly ModelInputMessage[];
   readonly maxOutputTokens: number;
   readonly signal: AbortSignal;
 }

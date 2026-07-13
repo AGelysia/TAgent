@@ -22,7 +22,7 @@ Runtime-Paper messages use two schema passes:
 5. Apply the current Paper policy, live permissions, Offline state, and
    tool-specific argument or result schema. Schema validity is not permission.
 
-The Phase 1 payload registry is:
+The protocol 1.0 payload registry is:
 
 | Envelope `type`                | Payload schema                |
 | ------------------------------ | ----------------------------- |
@@ -31,6 +31,8 @@ The Phase 1 payload registry is:
 | `agent.complete`               | `agent-complete.schema.json`  |
 | `agent.error`                  | `agent-error.schema.json`     |
 | `agent.cancel`                 | `agent-cancel.schema.json`    |
+| `session.resume`               | `session-resume.schema.json`  |
+| `session.resumed`              | `session-resumed.schema.json` |
 | `tool.call`                    | `tool-call.schema.json`       |
 | `tool.result`                  | `tool-result.schema.json`     |
 | `proposal.create`              | `proposal.schema.json`        |
@@ -67,6 +69,17 @@ network handler.
 - `agent.cancel` is correlated by the original `requestId` and trusted player
   identity. Cancellation is idempotent: an unknown, completed, or already
   cancelled request has no effect, and a late terminal response is discarded.
+- `session.resume` uses a null `sessionId` to request the most recently updated
+  session visible to the authenticated `(serverId, playerUuid)` pair. A UUID
+  requests that exact session. The Runtime must use the same owner and server
+  predicates for both lookups and return `SESSION_NOT_FOUND` for every miss;
+  it must not reveal whether another player or server owns a supplied UUID.
+- `session.resumed` returns the selected non-null session ID on the same
+  `requestId`. When conversation storage is disabled, the Runtime returns
+  `CONVERSATION_STORAGE_DISABLED` instead of accepting a resume request.
+- A `module` on `agent.request` is a one-request route. It does not mutate the
+  resumed session's default module; an ordinary follow-up uses `general` unless
+  it explicitly names another module again.
 - The receiver checks an allowed clock-skew window and stores accepted nonces
   until that window expires. A repeated nonce or message ID is rejected before
   payload handling. The nonce contains at least 128 bits from a CSPRNG and is

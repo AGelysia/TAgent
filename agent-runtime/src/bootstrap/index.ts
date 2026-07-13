@@ -13,6 +13,11 @@ import { SchemaRegistry } from "../protocol/schema-registry.js";
 import { UnsupportedModelProvider, type ModelProvider } from "../providers/model-provider.js";
 import { OpenAiResponsesProvider } from "../providers/openai-responses-provider.js";
 import { AgentRequestService } from "../requests/agent-request-service.js";
+import {
+  DisabledConversationRepository,
+  SqliteConversationRepository,
+} from "../storage/conversation-repository.js";
+import { migrateRuntimeStorage } from "../storage/migrations.js";
 import { registerPaperHandshakeRoute } from "../transport/paper-handshake.js";
 import { runtimeIdentity, type RuntimeIdentity } from "../version.js";
 
@@ -58,6 +63,8 @@ async function checkProtocolSchema(protocolRoot?: string): Promise<SchemaRegistr
       "agent-request.schema.json",
       "capability.schema.json",
       "envelope.schema.json",
+      "session-resume.schema.json",
+      "session-resumed.schema.json",
     ];
     if (requiredSchemas.some((schema) => !registry.schemaReferences.includes(schema))) {
       throw new Error("A required protocol schema alias is unavailable");
@@ -87,6 +94,28 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
     await checkLogDirectory(loaded.paths.rootDirectory, loaded.paths.logDirectory);
     const schemaRegistry = await checkProtocolSchema(options.protocolRoot);
     sqlite = await checkRuntimeSqlite(loaded.paths.rootDirectory, loaded.paths.sqlite);
+    const storageNow = options.now?.() ?? new Date();
+    let conversations: DisabledConversationRepository | SqliteConversationRepository;
+    try {
+      migrateRuntimeStorage(sqlite.database, storageNow.toISOString());
+      conversations = loaded.config.privacy.storeConversations
+        ? new SqliteConversationRepository(sqlite.database)
+        : new DisabledConversationRepository();
+      if (loaded.config.privacy.storeConversations && loaded.config.privacy.retentionDays > 0) {
+        const cutoff = new Date(
+          storageNow.getTime() - loaded.config.privacy.retentionDays * 24 * 60 * 60 * 1000,
+        );
+        conversations.purgeExpired(cutoff.toISOString());
+      }
+    } catch (error) {
+      throw new RuntimeStartupError({
+        code: "SQLITE_WRITE_FAILED",
+        stage: "sqlite",
+        field: "/storage/sqlitePath",
+        safeMessage: "Runtime SQLite schema could not be prepared.",
+        cause: error,
+      });
+    }
 
     const provider =
       options.modelProvider ??
@@ -100,6 +129,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
     const agentRequests = new AgentRequestService({
       provider,
       config: loaded.config,
+      conversations,
       ...(options.now === undefined ? {} : { now: () => options.now?.().getTime() ?? Date.now() }),
     });
     app = createRuntimeApp();
@@ -112,6 +142,9 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     registerHealthRoute(app, health);
+    app.addHook("preClose", async () => {
+      agentRequests.close();
+    });
     app.addHook("onClose", async () => {
       health.markStopped();
       sqlite?.close();

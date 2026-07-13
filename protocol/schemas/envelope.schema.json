@@ -44,6 +44,8 @@
         "agent.complete",
         "agent.error",
         "agent.cancel",
+        "session.resume",
+        "session.resumed",
         "view.publish",
         "view.clear",
         "tool.call",

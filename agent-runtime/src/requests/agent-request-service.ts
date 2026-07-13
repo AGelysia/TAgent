@@ -1,9 +1,19 @@
+import { randomUUID } from "node:crypto";
+
 import type { RuntimeConfig } from "../config/runtime-config.js";
+import { type ModuleId, ModuleRegistry } from "../modules/module-manifest.js";
 import {
   ModelGenerationError,
   type ModelGenerationFailureCode,
   type ModelProvider,
 } from "../providers/model-provider.js";
+import { buildContextWindow } from "../sessions/context-window.js";
+import {
+  ConversationOwnershipError,
+  DisabledConversationRepository,
+  type ConversationOwner,
+  type ConversationRepository,
+} from "../storage/conversation-repository.js";
 import { RequestAdmissionController, type RequestAdmissionRejection } from "./request-admission.js";
 
 const MAXIMUM_MODEL_OUTPUT_TOKENS = 1024;
@@ -11,13 +21,13 @@ const MAXIMUM_MODEL_OUTPUT_TOKENS = 1024;
 export interface AgentRequestInput {
   readonly requestId: string;
   readonly playerUuid: string;
-  readonly sessionId: null;
-  readonly module: "general";
+  readonly sessionId: string | null;
+  readonly module: ModuleId;
   readonly message: string;
 }
 
 export interface AgentCompletionPayload {
-  readonly sessionId: null;
+  readonly sessionId: string | null;
   readonly playerUuid: string;
   readonly fallbackText: string;
   readonly structuredViews: readonly [];
@@ -30,6 +40,8 @@ export type AgentErrorCode =
   | "MODEL_RESPONSE_INVALID"
   | "REQUEST_CANCELLED"
   | "REQUEST_LIMITED"
+  | "SESSION_NOT_FOUND"
+  | "CONVERSATION_STORAGE_DISABLED"
   | "RUNTIME_INTERNAL_ERROR";
 
 export interface AgentErrorPayload {
@@ -43,11 +55,29 @@ export type AgentTerminalResponse =
   | { readonly type: "agent.complete"; readonly payload: AgentCompletionPayload }
   | { readonly type: "agent.error"; readonly payload: AgentErrorPayload };
 
+export interface SessionResumeInput {
+  readonly requestId: string;
+  readonly playerUuid: string;
+  readonly sessionId: string | null;
+}
+
+export interface SessionResumedPayload {
+  readonly playerUuid: string;
+  readonly sessionId: string;
+}
+
+export type SessionResumeResponse =
+  | { readonly type: "session.resumed"; readonly payload: SessionResumedPayload }
+  | { readonly type: "agent.error"; readonly payload: AgentErrorPayload };
+
 export interface AgentRequestServiceOptions {
   readonly provider: ModelProvider;
   readonly config: RuntimeConfig;
   readonly timeoutMilliseconds?: number;
   readonly now?: () => number;
+  readonly randomUuid?: () => string;
+  readonly conversations?: ConversationRepository;
+  readonly modules?: ModuleRegistry;
 }
 
 interface RequestRecord {
@@ -59,6 +89,8 @@ interface RequestRecord {
   terminalSent: boolean;
   suppressResponse: boolean;
   detached: boolean;
+  preparedSessionId: string | null;
+  createsSession: boolean;
 }
 
 function limitedError(
@@ -148,11 +180,48 @@ function isUsableFallbackText(value: unknown): value is string {
   return true;
 }
 
+function sessionError(
+  playerUuid: string,
+  code: "SESSION_NOT_FOUND" | "CONVERSATION_STORAGE_DISABLED",
+): { readonly type: "agent.error"; readonly payload: AgentErrorPayload } {
+  return {
+    type: "agent.error",
+    payload: {
+      playerUuid,
+      code,
+      fallbackText:
+        code === "SESSION_NOT_FOUND"
+          ? "That conversation is not available."
+          : "Conversation history is disabled on this server.",
+      retryable: false,
+    },
+  };
+}
+
+function internalError(playerUuid: string): {
+  readonly type: "agent.error";
+  readonly payload: AgentErrorPayload;
+} {
+  return {
+    type: "agent.error",
+    payload: {
+      playerUuid,
+      code: "RUNTIME_INTERNAL_ERROR",
+      fallbackText: "The AI request failed. Try again later.",
+      retryable: true,
+    },
+  };
+}
+
 export class AgentRequestService {
   readonly #provider: ModelProvider;
   readonly #config: RuntimeConfig;
   readonly #timeoutMilliseconds: number;
   readonly #admission: RequestAdmissionController;
+  readonly #now: () => number;
+  readonly #randomUuid: () => string;
+  readonly #conversations: ConversationRepository;
+  readonly #modules: ModuleRegistry;
   readonly #requests = new Map<string, RequestRecord>();
   #closed = false;
 
@@ -164,6 +233,10 @@ export class AgentRequestService {
     }
     this.#provider = options.provider;
     this.#config = options.config;
+    this.#now = options.now ?? Date.now;
+    this.#randomUuid = options.randomUuid ?? randomUUID;
+    this.#conversations = options.conversations ?? new DisabledConversationRepository();
+    this.#modules = options.modules ?? new ModuleRegistry();
     this.#timeoutMilliseconds = timeoutMilliseconds;
     this.#admission = new RequestAdmissionController(
       {
@@ -172,7 +245,7 @@ export class AgentRequestService {
         perPlayerCooldownMilliseconds: options.config.limits.perPlayerCooldownSeconds * 1000,
         dailyRequestsPerPlayer: options.config.limits.dailyRequestsPerPlayer,
       },
-      options.now,
+      this.#now,
     );
   }
 
@@ -206,6 +279,8 @@ export class AgentRequestService {
       terminalSent: false,
       suppressResponse: false,
       detached: false,
+      preparedSessionId: null,
+      createsSession: false,
     };
     this.#requests.set(input.requestId, record);
     const decision = this.#admission.admit({
@@ -241,6 +316,38 @@ export class AgentRequestService {
     }
   }
 
+  public resume(
+    input: SessionResumeInput,
+    respond: (response: SessionResumeResponse) => void,
+  ): void {
+    if (this.#closed) {
+      this.#safeRespond(respond, internalError(input.playerUuid));
+      return;
+    }
+    if (!this.#conversations.enabled) {
+      this.#safeRespond(respond, sessionError(input.playerUuid, "CONVERSATION_STORAGE_DISABLED"));
+      return;
+    }
+    try {
+      const owner = this.#owner(input.playerUuid);
+      const session =
+        input.sessionId === null
+          ? this.#conversations.findLatestOwned(owner)
+          : this.#conversations.findOwned(input.sessionId, owner);
+      this.#safeRespond(
+        respond,
+        session === undefined
+          ? sessionError(input.playerUuid, "SESSION_NOT_FOUND")
+          : {
+              type: "session.resumed",
+              payload: { playerUuid: input.playerUuid, sessionId: session.id },
+            },
+      );
+    } catch {
+      this.#safeRespond(respond, internalError(input.playerUuid));
+    }
+  }
+
   public close(): void {
     this.#closed = true;
     this.cancelAll();
@@ -257,34 +364,65 @@ export class AgentRequestService {
   #start(record: RequestRecord): void {
     record.phase = "ACTIVE";
     void Promise.resolve()
-      .then(() =>
-        this.#provider.generate({
+      .then(() => {
+        const manifest = this.#modules.get(record.input.module);
+        const history = this.#prepareConversation(record);
+        return this.#provider.generate({
           provider: this.#config.model.provider,
           model: this.#config.model.model,
           apiKey: this.#config.model.apiKey,
-          input: record.input.message,
+          instructions: manifest.instructions,
+          input: buildContextWindow(history, record.input.message, {
+            maximumMessages: this.#config.limits.maxContextMessages,
+            maximumCharacters: this.#config.limits.maxContextCharacters,
+          }),
           maxOutputTokens: MAXIMUM_MODEL_OUTPUT_TOKENS,
           signal: record.controller.signal,
-        }),
-      )
+        });
+      })
       .then(
         (result) => {
           if (!record.terminalSent && !record.suppressResponse) {
-            record.terminalSent = true;
-            this.#safeRespond(
-              record.respond,
-              isUsableFallbackText(result.fallbackText)
-                ? {
-                    type: "agent.complete",
-                    payload: {
-                      sessionId: null,
-                      playerUuid: record.input.playerUuid,
-                      fallbackText: result.fallbackText,
-                      structuredViews: [],
-                    },
-                  }
-                : providerError(record.input.playerUuid, "MODEL_RESPONSE_INVALID"),
-            );
+            if (!isUsableFallbackText(result.fallbackText)) {
+              record.terminalSent = true;
+              this.#safeRespond(
+                record.respond,
+                providerError(record.input.playerUuid, "MODEL_RESPONSE_INVALID"),
+              );
+              return;
+            }
+            try {
+              if (record.preparedSessionId !== null) {
+                this.#conversations.commitExchange({
+                  ...this.#owner(record.input.playerUuid),
+                  sessionId: record.preparedSessionId,
+                  createSession: record.createsSession,
+                  requestId: record.input.requestId,
+                  module: record.input.module,
+                  userContent: record.input.message,
+                  assistantContent: result.fallbackText,
+                  createdAt: new Date(this.#now()).toISOString(),
+                });
+              }
+              record.terminalSent = true;
+              this.#safeRespond(record.respond, {
+                type: "agent.complete",
+                payload: {
+                  sessionId: record.preparedSessionId,
+                  playerUuid: record.input.playerUuid,
+                  fallbackText: result.fallbackText,
+                  structuredViews: [],
+                },
+              });
+            } catch (error) {
+              record.terminalSent = true;
+              this.#safeRespond(
+                record.respond,
+                error instanceof ConversationOwnershipError
+                  ? sessionError(record.input.playerUuid, "SESSION_NOT_FOUND")
+                  : internalError(record.input.playerUuid),
+              );
+            }
           }
         },
         (error: unknown) => {
@@ -296,15 +434,9 @@ export class AgentRequestService {
             record.respond,
             error instanceof ModelGenerationError
               ? providerError(record.input.playerUuid, error.code)
-              : {
-                  type: "agent.error",
-                  payload: {
-                    playerUuid: record.input.playerUuid,
-                    code: "RUNTIME_INTERNAL_ERROR",
-                    fallbackText: "The AI request failed. Try again later.",
-                    retryable: true,
-                  },
-                },
+              : error instanceof ConversationOwnershipError
+                ? sessionError(record.input.playerUuid, "SESSION_NOT_FOUND")
+                : internalError(record.input.playerUuid),
           );
         },
       )
@@ -312,6 +444,37 @@ export class AgentRequestService {
         this.#detach(record);
       })
       .catch(() => undefined);
+  }
+
+  #owner(playerUuid: string): ConversationOwner {
+    return { serverId: this.#config.server.id, playerUuid };
+  }
+
+  #prepareConversation(record: RequestRecord) {
+    if (!this.#conversations.enabled) {
+      if (record.input.sessionId !== null) {
+        throw new ConversationOwnershipError();
+      }
+      return [];
+    }
+
+    const owner = this.#owner(record.input.playerUuid);
+    if (record.input.sessionId === null) {
+      record.preparedSessionId = this.#randomUuid();
+      record.createsSession = true;
+      return [];
+    }
+    const session = this.#conversations.findOwned(record.input.sessionId, owner);
+    if (session === undefined) {
+      throw new ConversationOwnershipError();
+    }
+    record.preparedSessionId = session.id;
+    record.createsSession = false;
+    const maximumHistory = Math.max(
+      0,
+      Math.floor((this.#config.limits.maxContextMessages - 1) / 2) * 2,
+    );
+    return this.#conversations.loadRecentOwned(session.id, owner, maximumHistory);
   }
 
   #timeout(record: RequestRecord): void {
@@ -355,10 +518,7 @@ export class AgentRequestService {
     }
   }
 
-  #safeRespond(
-    responder: (response: AgentTerminalResponse) => void,
-    response: AgentTerminalResponse,
-  ): void {
+  #safeRespond<Response>(responder: (response: Response) => void, response: Response): void {
     try {
       responder(response);
     } catch {

@@ -4,8 +4,8 @@ Last updated: 2026-07-13
 
 ## Current status
 
-Phase 0 through Phase 5 are complete. Phase 6 sessions, resume, and explicit
-modules are next.
+Phase 0 through Phase 6 are complete. Phase 7 typed read-only tools and the
+Runtime tool loop are next.
 
 ## Locked decisions
 
@@ -43,6 +43,13 @@ modules are next.
   cooldown, and an in-memory daily request limit.
 - Phase 5 replies are literal private text. Paper installs no ordinary-chat
   listener and revalidates the request epoch and connection at final delivery.
+- Phase 6 sessions are owned by Runtime and queried with the complete
+  authenticated `(server ID, player UUID)` key. Missing, foreign-player, and
+  foreign-server resume identifiers share one safe result.
+- `/agent module` is a one-request route. No active module is persisted on a
+  session, and ordinary `/agent say` always returns to `general`.
+- Conversation storage is controlled by `privacy.storeConversations`. Disabled
+  storage persists no prompts or completions and makes resume unavailable.
 
 ## Phase 0: repository scaffold
 
@@ -209,6 +216,36 @@ Completed:
       record exactly once and issue best-effort cancellation. Old, duplicate,
       wrong-player, wrong-session, and late terminal messages have no effect.
 
+## Phase 6: sessions, resume, and modules
+
+Completed:
+
+- [x] Protocol 1.0 has closed `session.resume` and `session.resumed` payloads,
+      stable non-enumerating session errors, and shared fixtures for resumed
+      non-default module requests.
+- [x] Runtime migrates one private SQLite connection to versioned `sessions`
+      and `messages` tables, rejects unsupported future versions, and rolls
+      back incomplete exchanges.
+- [x] A successful answer atomically commits the complete user/assistant pair.
+      Provider failure, invalid output, timeout, or cancellation writes no
+      partial turn and no transaction spans provider I/O.
+- [x] Every exact/latest lookup and history read includes server ID and player
+      UUID. Runtime restart, cross-player denial, cross-server denial, latest
+      selection, retention, and cascade behavior are covered by repository and
+      request-service tests.
+- [x] `/agent resume [session]` uses a dedicated non-model application exchange.
+      Paper updates its current selection only for a bound response and never
+      tab-completes session identifiers.
+- [x] `/agent module list` and `/agent module <name> <message>` use the closed
+      six-entry manifest. Module instructions are trusted, tool allowlists are
+      empty, and the next ordinary request uses `general`.
+- [x] Provider input preserves user/assistant roles. Context keeps the current
+      prompt and drops complete oldest exchanges against both message-count and
+      total-character limits.
+- [x] When conversation storage is disabled, Runtime writes no message rows,
+      returns nullable completion sessions, and rejects resume explicitly while
+      ordinary private questions continue to work.
+
 ## Verification
 
 Verified serially on 2026-07-13:
@@ -228,18 +265,19 @@ cd ..
 
 Results:
 
-- Runtime: 10 Vitest files, 80 tests passed; TypeScript build, ESLint, and
+- Runtime: 12 Vitest files, 90 tests passed; TypeScript build, ESLint, and
   Prettier passed; full and production-only npm audits reported 0
   vulnerabilities.
-- Paper: build and Spotless passed; 152 tests passed, including 45 shared dynamic
+- Paper: build and Spotless passed; 172 tests passed, including 53 shared dynamic
   Schema/HMAC cases plus strict desired-state parsing/atomic persistence,
   operational epoch invalidation, Owner/OP/console authorization, cancellable
   real-WebSocket handshake/application exchange, provider request correlation,
   cancellation/timeout/late-response races, lifecycle/persistence races,
-  command-map transactions, private reply gating, exact Offline output, doctor
-  output, and descriptor tests.
-- Fabric: remapped JAR build and Spotless passed; 46 tests passed, including the
-  same 45 shared protocol cases plus client metadata.
+  session selection/resume binding, explicit module routing, command-map
+  transactions, private reply gating, exact Offline output, doctor output, and
+  descriptor tests.
+- Fabric: remapped JAR build and Spotless passed; 54 tests passed, including the
+  same 53 shared protocol cases plus client metadata.
 - Both JVM reports contain no remote Schema load, `UnknownHostException`,
   invalid-schema error, skipped test, or failed test.
 - Paper `1.21.11-132` JAR SHA-256
@@ -253,7 +291,8 @@ Results:
   exception-free plugin disable. No Paper, Runtime, or
   Gradle process remained.
 - Packaged Runtime preserved its compiled authenticated application endpoint,
-  OpenAI provider, configuration template, and protocol schemas.
+  OpenAI provider, migrations, session/message repository, context reducer,
+  Module Manifest, configuration template, and session protocol schemas.
 - All protocol JSON files parse successfully; Bash scripts pass `bash -n`.
 
 PowerShell scripts were reviewed for native exit-code propagation but were not
@@ -261,7 +300,9 @@ executed because `pwsh` is unavailable on this Linux host. A graphical Fabric
 client, a real online player executing `/agent say`, and Litematica were not
 started. Ordinary-player UUID binding, primary-thread private reply, no
 broadcast, timeout, and concurrent-request behavior are covered by JVM tests;
-the pinned smoke only proves that Console cannot enter the model path. Gradle
+the pinned smoke only proves that Console cannot enter the model path. Resume
+ownership, one-shot modules, nullable storage mode, session correlation, and
+command permissions are covered by JVM/Runtime tests. Gradle
 reports Loom-originated deprecation warnings for future
 Gradle 10 compatibility, but both builds pass on the locked Gradle 9.5.1
 wrapper. Node emits its documented ExperimentalWarning when the built-in SQLite
@@ -273,10 +314,10 @@ module is loaded; it is not suppressed.
   authenticated connection only after explicit `/agent on`.
 - Proposal repositories, executable tools, and client transfers. The request
   cleanup port is live; proposal, operation, and client-state ports remain empty.
-- SQLite migrations or repositories in either process; Phase 2 only owns the
-  Runtime startup-readiness file and connection.
-- Session/message persistence, resume, explicit module routing, durable rate
-  accounting, token/cost accounting, or monthly budget enforcement.
+- Paper conversation repositories; Paper retains only a transient current
+  session selection. Runtime owns the conversation database exclusively.
+- Durable rate accounting, token/cost accounting, or monthly budget
+  enforcement.
 - Tool registry/execution, policy enforcement, proposals, confirmation, or
   audit persistence.
 - Capability Pack discovery, approval, reload, or command execution.
@@ -293,7 +334,7 @@ The presence of a schema does not mark the corresponding feature implemented.
 
 ### Provider boundary
 
-Phase 5 supplies one fixed OpenAI Responses adapter with safe status mapping,
+Phase 6 supplies one fixed OpenAI Responses adapter with safe status mapping,
 bounded bodies, timeout/cancellation, and no prompt/completion logging. It does
 not retry, stream, rotate providers, persist usage, or enforce the configured
 monthly budget. Provider account-side retention and policy remain an operator
@@ -303,8 +344,10 @@ responsibility even though requests set `store: false`.
 
 Node 22's built-in synchronous SQLite API avoids a native addon on this small
 host, but Node still labels it active development and emits an ExperimentalWarning.
-Phase 2 confines it to bounded startup work. The repository layer must reassess
-the driver before adding request-path database operations.
+Phase 6 uses it for indexed, hard-limited context reads and short atomic
+exchange writes. No transaction spans provider I/O. The driver remains
+experimental and should be reassessed before higher-volume deployment or
+unbounded data features.
 
 ### Conditional command registration
 
@@ -336,8 +379,8 @@ adapter.
 
 ## Next gates
 
-1. Implement Phase 6 Runtime-owned sessions/messages, resume ownership checks,
-   explicit one-shot modules, context reduction, and server/player isolation.
+1. Implement the Phase 7 Runtime tool loop and Paper-authoritative typed
+   read-only tools without broadening the generic execution surface.
 2. Add durable usage/cost accounting before treating daily/monthly limits as
    restart-stable budgets.
 3. Add a real online-player integration lane for private `/agent say` delivery

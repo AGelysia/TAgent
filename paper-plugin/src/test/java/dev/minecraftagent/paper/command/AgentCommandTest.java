@@ -9,6 +9,7 @@ import dev.minecraftagent.paper.lifecycle.AgentState;
 import dev.minecraftagent.paper.lifecycle.AgentStatus;
 import dev.minecraftagent.paper.lifecycle.DesiredMode;
 import dev.minecraftagent.paper.lifecycle.OfflineReason;
+import dev.minecraftagent.paper.request.AgentModule;
 import dev.minecraftagent.paper.request.AgentRequestGateway;
 import java.lang.reflect.Proxy;
 import java.util.ArrayDeque;
@@ -194,7 +195,10 @@ class AgentCommandTest {
     command.execute(sender, "agent", new String[] {"unknown"});
 
     assertEquals(
-        List.of("Minecraft Agent: ONLINE", "/agent [say <message>|doctor|off|on]"), messages);
+        List.of(
+            "Minecraft Agent: ONLINE",
+            "/agent [say <message>|resume [session]|module list|module <name> <message>|doctor|off|on]"),
+        messages);
   }
 
   @Test
@@ -240,7 +244,79 @@ class AgentCommandTest {
         player(emptyMessages, UUID.randomUUID(), Set.of(AgentCommand.USE_PERMISSION)),
         "agent",
         new String[] {"say"});
-    assertEquals(List.of("/agent [say <message>|doctor|off|on]"), emptyMessages);
+    assertEquals(
+        List.of(
+            "/agent [say <message>|resume [session]|module list|module <name> <message>|doctor|off|on]"),
+        emptyMessages);
+  }
+
+  @Test
+  void resumeUsesActualPlayerIdentityAndRequiresCanonicalSessionId() {
+    var messages = new ArrayList<String>();
+    var requests = new RecordingRequests();
+    var playerId = UUID.randomUUID();
+    var sessionId = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    var command =
+        command(healthy(), new RecordingControl(), requests, ignored -> false, Runnable::run);
+    var player = player(messages, playerId, Set.of(AgentCommand.USE_PERMISSION));
+
+    command.execute(player, "agent", new String[] {"resume", sessionId.toString()});
+    assertEquals(playerId, requests.playerId);
+    assertEquals(sessionId, requests.sessionId);
+    assertEquals("resume", requests.operation);
+
+    command.execute(player, "agent", new String[] {"resume", sessionId.toString().toUpperCase()});
+    assertEquals(List.of("AI session ID must be a canonical UUID."), messages);
+  }
+
+  @Test
+  void moduleListAndExplicitRouteUseTheOrdinaryModulePermission() {
+    var messages = new ArrayList<String>();
+    var requests = new RecordingRequests();
+    var playerId = UUID.randomUUID();
+    var command =
+        command(healthy(), new RecordingControl(), requests, ignored -> false, Runnable::run);
+    var player =
+        player(
+            messages,
+            playerId,
+            Set.of(AgentCommand.USE_PERMISSION, AgentCommand.MODULE_PERMISSION));
+
+    command.execute(player, "agent", new String[] {"module", "list"});
+    command.execute(player, "agent", new String[] {"module", "ReCiPe", "craft", "a", "comparator"});
+
+    assertEquals(List.of("AI modules: general, recipe, guide, locate, build, project"), messages);
+    assertEquals(playerId, requests.playerId);
+    assertEquals(AgentModule.RECIPE, requests.module);
+    assertEquals("craft a comparator", requests.message);
+    assertEquals("module", requests.operation);
+  }
+
+  @Test
+  void unknownModuleAndMissingModulePermissionNeverSubmit() {
+    var messages = new ArrayList<String>();
+    var requests = new RecordingRequests();
+    var command =
+        command(healthy(), new RecordingControl(), requests, ignored -> false, Runnable::run);
+
+    command.execute(
+        player(
+            messages,
+            UUID.randomUUID(),
+            Set.of(AgentCommand.USE_PERMISSION, AgentCommand.MODULE_PERMISSION)),
+        "agent",
+        new String[] {"module", "unknown", "secret"});
+    command.execute(
+        player(messages, UUID.randomUUID(), Set.of(AgentCommand.USE_PERMISSION)),
+        "agent",
+        new String[] {"module", "recipe", "secret"});
+
+    assertEquals(
+        List.of(
+            "Unknown AI module. Use /agent module list.",
+            "You do not have permission to use this command."),
+        messages);
+    assertNull(requests.operation);
   }
 
   @Test
@@ -275,8 +351,14 @@ class AgentCommandTest {
     var onlineAuthorized =
         command(healthy(), new RecordingControl(), ignored -> true, Runnable::run);
     assertEquals(
-        List.of("say", "doctor", "off"),
+        List.of("say", "resume", "module", "doctor", "off"),
         onlineAuthorized.tabComplete(permitted, "agent", new String[] {""}));
+    assertEquals(
+        List.of("list", "general", "recipe", "guide", "locate", "build", "project"),
+        onlineAuthorized.tabComplete(permitted, "agent", new String[] {"module", ""}));
+    assertEquals(
+        List.of("recipe"),
+        onlineAuthorized.tabComplete(permitted, "agent", new String[] {"module", "re"}));
     assertEquals(List.of("off"), onlineAuthorized.tabComplete(denied, "agent", new String[] {"o"}));
 
     var onlineUnauthorized =
@@ -439,12 +521,33 @@ class AgentCommandTest {
 
   private static final class RecordingRequests implements AgentRequestGateway {
     private UUID playerId;
+    private UUID sessionId;
+    private AgentModule module;
     private String message;
+    private String operation;
 
     @Override
     public Submission submit(UUID playerId, String message) {
       this.playerId = playerId;
       this.message = message;
+      this.operation = "say";
+      return Submission.ACCEPTED;
+    }
+
+    @Override
+    public Submission submitModule(UUID playerId, AgentModule module, String message) {
+      this.playerId = playerId;
+      this.module = module;
+      this.message = message;
+      this.operation = "module";
+      return Submission.ACCEPTED;
+    }
+
+    @Override
+    public Submission resume(UUID playerId, UUID sessionId) {
+      this.playerId = playerId;
+      this.sessionId = sessionId;
+      this.operation = "resume";
       return Submission.ACCEPTED;
     }
   }

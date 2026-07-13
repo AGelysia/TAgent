@@ -4,6 +4,8 @@ import type { SchemaRegistry } from "../protocol/schema-registry.js";
 import type {
   AgentRequestInput,
   AgentTerminalResponse,
+  SessionResumeInput,
+  SessionResumeResponse,
 } from "../requests/agent-request-service.js";
 import { SUPPORTED_PROTOCOL_VERSION } from "../version.js";
 import { decodeCanonicalBase64Url } from "./handshake-authentication.js";
@@ -42,7 +44,10 @@ export interface AgentCancelInput {
 
 export type PaperApplicationMessage =
   | { readonly type: "agent.request"; readonly request: AgentRequestInput }
-  | { readonly type: "agent.cancel"; readonly cancellation: AgentCancelInput };
+  | { readonly type: "agent.cancel"; readonly cancellation: AgentCancelInput }
+  | { readonly type: "session.resume"; readonly resume: SessionResumeInput };
+
+export type RuntimeApplicationResponse = AgentTerminalResponse | SessionResumeResponse;
 
 export interface ApplicationEnvelopeProtocolOptions {
   readonly serverId: string;
@@ -107,7 +112,11 @@ export class ApplicationEnvelopeProtocol {
     if (envelope.protocolVersion !== SUPPORTED_PROTOCOL_VERSION) {
       throw invalid();
     }
-    if (envelope.type !== "agent.request" && envelope.type !== "agent.cancel") {
+    if (
+      envelope.type !== "agent.request" &&
+      envelope.type !== "agent.cancel" &&
+      envelope.type !== "session.resume"
+    ) {
       throw new ApplicationProtocolFailure("UNSUPPORTED_MESSAGE_TYPE");
     }
     if (!this.#schemaRegistry.validate("envelope.schema.json", envelope).valid) {
@@ -131,7 +140,11 @@ export class ApplicationEnvelopeProtocol {
     }
 
     const payloadSchema =
-      envelope.type === "agent.request" ? "agent-request.schema.json" : "agent-cancel.schema.json";
+      envelope.type === "agent.request"
+        ? "agent-request.schema.json"
+        : envelope.type === "agent.cancel"
+          ? "agent-cancel.schema.json"
+          : "session-resume.schema.json";
     if (!this.#schemaRegistry.validate(payloadSchema, envelope.payload).valid) {
       throw invalid();
     }
@@ -145,8 +158,6 @@ export class ApplicationEnvelopeProtocol {
           : undefined;
       if (
         envelope.messageId !== envelope.requestId ||
-        envelope.payload["sessionId"] !== null ||
-        envelope.payload["module"] !== "general" ||
         !isRecord(clientCapabilities) ||
         clientCapabilities["connected"] !== false ||
         clientCapabilities["clientProtocolVersion"] !== null ||
@@ -164,18 +175,32 @@ export class ApplicationEnvelopeProtocol {
         request: {
           requestId: envelope.requestId,
           playerUuid: String(envelope.payload["playerUuid"]),
-          sessionId: null,
-          module: "general",
+          sessionId:
+            envelope.payload["sessionId"] === null ? null : String(envelope.payload["sessionId"]),
+          module: envelope.payload["module"] as AgentRequestInput["module"],
           message: String(envelope.payload["message"]),
         },
       };
-    } else {
+    } else if (envelope.type === "agent.cancel") {
       message = {
         type: "agent.cancel",
         cancellation: {
           requestId: envelope.requestId,
           playerUuid: String(envelope.payload["playerUuid"]),
           reason: envelope.payload["reason"] as AgentCancelInput["reason"],
+        },
+      };
+    } else {
+      if (envelope.messageId !== envelope.requestId) {
+        throw invalid();
+      }
+      message = {
+        type: "session.resume",
+        resume: {
+          requestId: envelope.requestId,
+          playerUuid: String(envelope.payload["playerUuid"]),
+          sessionId:
+            envelope.payload["sessionId"] === null ? null : String(envelope.payload["sessionId"]),
         },
       };
     }
@@ -188,10 +213,14 @@ export class ApplicationEnvelopeProtocol {
 
   public createResponse(
     requestId: string,
-    response: AgentTerminalResponse,
+    response: RuntimeApplicationResponse,
   ): Record<string, unknown> {
     const payloadSchema =
-      response.type === "agent.complete" ? "agent-complete.schema.json" : "agent-error.schema.json";
+      response.type === "agent.complete"
+        ? "agent-complete.schema.json"
+        : response.type === "agent.error"
+          ? "agent-error.schema.json"
+          : "session-resumed.schema.json";
     if (!this.#schemaRegistry.validate(payloadSchema, response.payload).valid) {
       throw new Error(`Runtime generated an invalid ${response.type} payload.`);
     }

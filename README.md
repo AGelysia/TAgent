@@ -2,10 +2,10 @@
 
 Minecraft Agent is a security-first Minecraft assistant composed of a Paper plugin, a local
 TypeScript runtime, and an optional Fabric client mod. This repository currently implements the
-Phase 0-5 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
+Phase 0-6 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
 loopback Runtime-Paper channel, conditional `/agent` registration, persistent emergency Offline
-controls, and private `/agent say` model replies. It does not execute tools or mutate Minecraft
-state.
+controls, private model replies, Runtime-owned sessions, resume, and explicit one-shot modules. It
+does not execute tools or mutate Minecraft state.
 
 The product and delivery baseline is recorded in
 [`minecraft_agent_vibe_coding_plan.md`](minecraft_agent_vibe_coding_plan.md). Implementation status
@@ -72,7 +72,7 @@ cd ..
 The Fabric build downloads Minecraft artifacts and is deliberately last. Do not run both Gradle
 builds concurrently on a low-memory host.
 
-## Phase 2-5 Runtime
+## Phase 2-6 Runtime
 
 ```bash
 cd agent-runtime
@@ -93,12 +93,19 @@ Startup checks the configuration, private log directory, shared Capability Schem
 SQLite file, and the configured OpenAI model before binding `127.0.0.1`. `/health`
 returns a cached minimal readiness view and does not repeat provider or database work.
 
-Phase 5 uses the OpenAI Responses API for bounded, non-streaming plain-text answers with provider
-storage disabled. Runtime applies per-player outstanding/cooldown/daily limits plus global
-concurrency and queue limits. After the authenticated hello, the same bounded WebSocket accepts
-only agent request/cancel traffic; tool, proposal, view, and heartbeat types remain unsupported.
+The Runtime uses the OpenAI Responses API for bounded, non-streaming plain-text answers with
+provider storage disabled. It applies per-player outstanding/cooldown/daily limits plus global
+concurrency and queue limits. With `privacy.storeConversations: true`, a versioned SQLite
+repository commits each successful user/assistant exchange and can restore it after a Runtime
+restart. Every session read is scoped by authenticated server ID and player UUID, and model context
+is bounded by both message count and total text size. Disabling conversation storage leaves no
+prompt or answer rows and makes resume unavailable.
 
-## Phase 3-5 Paper
+After the authenticated hello, the same bounded WebSocket accepts agent request/cancel and
+session-resume traffic. A fixed six-entry Module Manifest supplies trusted per-request instructions;
+its Phase 6 tool allowlists are empty. Tool, proposal, view, and heartbeat types remain unsupported.
+
+## Phase 3-6 Paper
 
 On first Paper startup, the plugin installs a strict `plugins/MinecraftAgent/config.yml`. Keep its
 Runtime token as the complete `${MINECRAFT_AGENT_SERVER_TOKEN}` environment reference. The endpoint
@@ -131,6 +138,12 @@ fallback text only to that player on the primary thread. It does not listen to n
 broadcast model output. Timeout, quit, Offline, Runtime loss, and disable all cancel live request
 state; responses from an older connection or Offline epoch are discarded.
 
+Successful replies select their Runtime session for later `/agent say` requests. Players can use
+`/agent resume [session]` to recover their own latest or named session; Paper never suggests session
+IDs, and Runtime returns the same safe error for an absent, foreign-player, or foreign-server ID.
+Players with `minecraftagent.module` may list modules or run
+`/agent module <name> <message>`. That route applies once: the next `/agent say` uses `general`.
+
 The opt-in exact-server smoke pins Paper `1.21.11-132`, verifies its SHA-256, limits the heap to 512
 MiB, and runs every case serially:
 
@@ -149,8 +162,8 @@ unregistration in addition to the three initial transport-failure cases.
 ./scripts/package.sh
 ```
 
-Artifacts are placed under `dist/`. The package contains the implemented basic conversation path;
-sessions, tools, proposals, client UI, and world changes remain unavailable.
+Artifacts are placed under `dist/`. The package contains the implemented persistent conversation,
+resume, and explicit module path; tools, proposals, client UI, and world changes remain unavailable.
 
 The packaged Runtime preserves its compiled layout and includes the shared protocol schemas and
 configuration template. Install production dependencies before startup:
@@ -174,4 +187,6 @@ model output are untrusted. `/agent` is deliberately absent from `paper-plugin.y
 it dynamically only after the complete core readiness gate succeeds. Phase 4 keeps the registered
 command during later Offline transitions, rotates an epoch permit before cleanup, and requires a
 fresh check before returning Online. Phase 5 binds every private reply to that permit, the live
-authenticated connection, request ID, server ID, and actual player UUID.
+authenticated connection, request ID, server ID, and actual player UUID. Phase 6 keeps the same
+live binding for resume, and Runtime additionally scopes every durable session operation by server
+ID plus player UUID.

@@ -1,3 +1,5 @@
+import { DatabaseSync } from "node:sqlite";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeConfig } from "../src/config/runtime-config.js";
@@ -11,9 +13,13 @@ import {
   type AgentRequestInput,
   type AgentTerminalResponse,
 } from "../src/requests/agent-request-service.js";
+import { SqliteConversationRepository } from "../src/storage/conversation-repository.js";
+import { migrateRuntimeStorage } from "../src/storage/migrations.js";
 
 const PLAYER_ONE = "11111111-1111-4111-8111-111111111111";
 const PLAYER_TWO = "22222222-2222-4222-8222-222222222222";
+const PERSISTENT_REQUEST_ONE = "33333333-3333-4333-8333-333333333333";
+const PERSISTENT_REQUEST_TWO = "44444444-4444-4444-8444-444444444444";
 
 function config(overrides: Partial<RuntimeConfig["limits"]> = {}): RuntimeConfig {
   return {
@@ -36,6 +42,8 @@ function config(overrides: Partial<RuntimeConfig["limits"]> = {}): RuntimeConfig
       maxConcurrentRequests: 1,
       maxQueuedRequests: 1,
       maxToolRounds: 4,
+      maxContextMessages: 30,
+      maxContextCharacters: 32_768,
       perPlayerCooldownSeconds: 0,
       dailyRequestsPerPlayer: 100,
       monthlyBudgetUsd: 10,
@@ -98,7 +106,9 @@ describe("Agent request service", () => {
     const first = deferred<ModelGenerationResult>();
     const second = deferred<ModelGenerationResult>();
     const adapter = provider((providerRequest) =>
-      providerRequest.input.includes("request-1") ? first.promise : second.promise,
+      providerRequest.input.some((message) => message.content.includes("request-1"))
+        ? first.promise
+        : second.promise,
     );
     const service = new AgentRequestService({ provider: adapter, config: config() });
     const responses: AgentTerminalResponse[] = [];
@@ -167,6 +177,28 @@ describe("Agent request service", () => {
     await flush();
     expect(secondResponses).toHaveLength(1);
     expect(service.activeCount).toBe(0);
+  });
+
+  it("does not commit a late provider result after service close", async () => {
+    const database = new DatabaseSync(":memory:");
+    migrateRuntimeStorage(database, "2026-07-13T00:00:00.000Z");
+    const pending = deferred<ModelGenerationResult>();
+    const service = new AgentRequestService({
+      provider: provider(() => pending.promise),
+      config: config(),
+      conversations: new SqliteConversationRepository(database),
+      randomUuid: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+
+    service.submit(request(PERSISTENT_REQUEST_ONE), () => undefined);
+    await flush();
+    service.close();
+    pending.resolve({ fallbackText: "late answer" });
+    await flush();
+
+    expect(database.prepare("SELECT COUNT(*) AS count FROM sessions").get()?.["count"]).toBe(0);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM messages").get()?.["count"]).toBe(0);
+    database.close();
   });
 
   it("times out without retaining a slot and ignores a late provider result", async () => {
@@ -272,6 +304,109 @@ describe("Agent request service", () => {
     await flush();
     expect(responses).toMatchObject([
       { type: "agent.complete", payload: { fallbackText: "answer" } },
+    ]);
+  });
+
+  it("persists and resumes owned history while keeping explicit modules one-shot", async () => {
+    const database = new DatabaseSync(":memory:");
+    migrateRuntimeStorage(database, "2026-07-13T00:00:00.000Z");
+    const conversations = new SqliteConversationRepository(database);
+    const generated: ModelGenerationRequest[] = [];
+    const adapter = provider(async (generation) => {
+      generated.push(generation);
+      return { fallbackText: `answer-${String(generated.length)}` };
+    });
+    const service = new AgentRequestService({
+      provider: adapter,
+      config: config(),
+      conversations,
+      randomUuid: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      now: () => Date.parse("2026-07-13T00:00:00.000Z"),
+    });
+    const firstResponses: AgentTerminalResponse[] = [];
+    service.submit({ ...request(PERSISTENT_REQUEST_ONE), module: "recipe" }, (response) =>
+      firstResponses.push(response),
+    );
+    await vi.waitFor(() => expect(service.activeCount).toBe(0));
+    const first = firstResponses[0];
+    expect(first?.type).toBe("agent.complete");
+    const sessionId = first?.type === "agent.complete" ? first.payload.sessionId : null;
+    expect(sessionId).toBe("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+
+    const secondResponses: AgentTerminalResponse[] = [];
+    service.submit(
+      { ...request(PERSISTENT_REQUEST_TWO), sessionId, module: "general" },
+      (response) => secondResponses.push(response),
+    );
+    await vi.waitFor(() => expect(service.activeCount).toBe(0));
+
+    expect(generated[0]?.instructions).toContain("recipe");
+    expect(generated[1]?.instructions).not.toContain("recipe");
+    expect(generated[1]?.input).toEqual([
+      { role: "user", content: `private prompt ${PERSISTENT_REQUEST_ONE}` },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: `private prompt ${PERSISTENT_REQUEST_TWO}` },
+    ]);
+    expect(
+      conversations
+        .loadRecentOwned(
+          sessionId ?? "",
+          {
+            serverId: "test-server",
+            playerUuid: PLAYER_ONE,
+          },
+          10,
+        )
+        .map((messageValue) => messageValue.module),
+    ).toEqual(["recipe", "recipe", "general", "general"]);
+
+    service.close();
+    const restarted = new AgentRequestService({
+      provider: adapter,
+      config: config(),
+      conversations: new SqliteConversationRepository(database),
+    });
+    const resumed: unknown[] = [];
+    restarted.resume(
+      { requestId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", playerUuid: PLAYER_ONE, sessionId },
+      (response) => resumed.push(response),
+    );
+    restarted.resume(
+      { requestId: "ffffffff-ffff-4fff-8fff-ffffffffffff", playerUuid: PLAYER_TWO, sessionId },
+      (response) => resumed.push(response),
+    );
+    restarted.resume(
+      {
+        requestId: "12121212-1212-4212-8212-121212121212",
+        playerUuid: PLAYER_ONE,
+        sessionId: "00000000-0000-0000-0000-000000000000",
+      },
+      (response) => resumed.push(response),
+    );
+    expect(resumed).toMatchObject([
+      { type: "session.resumed", payload: { sessionId, playerUuid: PLAYER_ONE } },
+      { type: "agent.error", payload: { code: "SESSION_NOT_FOUND" } },
+      { type: "agent.error", payload: { code: "SESSION_NOT_FOUND" } },
+    ]);
+    restarted.close();
+    database.close();
+  });
+
+  it("keeps disabled conversation mode stateless and rejects resume", async () => {
+    const adapter = provider(async () => ({ fallbackText: "stateless answer" }));
+    const service = new AgentRequestService({ provider: adapter, config: config() });
+    const completions: AgentTerminalResponse[] = [];
+    service.submit(request(PERSISTENT_REQUEST_ONE), (response) => completions.push(response));
+    await vi.waitFor(() => expect(service.activeCount).toBe(0));
+    expect(completions).toMatchObject([{ type: "agent.complete", payload: { sessionId: null } }]);
+
+    const resumes: unknown[] = [];
+    service.resume(
+      { requestId: PERSISTENT_REQUEST_TWO, playerUuid: PLAYER_ONE, sessionId: null },
+      (response) => resumes.push(response),
+    );
+    expect(resumes).toMatchObject([
+      { type: "agent.error", payload: { code: "CONVERSATION_STORAGE_DISABLED" } },
     ]);
   });
 });

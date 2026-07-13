@@ -131,6 +131,8 @@ Phase 1 includes or targets these closed contracts:
 | `agent-complete`   | Correlated private fallback text and bounded structured views        |
 | `agent-error`      | Correlated stable error code, safe fallback text, and retry hint      |
 | `agent-cancel`     | Correlated Paper-originated cancellation reason                       |
+| `session-resume`   | Player-owned exact or latest session selection request                |
+| `session-resumed`  | Correlated selected non-null session identifier                       |
 | `tool-call`        | Typed tool identity, closed arguments, and bounded loop sequence      |
 | `tool-result`      | Status, source, trust label, result, or stable error                  |
 | `proposal`         | Frozen write intent and integrity hashes                              |
@@ -140,11 +142,14 @@ Phase 1 includes or targets these closed contracts:
 | `build-preview`    | Bounded target projection and transform metadata                      |
 | `capability`       | Declarative Capability Pack manifest                                  |
 
-Schemas can exist before their behavior. Phase 5 enables only the three agent
-terminal/request payloads and cancellation after hello. A request has
-`sessionId: null`, module `general`, and no connected-client features. A
-completion always contains non-empty `fallbackText`; Phase 5 emits an empty
-`structuredViews` array. The implementation does not publish a view, call a
+Schemas can exist before their behavior. Phase 6 enables agent request,
+completion, error, cancellation, and dedicated session resume exchanges after
+hello. A request has a nullable owned session, one of six explicit modules, and
+no connected-client features. A completion always contains non-empty
+`fallbackText`; conversation storage can leave its session null, and Phase 6
+emits an empty `structuredViews` array. Resume uses the authenticated server ID
+and player UUID for both exact and latest lookup, and all unavailable exact IDs
+share `SESSION_NOT_FOUND`. The implementation does not publish a view, call a
 tool, create a proposal, or load a capability.
 
 ## Client views
