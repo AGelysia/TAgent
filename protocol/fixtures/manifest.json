@@ -666,6 +666,116 @@
       ]
     },
     {
+      "id": "client-payload.messages-valid",
+      "category": "valid",
+      "file": "valid/client-payload-messages.json",
+      "validations": [
+        {
+          "schema": "client-payload.schema.json",
+          "documentPointer": "/hello",
+          "expectedValid": true
+        },
+        {
+          "schema": "client-payload.schema.json",
+          "documentPointer": "/serverHello",
+          "expectedValid": true
+        },
+        {
+          "schema": "client-payload.schema.json",
+          "documentPointer": "/begin",
+          "expectedValid": true
+        },
+        {
+          "schema": "client-payload.schema.json",
+          "documentPointer": "/chunk",
+          "expectedValid": true
+        },
+        {
+          "schema": "client-payload.schema.json",
+          "documentPointer": "/ack",
+          "expectedValid": true
+        },
+        {
+          "schema": "client-payload.schema.json",
+          "documentPointer": "/control",
+          "expectedValid": true
+        },
+        {
+          "schema": "client-payload.schema.json",
+          "documentPointer": "/clear",
+          "expectedValid": true
+        },
+        {
+          "schema": "client-payload.schema.json",
+          "documentPointer": "/error",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "client-payload.ack-authority-field",
+      "category": "policy_override",
+      "file": "invalid/client-payload-ack-authority.json",
+      "validations": [
+        {
+          "schema": "client-payload.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "client-payload.server-hello-state",
+      "category": "invalid_state",
+      "file": "invalid/client-payload-server-hello-state.json",
+      "validations": [
+        {
+          "schema": "client-payload.schema.json",
+          "documentPointer": "/acceptedWithoutVersion",
+          "expectedValid": false
+        },
+        {
+          "schema": "client-payload.schema.json",
+          "documentPointer": "/rejectedWithVersion",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "client-payload.uuid-noncanonical",
+      "category": "invalid_identifier",
+      "file": "invalid/client-payload-uuid-noncanonical.json",
+      "validations": [
+        {
+          "schema": "client-payload.schema.json",
+          "documentPointer": "/abbreviated",
+          "expectedValid": false
+        },
+        {
+          "schema": "client-payload.schema.json",
+          "documentPointer": "/uppercase",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "client-handshake.dependency-version-invalid",
+      "category": "invalid_dependency",
+      "file": "invalid/client-handshake-dependency-version-invalid.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "/control",
+          "expectedValid": false
+        },
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "/nonAscii",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
       "id": "view-negotiation.supported-text",
       "category": "valid",
       "file": "valid/view-negotiation-supported-text.json",

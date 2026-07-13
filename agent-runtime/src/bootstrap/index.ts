@@ -63,6 +63,7 @@ async function checkProtocolSchema(protocolRoot?: string): Promise<SchemaRegistr
       "agent-error.schema.json",
       "agent-request.schema.json",
       "capability.schema.json",
+      "client-payload.schema.json",
       "envelope.schema.json",
       "session-resume.schema.json",
       "session-resumed.schema.json",

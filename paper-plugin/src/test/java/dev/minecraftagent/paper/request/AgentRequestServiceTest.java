@@ -7,6 +7,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import dev.minecraftagent.paper.client.ClientCapabilities;
+import dev.minecraftagent.paper.client.ClientCapabilitySnapshot;
+import dev.minecraftagent.paper.client.ClientFeature;
 import dev.minecraftagent.paper.lifecycle.AgentState;
 import dev.minecraftagent.paper.lifecycle.OfflineReason;
 import dev.minecraftagent.paper.lifecycle.OperationalGate;
@@ -19,11 +22,13 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 
@@ -71,6 +76,191 @@ class AgentRequestServiceTest {
     fixture.connection.deliver(completion(request, playerId, "Late duplicate", sessionId));
     fixture.main.drain();
     assertEquals(List.of(playerId + ":Private answer"), fixture.replies);
+  }
+
+  @Test
+  void negotiatedCapabilitiesReachRuntimeAndAValidatedViewReplacesChatFallback() {
+    var richReplies = new ArrayList<String>();
+    var capabilities = new EnumMap<ClientFeature, Integer>(ClientFeature.class);
+    for (var feature : ClientFeature.values()) {
+      capabilities.put(feature, feature == ClientFeature.OVERLAY ? 1 : 0);
+    }
+    var snapshot =
+        new ClientCapabilitySnapshot(true, "1.0", new ClientCapabilities(capabilities), 7L);
+    var fixture =
+        new Fixture(
+            unavailableTools(),
+            ignored -> snapshot,
+            (playerId, fallbackText, views) -> {
+              return () -> {
+                richReplies.add(playerId + ":" + views.getFirst().viewType().wireName());
+                return true;
+              };
+            });
+    var playerId = UUID.randomUUID();
+
+    fixture.service.submit(playerId, "Show this in the overlay");
+    var request = object(fixture.connection.sent.getFirst());
+    var advertised = request.getAsJsonObject("payload").getAsJsonObject("clientCapabilities");
+    assertTrue(advertised.get("connected").getAsBoolean());
+    assertEquals("1.0", advertised.get("clientProtocolVersion").getAsString());
+    assertEquals(1, advertised.getAsJsonObject("features").get("overlay").getAsInt());
+    fixture.connection.deliver(
+        completionWithTextView(
+            fixture.connection.sent.getFirst(),
+            playerId,
+            "Private rich answer",
+            UUID.randomUUID()));
+
+    assertTrue(richReplies.isEmpty());
+    fixture.main.drain();
+    assertEquals(List.of(playerId + ":text"), richReplies);
+    assertTrue(fixture.replies.isEmpty());
+  }
+
+  @Test
+  void aFailedClientPublicationFallsBackToTheSamePrivateText() {
+    var fixture =
+        new Fixture(
+            unavailableTools(),
+            ignored -> ClientCapabilitySnapshot.disconnected(),
+            (playerId, fallbackText, views) -> () -> false);
+    var playerId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Fallback please");
+    fixture.connection.deliver(
+        completionWithTextView(
+            fixture.connection.sent.getFirst(), playerId, "Safe fallback", UUID.randomUUID()));
+
+    fixture.main.drain();
+    assertEquals(List.of(playerId + ":Safe fallback"), fixture.replies);
+  }
+
+  @Test
+  void structuredPreparationUsesCallbacksAndFinalSendUsesMainThread() {
+    var callbacks = new QueuedExecutor();
+    var phases = new ArrayList<String>();
+    var fixture =
+        new Fixture(
+            unavailableTools(),
+            ignored -> ClientCapabilitySnapshot.disconnected(),
+            (playerId, fallbackText, views) -> {
+              phases.add("prepare");
+              return () -> {
+                phases.add("send");
+                return true;
+              };
+            },
+            callbacks);
+    var playerId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Thread boundaries");
+
+    fixture.connection.deliver(
+        completionWithTextView(
+            fixture.connection.sent.getFirst(), playerId, "Bound reply", UUID.randomUUID()));
+
+    assertTrue(phases.isEmpty());
+    assertTrue(fixture.replies.isEmpty());
+    callbacks.drain();
+    assertEquals(List.of("prepare"), phases);
+    assertTrue(fixture.replies.isEmpty());
+    fixture.main.drain();
+    assertEquals(List.of("prepare", "send"), phases);
+    assertTrue(fixture.replies.isEmpty());
+  }
+
+  @Test
+  void structuredPreparationFailureFallsBackOnMainThread() {
+    var fixture =
+        new Fixture(
+            unavailableTools(),
+            ignored -> ClientCapabilitySnapshot.disconnected(),
+            (playerId, fallbackText, views) -> {
+              throw new IllegalStateException("prepare failed");
+            });
+    var playerId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Prepare failure");
+
+    fixture.connection.deliver(
+        completionWithTextView(
+            fixture.connection.sent.getFirst(), playerId, "Safe fallback", UUID.randomUUID()));
+
+    assertTrue(fixture.replies.isEmpty());
+    fixture.main.drain();
+    assertEquals(List.of(playerId + ":Safe fallback"), fixture.replies);
+    assertEquals(List.of("CLIENT_STRUCTURED_REPLY_FAILED"), fixture.events);
+  }
+
+  @Test
+  void structuredSendFailureFallsBackOnMainThread() {
+    var fixture =
+        new Fixture(
+            unavailableTools(),
+            ignored -> ClientCapabilitySnapshot.disconnected(),
+            (playerId, fallbackText, views) ->
+                () -> {
+                  throw new IllegalStateException("send failed");
+                });
+    var playerId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Send failure");
+
+    fixture.connection.deliver(
+        completionWithTextView(
+            fixture.connection.sent.getFirst(), playerId, "Safe fallback", UUID.randomUUID()));
+
+    assertTrue(fixture.replies.isEmpty());
+    fixture.main.drain();
+    assertEquals(List.of(playerId + ":Safe fallback"), fixture.replies);
+    assertEquals(List.of("CLIENT_STRUCTURED_REPLY_FAILED"), fixture.events);
+  }
+
+  @Test
+  void preparedStructuredReplyIsDiscardedWhenOfflineWinsBeforeMainThreadDelivery() {
+    var callbacks = new QueuedExecutor();
+    var prepared = new TrackingPreparedReply(true);
+    var fixture =
+        new Fixture(
+            unavailableTools(),
+            ignored -> ClientCapabilitySnapshot.disconnected(),
+            (playerId, fallbackText, views) -> prepared,
+            callbacks);
+    var playerId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Prepare before Offline");
+
+    fixture.connection.deliver(
+        completionWithTextView(
+            fixture.connection.sent.getFirst(), playerId, "Stale rich reply", UUID.randomUUID()));
+    callbacks.drain();
+    fixture.gate.transitionTo(AgentState.STOPPING);
+    fixture.main.drain();
+
+    assertEquals(0, prepared.sendCount);
+    assertEquals(1, prepared.discardCount);
+    assertTrue(fixture.replies.isEmpty());
+  }
+
+  @Test
+  void preparedStructuredReplyIsDiscardedWhenMainThreadSchedulingFails() {
+    var prepared = new TrackingPreparedReply(true);
+    var fixture =
+        new Fixture(
+            unavailableTools(),
+            ignored -> ClientCapabilitySnapshot.disconnected(),
+            (playerId, fallbackText, views) -> prepared);
+    var playerId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Reject main scheduling");
+    fixture.main.rejectTasks();
+
+    fixture.connection.deliver(
+        completionWithTextView(
+            fixture.connection.sent.getFirst(),
+            playerId,
+            "Unscheduled rich reply",
+            UUID.randomUUID()));
+
+    assertEquals(0, prepared.sendCount);
+    assertEquals(1, prepared.discardCount);
+    assertEquals(List.of("PLAYER_REPLY_SCHEDULE_FAILED"), fixture.events);
+    assertTrue(fixture.replies.isEmpty());
   }
 
   @Test
@@ -457,6 +647,26 @@ class AgentRequestServiceTest {
     return response;
   }
 
+  private static JsonObject completionWithTextView(
+      String requestEnvelope, UUID playerId, String fallbackText, UUID sessionId) {
+    var completion = completion(requestEnvelope, playerId, fallbackText, sessionId);
+    var requestId = object(requestEnvelope).get("requestId").getAsString();
+    var view = new JsonObject();
+    view.addProperty("viewSchemaVersion", "1.0");
+    view.addProperty("viewId", UUID.randomUUID().toString());
+    view.addProperty("requestId", requestId);
+    view.addProperty("viewType", "text");
+    view.addProperty("revision", 1);
+    view.addProperty("title", "Agent response");
+    view.addProperty("fallbackText", fallbackText);
+    view.addProperty("pinnable", true);
+    var content = new JsonObject();
+    content.addProperty("text", fallbackText);
+    view.add("content", content);
+    completion.getAsJsonObject("payload").getAsJsonArray("structuredViews").add(view);
+    return completion;
+  }
+
   private static JsonObject toolCall(
       String requestEnvelope,
       UUID playerId,
@@ -526,17 +736,28 @@ class AgentRequestServiceTest {
     private final AgentRequestService service;
 
     private Fixture() {
-      this(
-          call ->
-              CompletableFuture.completedFuture(
-                  ReadToolResult.failed(
-                      ReadToolResult.Source.PAPER_POLICY,
-                      "TOOL_EXECUTION_UNAVAILABLE",
-                      "Unavailable.",
-                      true)));
+      this(unavailableTools());
     }
 
     private Fixture(ReadToolExecutor tools) {
+      this(
+          tools,
+          ignored -> ClientCapabilitySnapshot.disconnected(),
+          (playerId, fallbackText, views) -> () -> false);
+    }
+
+    private Fixture(
+        ReadToolExecutor tools,
+        AgentRequestService.ClientCapabilitySource capabilities,
+        AgentRequestService.StructuredReplySink structuredReplies) {
+      this(tools, capabilities, structuredReplies, Runnable::run);
+    }
+
+    private Fixture(
+        ReadToolExecutor tools,
+        AgentRequestService.ClientCapabilitySource capabilities,
+        AgentRequestService.StructuredReplySink structuredReplies,
+        Executor callbacks) {
       service =
           new AgentRequestService(
               gate,
@@ -547,9 +768,21 @@ class AgentRequestServiceTest {
               events::add,
               new ReadToolRegistry(),
               tools,
-              Runnable::run);
+              callbacks,
+              capabilities,
+              structuredReplies);
       service.attach(connection, SERVER_ID);
     }
+  }
+
+  private static ReadToolExecutor unavailableTools() {
+    return call ->
+        CompletableFuture.completedFuture(
+            ReadToolResult.failed(
+                ReadToolResult.Source.PAPER_POLICY,
+                "TOOL_EXECUTION_UNAVAILABLE",
+                "Unavailable.",
+                true));
   }
 
   private static final class ManualTools implements ReadToolExecutor {
@@ -606,8 +839,53 @@ class AgentRequestServiceTest {
 
   private static final class QueuedMain {
     private final Queue<Runnable> tasks = new java.util.ArrayDeque<>();
+    private boolean reject;
 
     private void execute(Runnable task) {
+      if (reject) {
+        throw new IllegalStateException("main thread rejected task");
+      }
+      tasks.add(task);
+    }
+
+    private void rejectTasks() {
+      reject = true;
+    }
+
+    private void drain() {
+      while (!tasks.isEmpty()) {
+        tasks.remove().run();
+      }
+    }
+  }
+
+  private static final class TrackingPreparedReply
+      implements AgentRequestService.PreparedStructuredReply {
+    private final boolean sendResult;
+    private int sendCount;
+    private int discardCount;
+
+    private TrackingPreparedReply(boolean sendResult) {
+      this.sendResult = sendResult;
+    }
+
+    @Override
+    public boolean send() {
+      sendCount++;
+      return sendResult;
+    }
+
+    @Override
+    public void discard() {
+      discardCount++;
+    }
+  }
+
+  private static final class QueuedExecutor implements Executor {
+    private final Queue<Runnable> tasks = new java.util.ArrayDeque<>();
+
+    @Override
+    public void execute(Runnable task) {
       tasks.add(task);
     }
 

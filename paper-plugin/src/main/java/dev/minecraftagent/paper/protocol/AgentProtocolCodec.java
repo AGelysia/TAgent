@@ -4,6 +4,9 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import dev.minecraftagent.paper.client.ClientCapabilitySnapshot;
+import dev.minecraftagent.paper.client.ClientProtocolException;
+import dev.minecraftagent.paper.client.ClientStructuredView;
 import dev.minecraftagent.paper.request.AgentModule;
 import dev.minecraftagent.paper.tool.ReadToolCall;
 import dev.minecraftagent.paper.tool.ReadToolResult;
@@ -17,9 +20,12 @@ import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -79,22 +85,22 @@ public final class AgentProtocolCodec {
 
   public String encodeRequest(
       UUID requestId, UUID playerUuid, UUID sessionId, AgentModule module, String message) {
+    return encodeRequest(
+        requestId, playerUuid, sessionId, module, message, ClientCapabilitySnapshot.disconnected());
+  }
+
+  public String encodeRequest(
+      UUID requestId,
+      UUID playerUuid,
+      UUID sessionId,
+      AgentModule module,
+      String message,
+      ClientCapabilitySnapshot clientCapabilities) {
     Objects.requireNonNull(requestId);
     Objects.requireNonNull(playerUuid);
     Objects.requireNonNull(module);
+    Objects.requireNonNull(clientCapabilities);
     requireText(message, 4096);
-
-    var features = new JsonObject();
-    features.addProperty("overlay", 0);
-    features.addProperty("itemIcons", 0);
-    features.addProperty("recipeView", 0);
-    features.addProperty("litematicaPreview", 0);
-    features.addProperty("litematicaMaterialList", 0);
-
-    var clientCapabilities = new JsonObject();
-    clientCapabilities.addProperty("connected", false);
-    clientCapabilities.add("clientProtocolVersion", JsonNull.INSTANCE);
-    clientCapabilities.add("features", features);
 
     var payload = new JsonObject();
     if (sessionId == null) {
@@ -105,7 +111,7 @@ public final class AgentProtocolCodec {
     payload.addProperty("playerUuid", playerUuid.toString());
     payload.addProperty("module", module.protocolName());
     payload.addProperty("message", message);
-    payload.add("clientCapabilities", clientCapabilities);
+    payload.add("clientCapabilities", clientCapabilities.toAgentRequestJson());
 
     return encodeEnvelope(requestId, requestId, "agent.request", payload);
   }
@@ -252,10 +258,29 @@ public final class AgentProtocolCodec {
     var playerUuid = uuid(payload, "playerUuid");
     var fallbackText = boundedText(payload, "fallbackText", 8192);
     var views = array(payload, "structuredViews");
-    if (!views.isEmpty()) {
-      throw failure("STRUCTURED_VIEWS_UNSUPPORTED");
+    if (views.size() > 8) {
+      throw invalid();
     }
-    return new Completion(messageId, requestId, sessionId, playerUuid, fallbackText);
+    var structuredViews = new ArrayList<ClientStructuredView>(views.size());
+    var viewIds = new HashSet<UUID>();
+    try {
+      for (var value : views) {
+        if (!value.isJsonObject()) {
+          throw invalid();
+        }
+        var view = ClientStructuredView.fromJson(value.getAsJsonObject());
+        if (!view.requestId().equals(requestId)
+            || !view.fallbackText().equals(fallbackText)
+            || !viewIds.add(view.viewId())) {
+          throw invalid();
+        }
+        structuredViews.add(view);
+      }
+    } catch (ClientProtocolException error) {
+      throw invalid();
+    }
+    return new Completion(
+        messageId, requestId, sessionId, playerUuid, fallbackText, List.copyOf(structuredViews));
   }
 
   private AgentError decodeError(UUID messageId, UUID requestId, JsonObject payload) {
@@ -369,10 +394,24 @@ public final class AgentProtocolCodec {
     var value = string(object, name);
     if (value.isBlank()
         || value.codePointCount(0, value.length()) > maximumCodePoints
-        || value.codePoints().anyMatch(codePoint -> codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+        || value.codePoints().anyMatch(AgentProtocolCodec::unsafeFallbackCodePoint)) {
       throw invalid();
     }
     return value;
+  }
+
+  private static boolean unsafeFallbackCodePoint(int value) {
+    if (value == '\n' || value == '\t') {
+      return false;
+    }
+    return value <= 0x1f
+        || value >= 0x7f && value <= 0x9f
+        || value >= 0xd800 && value <= 0xdfff
+        || value == 0x061c
+        || value == 0x200e
+        || value == 0x200f
+        || value >= 0x202a && value <= 0x202e
+        || value >= 0x2066 && value <= 0x2069;
   }
 
   private static void requireFields(JsonObject object, Set<String> expected) {
@@ -523,8 +562,17 @@ public final class AgentProtocolCodec {
   }
 
   public record Completion(
-      UUID messageId, UUID requestId, UUID sessionId, UUID playerUuid, String fallbackText)
-      implements InboundMessage {}
+      UUID messageId,
+      UUID requestId,
+      UUID sessionId,
+      UUID playerUuid,
+      String fallbackText,
+      List<ClientStructuredView> structuredViews)
+      implements InboundMessage {
+    public Completion {
+      structuredViews = List.copyOf(structuredViews);
+    }
+  }
 
   public record AgentError(
       UUID messageId,

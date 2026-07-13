@@ -40,16 +40,38 @@ The protocol 1.0 payload registry is:
 | `proposal.cancelled`           | `proposal-cancelled.schema.json` |
 | `view.publish`                 | `structured-view.schema.json`    |
 
+The authenticated application encoder enforces the 64 KiB envelope limit after
+payload validation. If an `agent.complete` with `structuredViews` exceeds that
+limit, Runtime retries encoding the same completion with an empty view list.
+The fallback-only envelope must still fit the limit; Runtime never removes the
+fallback.
+
 The envelope reserves the other protocol message types listed in its enum. A
 consumer must reject one with `UNSUPPORTED_MESSAGE_TYPE` until a concrete
 payload schema is added to its local registry. A generic object payload is not
 permission to accept an unimplemented message.
 
 Paper-client Custom Payload messages do not use the authenticated WebSocket
-envelope. `client.hello` uses `client-handshake.schema.json`; `view.show` and
-`view.update` use `structured-view.schema.json`; and a Litematica preview uses
-`build-preview.schema.json`. The network connection, rather than a payload
-field, supplies the player UUID.
+envelope. They use the single `minecraftagent:client` channel and one raw UTF-8
+JSON document validated by `client-payload.schema.json`. The closed document has
+`clientPayloadVersion`, `messageId`, `type`, and `payload`; the network
+connection, rather than a payload field, supplies the player UUID. Receivers
+reject client-to-Paper frames above 16 KiB and Paper-to-client frames above
+40 KiB before parsing.
+
+The Phase 10 direction registry is:
+
+| Direction       | Client payload `type`                                                     |
+| --------------- | ------------------------------------------------------------------------- |
+| Client to Paper | `client.hello`, `client.ack`, `client.error`                              |
+| Paper to client | `server.hello`, `view.begin`, `view.chunk`, `view.clear`, `ui.control` |
+
+`client.hello` selects `client-handshake.schema.json`. The other payload shapes
+are closed definitions in `client-payload.schema.json`. A structured view is the
+verified, reassembled content described by a `view.begin` and its
+`view.chunk` messages; the view body then validates against
+`structured-view.schema.json`. A Litematica build preview additionally uses
+`build-preview.schema.json`, but Phase 10 does not yet publish that view type.
 
 `structured-view.schema.json` has its own type-discriminated content. Recipe,
 build preview, proposal, and ItemStack references resolve to the corresponding
@@ -59,9 +81,68 @@ Phase 1 makes that last rule executable as `view-negotiation-v1`. Text,
 selection, and proposal views require `overlay: 1`; item views also require
 `itemIcons: 1`; recipe views additionally require `recipeView: 1`; and build
 previews require `litematicaPreview: 1`. The shared fixtures prove that a view
-is rejected when one required version was not declared. Phase 10 must call this
-rule before actual Custom Payload publication; Phase 1 does not install a
-network handler.
+is rejected when one required version was not declared. Phase 10 calls this
+rule before actual Custom Payload publication. Its client renderer accepts only
+version `1.0` Text, ItemStack, ItemList, and RecipeGrid views; other shared view
+variants remain contracts for later business phases.
+
+### Client transfer semantics
+
+Paper assigns a positive generation to the actual player connection. Every
+message after `client.hello` is generation-bound. Reconnect, disconnect, world
+change, Offline cleanup, and plugin disable discard pending state, so an ACK or
+chunk from an older generation cannot target a later session.
+
+`view.begin` binds `transferId`, `viewId`, `requestId`, `revision`, show/update
+mode, identity/gzip encoding, compressed/uncompressed byte counts, chunk count,
+and the lowercase SHA-256 of the complete uncompressed view JSON. Each
+`view.chunk` repeats the generation and transfer, with one index, decoded byte
+length, chunk SHA-256, and canonical standard-base64 data.
+
+The common production view limits are:
+
+| Limit                              | Value      |
+| ---------------------------------- | ---------- |
+| Decoded chunk                      | 24 KiB     |
+| Compressed view                    | 1 MiB      |
+| Uncompressed view                  | 1 MiB      |
+| Chunks per view                    | 64         |
+| Incomplete transfer lifetime       | 15 seconds |
+
+Paper admits at most eight pending transfers and charges their uncompressed view
+bytes against a 2 MiB per-connection budget. It serializes, optionally
+compresses, hashes, and reserves each selected view on its worker. The transfer
+deadline starts at reservation; the primary thread rechecks the player,
+generation, and pending state before sending bounded plugin frames.
+
+The client admits at most two active reassemblies and reserves declared
+compressed bytes against its own 2 MiB budget. One 256-entry worker queue
+serializes inbound protocol tasks. The client performs reassembly, single-member
+gzip validation, expansion limiting, exact length checks, per-chunk and
+complete-content hashes, and strict UTF-8 decoding away from the render thread.
+Duplicate, out-of-range, stale, timed-out, oversized, incomplete, or conflicting
+transfers are discarded and release their budget. Only then may the closed
+structured-view decoder use one of at most 128 pending client-thread action
+reservations.
+
+`client.ack` has only current generation, transfer ID, `DISPLAYED`/`REJECTED`,
+and a stable code. `client.error` has the same transport correlation and no
+authority fields. The invalid ACK fixture proves that a permission field is
+rejected. `DISPLAYED` retires the correlated fallback record; `REJECTED`, a
+transfer-scoped error, Paper-side timeout, or generation replacement sends the
+private fallback once and cancels remaining correlated transfers. ACK, UI
+selection, Litematica, and material-list results never grant permission, satisfy
+a proposal, or authorize a world change.
+
+`litematicaPreview: 1` and `litematicaMaterialList: 1` are advertised only by
+the exact Minecraft 1.21.11 / Fabric Loader 0.19.3 / Litematica 0.26.12 /
+MaLiLib 0.27.16 adapter. The closed controls carry only a local operation name
+and nullable view UUID. The client derives a managed `<view-uuid>.litematica`;
+no server-provided path, file content, permission, or execution result is part
+of `ui.control`. Load preparation reads and hashes at most 16 MiB on the
+protocol worker. The final metadata recheck and every reflected load, remove,
+and Material List call run on the Minecraft client thread. A runtime operation
+failure does not dynamically withdraw the feature version advertised at hello.
 
 ## Envelope and authentication semantics
 
@@ -231,15 +312,18 @@ single-member/trailing-byte gzip framing, strict duplicate-key JSON parsing,
 RFC 8785 canonicalization, Palette hash and continuity, content shape, geometry,
 block count, base-region hash, or change-policy validation.
 
-Those remaining rules and their reserved error codes are mandatory Phase 10
-gates before any untrusted client payload handler or build preview publisher is
-enabled. A Phase 1 helper returning success is evidence only that framing and
-hashing passed; it is not permission to render a preview or modify a world.
+Those remaining rules and their reserved error codes are mandatory Phase 11
+gates before a build-preview publisher is enabled. Phase 10's generic client
+payload handler does not accept a `build_preview` body merely because its outer
+framing and hash pass. A Phase 1 helper returning success is evidence only that
+preview framing and hashing passed; it is not permission to render a preview or
+modify a world.
 
-The client additionally checks every `blockId` and property against its local
-Registry before creating a preview. Client ACKs and material counts are display
-signals only; Paper rechecks permissions, region and change-set hashes before a
-world write.
+A Phase 11 client must additionally check every `blockId` and property against
+its local Registry, deterministically convert the accepted Palette to a managed
+native `.litematica`, and bind it to the preview ID and hash before loading it.
+Client ACKs and material counts remain display signals only; Paper rechecks
+permissions, region and change-set hashes before a world write.
 
 ## Recipe semantics
 

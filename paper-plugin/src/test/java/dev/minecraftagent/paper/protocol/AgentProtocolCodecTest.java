@@ -165,12 +165,30 @@ class AgentProtocolCodecTest {
   }
 
   @Test
-  void rejectsNonemptyStructuredViewsUntilTheClientChannelExists() throws Exception {
+  void decodesValidStructuredViewsAndRejectsMismatchedCorrelation() throws Exception {
+    var viewId = UUID.fromString("81818181-8181-4181-8181-818181818181");
+    var view =
+        """
+        {"viewSchemaVersion":"1.0","viewId":"%s","requestId":"%s",\
+        "viewType":"text","revision":1,"title":"Agent response",\
+        "fallbackText":"Place four planks in a 2x2 crafting grid.",\
+        "pinnable":true,"content":{"text":"Place four planks in a 2x2 crafting grid."}}
+        """
+            .formatted(viewId, REQUEST_ID)
+            .replace("\n", "");
     var source =
         fixture("envelope-agent-complete.json")
-            .replace("\"structuredViews\": []", "\"structuredViews\": [{}]");
+            .replace("\"structuredViews\": []", "\"structuredViews\": [" + view + "]");
 
-    assertFailure(codec(), source, "STRUCTURED_VIEWS_UNSUPPORTED");
+    var completion = assertInstanceOf(Completion.class, codec().decode(source));
+    assertEquals(1, completion.structuredViews().size());
+    assertEquals(viewId, completion.structuredViews().getFirst().viewId());
+
+    var mismatched =
+        source.replace(
+            "\"requestId\":\"" + REQUEST_ID + "\",\"viewType\"",
+            "\"requestId\":\"91919191-9191-4191-8191-919191919191\",\"viewType\"");
+    assertFailure(codec(), mismatched, "PROTOCOL_MESSAGE_INVALID");
   }
 
   @Test
@@ -180,6 +198,20 @@ class AgentProtocolCodecTest {
             .replace("Place four planks in a 2x2 crafting grid.", "\\ud800");
 
     assertFailure(codec(), source, "PROTOCOL_MESSAGE_INVALID");
+  }
+
+  @Test
+  void rejectsControlAndBidirectionalFormattingInFallbackWithoutStructuredViews() throws Exception {
+    var source = fixture("envelope-agent-complete.json");
+
+    assertFailure(
+        codec(),
+        source.replace("Place four planks in a 2x2 crafting grid.", "hidden\\u0000text"),
+        "PROTOCOL_MESSAGE_INVALID");
+    assertFailure(
+        codec(),
+        source.replace("Place four planks in a 2x2 crafting grid.", "spoof\\u202etext"),
+        "PROTOCOL_MESSAGE_INVALID");
   }
 
   @Test

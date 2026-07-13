@@ -535,7 +535,19 @@ describe("Paper WebSocket handshake", () => {
       sessionId: expect.any(String),
       playerUuid: "44444444-4444-4444-8444-444444444444",
       fallbackText: "answer:first private prompt",
-      structuredViews: [],
+      structuredViews: [
+        {
+          viewSchemaVersion: "1.0",
+          viewId: expect.any(String),
+          requestId: firstRequest["requestId"],
+          viewType: "text",
+          revision: 1,
+          title: "Agent response",
+          fallbackText: "answer:first private prompt",
+          pinnable: true,
+          content: { text: "answer:first private prompt" },
+        },
+      ],
     });
     expect(second).toMatchObject({
       requestId: secondRequest["requestId"],
@@ -672,7 +684,7 @@ describe("Paper WebSocket handshake", () => {
     expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 
-  it("closes on replayed, binary, and not-yet-supported client capability messages", async () => {
+  it("closes on replayed and binary messages while accepting display-only capabilities", async () => {
     const modelProvider: ModelProvider = {
       check: vi.fn().mockResolvedValue({ ok: true }),
       generate: vi.fn().mockResolvedValue({ type: "final", fallbackText: "answer" }),
@@ -704,11 +716,17 @@ describe("Paper WebSocket handshake", () => {
     );
     capabilities["connected"] = true;
     capabilities["clientProtocolVersion"] = "1.0";
-    expect(await sendAndClose(capabilitySocket, JSON.stringify(unsupportedCapabilities))).toEqual({
-      code: 1008,
-      reason: "APPLICATION_MESSAGE_INVALID",
+    const features = asRecord(capabilities["features"]);
+    features["overlay"] = 1;
+    features["itemIcons"] = 1;
+    features["recipeView"] = 1;
+    const capabilityResponse = asRecord(await exchange(capabilitySocket, unsupportedCapabilities));
+    expect(capabilityResponse).toMatchObject({
+      type: "agent.complete",
+      payload: { fallbackText: "answer" },
     });
-    expect(modelProvider.generate).toHaveBeenCalledTimes(1);
+    expect(capabilitySocket.readyState).toBe(WebSocket.OPEN);
+    expect(modelProvider.generate).toHaveBeenCalledTimes(2);
   });
 
   it("keeps legacy health-only injection fail closed without an implicit provider fetch", async () => {

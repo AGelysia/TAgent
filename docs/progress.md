@@ -4,8 +4,8 @@ Last updated: 2026-07-13
 
 ## Current status
 
-Phase 0 through Phase 9 are complete. Phase 10 optional client Mod and rich
-display is next.
+Phase 0 through Phase 10 are complete. Phase 11 business modules and
+end-to-end recipe/build behavior are next.
 
 ## Locked decisions
 
@@ -88,6 +88,21 @@ display is next.
 - Phase 9 publishes immutable generation snapshots and diffs, but no registry
   entry contains an executor. Catalog membership cannot authorize Bukkit or
   command mutation.
+- Phase 10 uses one raw-JSON `minecraftagent:client` Custom Payload channel.
+  Paper binds it to the actual player and positive connection generation; no
+  client payload carries or establishes player identity.
+- Client features and structured views use exact version intersections. Every
+  completion keeps private `fallbackText`; an absent, vanilla, old, or
+  incompatible client receives only that fallback.
+- Phase 10 transfer limits are 24 KiB decoded per chunk, 1 MiB compressed and
+  uncompressed per view, 64 chunks, 2 MiB pending per client, and 15 seconds.
+  Reassembly, gzip, and hashes run away from the render loop.
+- `client.ack`, UI actions, selections, Litematica state, and material results
+  are presentation facts only and cannot raise server permissions, satisfy a
+  proposal, or authorize execution.
+- The only supported Litematica tuple is Minecraft 1.21.11, Fabric Loader
+  0.19.3, Litematica 0.26.12, and MaLiLib 0.27.16. Missing or different versions
+  disable only the optional adapter; the base overlay still loads.
 
 ## Phase 0: repository scaffold
 
@@ -394,9 +409,63 @@ Completed:
       non-effective when discovered, and the Paper smoke proves their degraded
       diagnostic without enabling command execution.
 
+## Phase 10: optional client Mod and rich presentation
+
+Completed:
+
+- [x] The shared `client-payload` contract closes the raw JSON envelope and
+      direction-specific hello, view begin/chunk/clear, UI control, ACK, and
+      error messages. An invalid fixture proves ACK authority fields are
+      rejected. Client-to-Paper frames stop at 16 KiB and Paper-to-client frames
+      at 40 KiB before parsing.
+- [x] Paper binds the actual player to a positive connection generation,
+      validates the client hello, records independent feature/dependency
+      versions, and selects only exact server-owned view schema intersections.
+      Disconnect, world change, Offline, and disable clear transient state.
+- [x] Runtime accepts validated Paper-derived client presentation metadata and
+      emits unconditional fallback text plus a trusted version `1.0` text view
+      when the final application envelope remains within 64 KiB. Otherwise it
+      drops the view and preserves the fallback. Paper preserves the private
+      fallback whenever no compatible view is selected.
+- [x] Paper frames identity/gzip views with per-chunk and complete SHA-256,
+      generation/request/view/revision binding, 24 KiB chunks, 1 MiB content,
+      64 chunks, eight pending transfers, a 2 MiB uncompressed-byte budget, and
+      a 15-second timeout beginning at worker-side preparation. `DISPLAYED`
+      closes fallback bookkeeping; rejection, scoped error, timeout, or
+      generation replacement sends the private fallback once. None enters
+      authorization.
+- [x] Fabric registers the single Custom Payload type and performs bounded
+      reassembly, strict gzip/UTF-8/hash verification, metadata binding, timeout,
+      and disconnect cleanup away from the render loop before scheduling a
+      verified update on the client thread. Its single protocol worker queue is
+      capped at 256 tasks, client-thread reservations at 128, active
+      reassemblies at two, and compressed-byte reservations at 2 MiB.
+- [x] The closed version `1.0` decoder and overlay render Text, ItemStack,
+      ItemList, and RecipeGrid views. JSON complexity, open-view count, screen
+      bounds, scroll, movement, resize, pin/unpin, close, and clear are bounded.
+- [x] Item models resolve through the real Minecraft registry and render icons,
+      counts, safe components, and vanilla tooltips. Unknown IDs use an explicit
+      missing-item state instead of invented content.
+- [x] `/agent ui pin|unpin|clear`, client input, and the transparent interaction
+      surface reach only presentation state. Position, size, and pin preference
+      persist atomically in bounded client-local
+      `config/minecraftagent/overlay.json`.
+- [x] Litematica remains optional. The resolver enables only Minecraft 1.21.11,
+      Fabric Loader 0.19.3,
+      [Litematica 0.26.12](https://modrinth.com/mod/litematica/version/b3dJnV8d),
+      and [MaLiLib 0.27.16](https://modrinth.com/mod/malilib/version/oaU4Ys3J),
+      then links the reviewed signatures behind an isolated reflection adapter.
+      Missing, mismatched, or broken dependencies leave the base overlay usable.
+- [x] The managed controller bounds and hashes `<view-uuid>.litematica`, tracks
+      adapter-owned preview load/remove, and opens Litematica's native Material
+      List HUD. It reads and hashes at most 16 MiB on the protocol worker, then
+      performs final metadata checks and reflected calls on the client thread.
+      A runtime adapter failure fails only that operation. Palette-to-native file
+      generation and an end-to-end build preview deliberately remain Phase 11.
+
 ## Verification
 
-Phase 9 was verified serially on 2026-07-13 with:
+Phase 10 was verified serially on 2026-07-13 with:
 
 ```bash
 cd agent-runtime
@@ -413,25 +482,24 @@ cd ..
 
 Results:
 
-- Runtime: 13 Vitest files, 102 tests passed; TypeScript build, ESLint, and
+- Runtime: 14 Vitest files, 109 tests passed; TypeScript build, ESLint, and
   Prettier passed; full and production-only npm audits reported 0
-  vulnerabilities.
-- Paper: build and Spotless passed; 305 tests passed, including 85 shared dynamic
-  Schema/HMAC/semantic cases plus strict desired-state parsing/atomic persistence,
-  operational epoch invalidation, Owner/OP/console authorization, cancellable
-  real-WebSocket handshake/application exchange, provider request correlation,
-  cancellation/timeout/late-response races, lifecycle/persistence races,
-  session selection/resume binding, explicit module routing, fixed read-tool
-  policy and correlation, typed Bukkit recipe mapping, proposal hashing,
-  live reauthorization, single-use and `EXECUTING` transitions, audit storage
-  hardening/redaction, fixed Adventure actions, output-budget downgrade,
-  command-map transactions, private reply gating, exact Offline output, doctor
-  output, and descriptor tests. The 41 focused Capability tests cover typed
-  arguments, fixed templates, parse-only Brigadier, JSON/YAML loading, strict
-  filesystems, version matching, exact approvals, JCS number collisions,
-  reversal graphs, immutable diffs, CAS publication, and Proposal Only lookup.
-- Fabric: remapped JAR build and Spotless passed; 86 tests passed, including the
-  same 85 shared protocol cases plus client metadata.
+  vulnerabilities. Tests cover safe Unicode fallback generation, the trusted
+  text-view builder, nonzero display-only capability acceptance, and final
+  UTF-8 64 KiB envelope downgrade to fallback-only output.
+- Paper: build and Spotless passed; 354 tests passed, including 90 shared dynamic
+  Schema/HMAC/semantic cases. Phase 10 coverage includes canonical client
+  payload decoding, actual-player generation binding, exact feature selection,
+  framing/gzip/hash budgets, timeout and scoped-error fallback, re-hello and
+  Offline races, idempotent reservation cleanup, `/agent ui`, and proof that ACK
+  data never enters authority. Existing lifecycle, request/session/tool,
+  proposal/audit, Capability, command-map, and private-reply suites also passed.
+- Fabric: remapped JAR build and Spotless passed; 140 tests passed, including the
+  same 90 shared protocol cases. The remaining tests cover bounded network and
+  client-thread queues, strict reassembly/gzip/view decoding, overlay state and
+  preferences, item/recipe view models, generation-safe presentation dispatch,
+  and exact-version Litematica selection, managed-file preparation, placement,
+  removal, and native Material List HUD bindings.
 - Both JVM reports contain no remote Schema load, `UnknownHostException`,
   invalid-schema error, skipped test, or failed test.
 - Paper `1.21.11-132` JAR SHA-256
@@ -446,22 +514,32 @@ Results:
   after Runtime restart, both command labels, Console `/agent say` isolation
   from the provider, example Capability publication as generation 1, permanent
   `EXAMPLE_ONLY` disablement, degraded doctor output, and exception-free plugin
-  disable. No Paper, Runtime, or Gradle process remained.
+  disable. This smoke used no Fabric client and makes no graphical presentation
+  claim. No Paper, Runtime, or Gradle process remained.
 - Packaged Runtime preserved its compiled authenticated application endpoint,
   OpenAI tool-loop provider, migrations, session/message repository, context
   reducer, Module Manifest, fixed Tool Registry, configuration template, and
-  all shared read-tool/proposal/Capability schemas. The Paper JAR contains the
+  all shared read-tool/proposal/Capability/client-payload schemas. The Paper JAR contains the
   fixed read registry, Bukkit adapters, Paper-owned proposal/audit classes,
   embedded JCS implementation, bounded Capability loader, exact approval and
   immutable registry types, argument/template compiler, parse-only Brigadier
-  preflight, and the same schemas. The package includes only explicitly marked
-  Capability examples and drafts; the production write catalog remains empty.
+  preflight, client channel, bounded transfer/fallback state, and the same
+  schemas. The Fabric JAR contains the closed client codec, bounded task and
+  transfer queues, overlay/view decoders, preferences, and optional Litematica
+  adapter. Artifact SHA-256 values are
+  `736bfdb86aa1a7ce14636db16ba4f646f8e2d473641ddaa54211cc5bd7d8e3ab`
+  for `MinecraftAgent-Paper.jar` and
+  `60281fab8bb725676ff7cb5e246d3c224b5a57ed6a79f608b816a0af84e58c28`
+  for `MinecraftAgent-Client-Fabric.jar`. The package includes only explicitly
+  marked Capability examples and drafts; the production write catalog remains
+  empty.
 - All protocol JSON files parse successfully; Bash scripts pass `bash -n`.
 
 PowerShell scripts were reviewed for native exit-code propagation but were not
 executed because `pwsh` is unavailable on this Linux host. A graphical Fabric
-client, a real online player executing `/agent say`, a live OpenAI tool call,
-and Litematica were not started. Ordinary-player UUID binding, primary-thread
+client, real registry icon/tooltip rendering, a real online player executing
+`/agent say`, a live OpenAI tool call, and Litematica were not started.
+Ordinary-player UUID binding, primary-thread
 private reply, no broadcast, timeout, concurrent-request behavior, provider
 function-call continuation, and typed Paper tool execution are covered by
 JVM/Runtime tests; the pinned smoke only proves that Console cannot enter the
@@ -491,13 +569,21 @@ not suppressed.
 - Online Capability Pack reload or any capability command execution. Phase 9
   loads and atomically publishes startup/recovery metadata only; no executor,
   Bukkit dispatch, proposal-creation route, or Runtime capability handler exists.
-- Client custom payload networking, overlay UI, item rendering, or preferences.
-- Structured recipe client views, locate/project/build behavior, world mutation,
-  or Litematica behavior. The recipe tools expose server data only to the model.
+- Phase 11 business routes for publishing recipe views, locate, guide, project,
+  or build behavior. The Phase 10 RecipeGrid renderer exists, but the current
+  Runtime completion builder only attempts its trusted text view when the final
+  envelope has room; recipe tools still expose server data only to the model.
+- Palette-v1 to native `.litematica` generation, end-to-end build-preview
+  publication, project/revision integration, or any world mutation. Phase 10
+  supplies only the optional managed-file preview lifecycle and native Material
+  List HUD adapter.
 - Full build-preview logical validation: strict single-member gzip framing,
   RFC 8785 content/Palette canonicalization, geometry, block count,
-  base-region hash, and change-policy checks. These remain mandatory Phase 10
-  gates before a preview network handler can be enabled.
+  base-region hash, and change-policy checks. These remain mandatory Phase 11
+  gates before a build-preview publisher can be enabled.
+- A graphical Fabric client, real server/player handshake, or the exact
+  Litematica/MaLiLib tuple has not been launched on this constrained headless
+  host. Phase 10 behavior is covered by focused protocol/domain/client tests.
 
 The presence of a schema or proposal domain object does not mark a write tool
 implemented.
@@ -533,9 +619,14 @@ test gap.
 
 ### Litematica compatibility
 
-Litematica and MaLiLib internals are exact-version sensitive. A future adapter
-must lock both versions and prove optional class loading, preview lifecycle, and
-native Material List HUD integration. No compatibility is assumed now.
+Litematica and MaLiLib internals are exact-version sensitive. Phase 10 locks one
+tuple and isolates reflected calls behind `litematica-reflection-1`; every other
+tuple fails closed while the overlay stays available. Focused tests prove
+optional class loading, signature selection, managed preview lifecycle, and
+native Material List HUD calls through test bindings. A graphical client with
+the released 0.26.12/0.27.16 artifacts has not run on this host, and no
+compatibility is implied for newer releases. Each additional tuple requires a
+new reviewed matrix entry and real-mod integration lane.
 
 ### Large world writes
 
@@ -581,9 +672,10 @@ redaction; a real-player click remains a later integration lane.
 
 ## Next gates
 
-1. Implement Phase 10 optional Fabric networking and rich structured display
-   with vanilla private-text fallback, bounded payload framing, versioned views,
-   and no client-originated authority.
+1. Implement Phase 11 recipe, locate, guide, project, and build routes on top of
+   the exact Phase 10 view contracts. The build route must add deterministic
+   Palette validation, native `.litematica` generation, and end-to-end preview
+   lifecycle without treating client results as authority.
 2. Keep the production write catalog empty until the first fixed typed adapter
    has operation-specific validation, limits, rollback/partial-failure policy,
    and a real-player proposal integration test.

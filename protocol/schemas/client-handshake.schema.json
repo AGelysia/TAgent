@@ -49,13 +49,23 @@
       "properties": {
         "litematica": {
           "oneOf": [
-            { "type": "string", "minLength": 1, "maxLength": 64 },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[ -~]+$"
+            },
             { "type": "null" }
           ]
         },
         "malilib": {
           "oneOf": [
-            { "type": "string", "minLength": 1, "maxLength": 64 },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[ -~]+$"
+            },
             { "type": "null" }
           ]
         }

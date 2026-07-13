@@ -18,6 +18,11 @@ tool or proposal transport handler. Phase 9 adds strict Capability Pack
 discovery, deterministic compatibility checks, exact content approval,
 required-only typed rendering, parse-only command preflight, and atomic
 registry generations while retaining that empty production execution surface.
+Phase 10 adds a separate optional-client channel, per-player capability
+generations, exact structured-view selection, bounded off-render-thread
+reassembly, local overlay and registry item rendering, and a fail-closed
+exact-version Litematica adapter. None of those presentation facts enter Paper
+authorization.
 
 The governing rule is:
 
@@ -93,8 +98,10 @@ relationship, and issuing Offline epoch. Resume lookup uses server ID and player
 UUID in the same repository query; it does not reveal whether a rejected ID
 belongs to another owner. Tool traffic additionally binds the unique call ID,
 module, tool, and zero-based sequence. The proposal payload schemas are shared
-contracts, but every proposal/view transport type remains rejected until a
-direction-specific handler is explicitly wired.
+contracts, but every proposal transport type and standalone Runtime-Paper
+`view.publish` remain rejected. Phase 10 accepts structured views only as a
+closed field of `agent.complete`, then Paper independently validates and selects
+them for the actual client's exact feature versions.
 
 Loopback binding limits remote exposure but does not protect against another
 local process. Token file permissions, log redaction, and host account security
@@ -377,20 +384,59 @@ call on the Paper thread or a simple render-and-dispatch path is prohibited.
 
 ## Client and view safety
 
-Paper binds a client payload to the player represented by the actual network
-connection. It ignores any UUID claimed inside the payload. The client never
-receives the Runtime token or model key.
+Paper and Fabric use one raw-JSON `minecraftagent:client` Custom Payload channel,
+separate from the authenticated Runtime-Paper WebSocket. Paper binds every
+message to the player represented by the actual network connection; the closed
+client payload has no player UUID to trust. The client never receives the
+Runtime token or model key. Frames are rejected before parsing above 16 KiB from
+client to Paper or 40 KiB from Paper to client.
+
+Paper creates a positive generation for each actual client connection and keeps
+the validated protocol, feature versions, and dependency claims in a per-player
+snapshot. Every post-handshake view, control, ACK, and error is generation-bound.
+A reconnect or repeated hello rotates the generation and pending transfers;
+disconnect and plugin disable also discard the capability snapshot. World
+transition and Offline cleanup discard pending presentation transfers while a
+still-connected handshake may remain. A stale generation cannot address a later
+login.
 
 Structured views use fixed view types and schemas. They do not contain model
 supplied click commands, texture paths, arbitrary components, or unrestricted
 NBT. Item data uses a documented component allowlist and byte limits. Unknown
-registry IDs render as explicit missing values.
+registry IDs render as explicit missing values. Runtime always retains non-empty
+fallback text. It removes `structuredViews` if duplicating the answer would make
+the final authenticated envelope exceed 64 KiB. Paper selects a retained
+structured view only when its own version registry and the actual client's
+declared feature versions match exactly. It publishes only the first compatible
+entry from the ordered alternatives list. Vanilla and incompatible clients
+remain on the literal private fallback path.
 
 Chunked payloads enforce chunk count, contiguous indices, encoded size,
-decompressed size, per-chunk hash, whole-content hash, timeout, and one active
-byte budget per connection. Duplicate, conflicting, incomplete, or oversized
-transfers are discarded. A client ACK proves only that a packet path responded;
-it does not prove that a player inspected a preview.
+decompressed size, per-chunk hash, whole-content hash, timeout, and bounded byte
+budgets. Production permits at most 24 KiB decoded per chunk, 1 MiB compressed
+and 1 MiB uncompressed per view, 64 chunks, and 15 seconds. Paper admits at most
+eight pending transfers and accounts uncompressed bytes against 2 MiB; the
+client admits at most two active reassemblies and reserves declared compressed
+bytes against its own 2 MiB.
+
+Paper serializes, compresses, hashes, and reserves a view on its worker, starting
+the timeout there. Its primary thread rechecks player, generation, and pending
+status before sending plugin frames. The client uses a bounded 256-entry
+protocol queue, performs reassembly and bounded gzip/hash work away from the
+render thread, and permits at most 128 pending client-thread actions. Duplicate,
+conflicting, incomplete, stale, gzip-invalid, hash-invalid, or oversized
+transfers are discarded and release their budget.
+
+The client schedules only a fully verified closed view on its render thread. Its
+overlay bounds scroll, movement, resize, pin/unpin, close, clear, view count, and
+local preference size. `/agent ui` and client key actions alter presentation
+only. A client ACK proves only that a packet path reported `DISPLAYED` or
+`REJECTED`; it does not prove that a player inspected a view and cannot grant a
+permission, confirm a proposal, or elevate any server decision. The shared
+schema rejects authority fields in ACKs. `DISPLAYED` retires fallback
+bookkeeping; rejection, a transfer-scoped client error, Paper-side timeout, or
+generation replacement sends the correlated private fallback once. That
+presentation choice adds no authority.
 
 ## Build safety
 
@@ -405,8 +451,23 @@ old state before each change or bounded batch, stop on conflict, and define
 rollback or partial-failure reporting. Block entity NBT remains rejected unless
 a separate allowlisted schema is designed.
 
-Litematica is a preview integration only. Its material list, local world view,
-and success ACK are never used for authorization or server-side size checks.
+Litematica is a preview integration only. The base client has no eager class
+linkage, and the optional reflected adapter is enabled only for the exact
+Minecraft 1.21.11, Fabric Loader 0.19.3, Litematica 0.26.12, and MaLiLib 0.27.16
+tuple whose signatures were reviewed. Missing, different, or broken
+dependencies disable only that adapter. Its controller accepts no server path:
+it derives a managed `<view-uuid>.litematica`, rejects an escape, link,
+non-regular or oversized file, and tracks only its own loaded placement. It
+reads and hashes at most 16 MiB on the protocol worker; the final metadata
+recheck and every reflected Litematica call run on the Minecraft client thread.
+A later operation failure is reported locally and does not dynamically withdraw
+the already advertised feature version.
+
+The native Material List HUD, local world view, preview ACK, and any material
+count are never used for authorization or server-side size checks. Phase 10
+does not generate a native file from Palette v1 or enable an end-to-end build
+preview; those Phase 11 operations still require Paper-owned region, hash,
+change-set, permission, and proposal checks.
 
 ## Data and privacy
 
@@ -463,7 +524,7 @@ Responses request only for admitted player work.
 
 ## Current enforcement gap
 
-At the Phase 9 boundary, Paper-side startup, authenticated application channel,
+At the Phase 10 boundary, Paper-side startup, authenticated application channel,
 conditional registration, persistent Offline state, epoch gate, private
 conversation, request cancellation, Runtime-owned sessions, owner-filtered
 resume, one-shot modules, bounded context, Runtime provider limits, and six
@@ -471,11 +532,18 @@ typed read-only tools exist. Paper also has a proposal repository, response
 command boundary, dynamic authorizer, Offline/quit invalidation, and private
 persistent audit sink. It now also has a bounded Capability Pack loader,
 deterministic version and approval checks, immutable registry generations,
-typed command rendering, and parse-only Brigadier preflight.
+typed command rendering, and parse-only Brigadier preflight. The optional client
+channel now has actual player/generation binding, exact feature selection,
+bounded transfer framing, strict client reassembly/decoding, rich local overlay,
+registry item rendering, local preferences, and an optional exact-version
+Litematica lifecycle adapter.
 
 The production proposal catalog is still empty, the synchronous service has no
 production creation path, and no capability record has an executor. Proposal
-WebSocket handlers, write-operation and client-state producers, durable usage
-accounting, trusted third-party command adapters, client payload handling, and
-world mutation remain absent. Protocol schemas and an effective capability
-record remain necessary contracts, not evidence that execution is reachable.
+WebSocket handlers, write-operation producers, durable usage accounting,
+trusted third-party command adapters, Palette-to-native schematic generation,
+end-to-end build-preview publication, and world mutation remain absent. A
+graphical client with the real supported Litematica/MaLiLib tuple has not been
+run on this host. Protocol schemas, a client ACK, an effective capability record,
+or a locally loaded preview remain presentation/metadata facts, not evidence
+that execution is reachable.

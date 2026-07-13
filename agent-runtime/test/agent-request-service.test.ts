@@ -289,7 +289,7 @@ describe("Agent request service", () => {
     expect(JSON.stringify(responses)).not.toContain("private provider detail");
   });
 
-  it.each(["   ", "\ud800"])(
+  it.each(["   ", "\ud800", "bad\ftext", "left\u0085right", "left\u202eright"])(
     "maps an unusable provider fallback %j to a safe error",
     async (fallbackText) => {
       const adapter = provider(async () => ({ fallbackText }));
@@ -305,6 +305,18 @@ describe("Agent request service", () => {
       await vi.waitFor(() => expect(service.activeCount).toBe(0));
     },
   );
+
+  it("counts supplementary fallback text by Unicode code point and permits line formatting", async () => {
+    const fallbackText = `${"\ud83d\ude00".repeat(5000)}\n\tcomplete`;
+    const adapter = provider(async () => ({ fallbackText }));
+    const service = agentService({ provider: adapter, config: config() });
+    const responses: AgentTerminalResponse[] = [];
+
+    service.submit(request("request-1"), (response) => responses.push(response));
+    await vi.waitFor(() => expect(service.activeCount).toBe(0));
+
+    expect(responses).toMatchObject([{ type: "agent.complete", payload: { fallbackText } }]);
+  });
 
   it("contains a synchronous responder exception and releases admission", async () => {
     const adapter = provider(async () => ({ fallbackText: "answer" }));

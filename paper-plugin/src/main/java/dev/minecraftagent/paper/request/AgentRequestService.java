@@ -1,5 +1,7 @@
 package dev.minecraftagent.paper.request;
 
+import dev.minecraftagent.paper.client.ClientCapabilitySnapshot;
+import dev.minecraftagent.paper.client.ClientStructuredView;
 import dev.minecraftagent.paper.lifecycle.OfflineCleanup;
 import dev.minecraftagent.paper.lifecycle.OfflineReason;
 import dev.minecraftagent.paper.lifecycle.OperationalGate;
@@ -14,6 +16,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -45,6 +48,25 @@ public final class AgentRequestService
   }
 
   @FunctionalInterface
+  public interface ClientCapabilitySource {
+    ClientCapabilitySnapshot snapshot(UUID playerId);
+  }
+
+  @FunctionalInterface
+  public interface StructuredReplySink {
+    PreparedStructuredReply prepare(
+        UUID playerId, String fallbackText, List<ClientStructuredView> views);
+  }
+
+  @FunctionalInterface
+  public interface PreparedStructuredReply {
+    boolean send();
+
+    /** Releases unsent preparation. Implementations must be idempotent and safe off-thread. */
+    default void discard() {}
+  }
+
+  @FunctionalInterface
   interface TimeoutScheduler {
     Cancellable schedule(Duration delay, Runnable task);
   }
@@ -69,6 +91,8 @@ public final class AgentRequestService
   private final ReadToolRegistry toolRegistry;
   private final ReadToolExecutor toolExecutor;
   private final Executor callbacks;
+  private final ClientCapabilitySource clientCapabilities;
+  private final StructuredReplySink structuredReplies;
   private final AtomicReference<ConnectionBinding> connection = new AtomicReference<>();
   private final AtomicBoolean closed = new AtomicBoolean();
   private final Map<UUID, LiveRequest> requestsById = new HashMap<>();
@@ -122,7 +146,66 @@ public final class AgentRequestService
         events,
         toolRegistry,
         toolExecutor,
-        callbacks);
+        callbacks,
+        ignored -> ClientCapabilitySnapshot.disconnected(),
+        (playerId, fallbackText, views) -> () -> false);
+  }
+
+  public AgentRequestService(
+      OperationalGate operationalGate,
+      Duration requestTimeout,
+      ScheduledExecutorService scheduler,
+      MainThreadExecutor mainThread,
+      PlayerReplySink replies,
+      EventSink events,
+      ReadToolRegistry toolRegistry,
+      ReadToolExecutor toolExecutor,
+      Executor callbacks,
+      ClientCapabilitySource clientCapabilities) {
+    this(
+        operationalGate,
+        requestTimeout,
+        (delay, task) -> {
+          var future = scheduler.schedule(task, delay.toMillis(), TimeUnit.MILLISECONDS);
+          return () -> future.cancel(false);
+        },
+        mainThread,
+        replies,
+        events,
+        toolRegistry,
+        toolExecutor,
+        callbacks,
+        clientCapabilities,
+        (playerId, fallbackText, views) -> () -> false);
+  }
+
+  public AgentRequestService(
+      OperationalGate operationalGate,
+      Duration requestTimeout,
+      ScheduledExecutorService scheduler,
+      MainThreadExecutor mainThread,
+      PlayerReplySink replies,
+      EventSink events,
+      ReadToolRegistry toolRegistry,
+      ReadToolExecutor toolExecutor,
+      Executor callbacks,
+      ClientCapabilitySource clientCapabilities,
+      StructuredReplySink structuredReplies) {
+    this(
+        operationalGate,
+        requestTimeout,
+        (delay, task) -> {
+          var future = scheduler.schedule(task, delay.toMillis(), TimeUnit.MILLISECONDS);
+          return () -> future.cancel(false);
+        },
+        mainThread,
+        replies,
+        events,
+        toolRegistry,
+        toolExecutor,
+        callbacks,
+        clientCapabilities,
+        structuredReplies);
   }
 
   AgentRequestService(
@@ -147,7 +230,9 @@ public final class AgentRequestService
                     "TOOL_EXECUTION_UNAVAILABLE",
                     "Read tools are unavailable.",
                     true)),
-        Runnable::run);
+        Runnable::run,
+        ignored -> ClientCapabilitySnapshot.disconnected(),
+        (playerId, fallbackText, views) -> () -> false);
   }
 
   AgentRequestService(
@@ -160,6 +245,57 @@ public final class AgentRequestService
       ReadToolRegistry toolRegistry,
       ReadToolExecutor toolExecutor,
       Executor callbacks) {
+    this(
+        operationalGate,
+        requestTimeout,
+        timeoutScheduler,
+        mainThread,
+        replies,
+        events,
+        toolRegistry,
+        toolExecutor,
+        callbacks,
+        ignored -> ClientCapabilitySnapshot.disconnected(),
+        (playerId, fallbackText, views) -> () -> false);
+  }
+
+  AgentRequestService(
+      OperationalGate operationalGate,
+      Duration requestTimeout,
+      TimeoutScheduler timeoutScheduler,
+      MainThreadExecutor mainThread,
+      PlayerReplySink replies,
+      EventSink events,
+      ReadToolRegistry toolRegistry,
+      ReadToolExecutor toolExecutor,
+      Executor callbacks,
+      ClientCapabilitySource clientCapabilities) {
+    this(
+        operationalGate,
+        requestTimeout,
+        timeoutScheduler,
+        mainThread,
+        replies,
+        events,
+        toolRegistry,
+        toolExecutor,
+        callbacks,
+        clientCapabilities,
+        (playerId, fallbackText, views) -> () -> false);
+  }
+
+  AgentRequestService(
+      OperationalGate operationalGate,
+      Duration requestTimeout,
+      TimeoutScheduler timeoutScheduler,
+      MainThreadExecutor mainThread,
+      PlayerReplySink replies,
+      EventSink events,
+      ReadToolRegistry toolRegistry,
+      ReadToolExecutor toolExecutor,
+      Executor callbacks,
+      ClientCapabilitySource clientCapabilities,
+      StructuredReplySink structuredReplies) {
     this.operationalGate = Objects.requireNonNull(operationalGate);
     this.requestTimeout = Objects.requireNonNull(requestTimeout);
     this.timeoutScheduler = Objects.requireNonNull(timeoutScheduler);
@@ -169,6 +305,8 @@ public final class AgentRequestService
     this.toolRegistry = Objects.requireNonNull(toolRegistry);
     this.toolExecutor = Objects.requireNonNull(toolExecutor);
     this.callbacks = Objects.requireNonNull(callbacks);
+    this.clientCapabilities = Objects.requireNonNull(clientCapabilities);
+    this.structuredReplies = Objects.requireNonNull(structuredReplies);
     if (requestTimeout.isZero() || requestTimeout.isNegative()) {
       throw new IllegalArgumentException("Request timeout must be positive");
     }
@@ -250,7 +388,8 @@ public final class AgentRequestService
                       playerId,
                       request.expectedSessionId(),
                       Objects.requireNonNull(module),
-                      Objects.requireNonNull(message))
+                      Objects.requireNonNull(message),
+                      clientCapabilities.snapshot(playerId))
               : binding
                   .codec()
                   .encodeResume(request.requestId(), playerId, request.expectedSessionId());
@@ -407,7 +546,10 @@ public final class AgentRequestService
       reply = responseText(message);
     }
     request.cancelTimeout();
-    dispatchBoundReply(request, reply);
+    dispatchBoundReply(
+        request,
+        reply,
+        message instanceof AgentProtocolCodec.Completion completion ? completion : null);
   }
 
   private void receiveToolCall(ConnectionBinding source, AgentProtocolCodec.ToolCall message) {
@@ -578,18 +720,86 @@ public final class AgentRequestService
   }
 
   private void dispatchBoundReply(LiveRequest request, String message) {
+    dispatchBoundReply(request, message, null);
+  }
+
+  private void dispatchBoundReply(
+      LiveRequest request, String message, AgentProtocolCodec.Completion completion) {
+    if (completion != null && !completion.structuredViews().isEmpty()) {
+      try {
+        callbacks.execute(() -> prepareStructuredReply(request, message, completion));
+      } catch (RuntimeException error) {
+        events.event("CLIENT_STRUCTURED_REPLY_FAILED");
+        dispatchPreparedReply(request, message, null);
+      }
+      return;
+    }
+    dispatchPreparedReply(request, message, null);
+  }
+
+  private void prepareStructuredReply(
+      LiveRequest request, String message, AgentProtocolCodec.Completion completion) {
+    if (!canDeliver(request)) {
+      return;
+    }
+    PreparedStructuredReply prepared = null;
+    try {
+      prepared =
+          Objects.requireNonNull(
+              structuredReplies.prepare(
+                  request.playerId(), completion.fallbackText(), completion.structuredViews()));
+    } catch (RuntimeException error) {
+      events.event("CLIENT_STRUCTURED_REPLY_FAILED");
+    }
+    dispatchPreparedReply(request, message, prepared);
+  }
+
+  private void dispatchPreparedReply(
+      LiveRequest request, String message, PreparedStructuredReply prepared) {
     try {
       mainThread.execute(
           () -> {
-            if (!closed.get()
-                && connection.get() == request.binding()
-                && operationalGate.revalidate(request.permit())) {
+            if (!canDeliver(request)) {
+              discardPrepared(prepared);
+              return;
+            }
+            if (prepared != null) {
+              boolean sent = false;
+              try {
+                sent = prepared.send();
+              } catch (RuntimeException error) {
+                events.event("CLIENT_STRUCTURED_REPLY_FAILED");
+              }
+              if (sent) {
+                return;
+              }
+              discardPrepared(prepared);
+            }
+            if (canDeliver(request)) {
               replies.send(request.playerId(), message);
             }
           });
     } catch (RuntimeException error) {
+      discardPrepared(prepared);
       events.event("PLAYER_REPLY_SCHEDULE_FAILED");
     }
+  }
+
+  private void discardPrepared(PreparedStructuredReply prepared) {
+    if (prepared == null) {
+      return;
+    }
+    try {
+      prepared.discard();
+    } catch (RuntimeException error) {
+      events.event("CLIENT_STRUCTURED_REPLY_FAILED");
+    }
+  }
+
+  private boolean canDeliver(LiveRequest request) {
+    return !closed.get()
+        && connection.get() == request.binding()
+        && operationalGate.revalidate(request.permit());
   }
 
   private static boolean validMessage(String message) {

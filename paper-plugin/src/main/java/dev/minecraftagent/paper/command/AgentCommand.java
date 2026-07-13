@@ -49,12 +49,15 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
   private static final String PROPOSAL_REJECTED_MESSAGE = "Proposal rejected.";
   private static final String PROPOSAL_UNAVAILABLE_MESSAGE = "Proposal is unavailable.";
   private static final String PROPOSAL_FAILED_MESSAGE = "Proposal response failed. Try again.";
+  private static final String UI_UPDATED_MESSAGE = "AI client UI updated.";
+  private static final String UI_UNAVAILABLE_MESSAGE = "AI client Mod is unavailable.";
 
   private final Plugin plugin;
   private final Supplier<AgentStatus> status;
   private final AgentControl control;
   private final AgentRequestGateway requests;
   private final ProposalResponseGateway proposalResponses;
+  private final AgentUiControl uiControl;
   private final ToggleAuthorizer toggleAuthorizer;
   private final Consumer<Runnable> replyDispatcher;
 
@@ -70,6 +73,7 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
         control,
         (playerId, message) -> AgentRequestGateway.Submission.RUNTIME_UNAVAILABLE,
         ProposalResponseGateway.unavailable(),
+        AgentUiControl.unavailable(),
         toggleAuthorizer,
         replyDispatcher);
   }
@@ -87,6 +91,7 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
         control,
         requests,
         ProposalResponseGateway.unavailable(),
+        AgentUiControl.unavailable(),
         toggleAuthorizer,
         replyDispatcher);
   }
@@ -99,10 +104,31 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
       ProposalResponseGateway proposalResponses,
       ToggleAuthorizer toggleAuthorizer,
       Consumer<Runnable> replyDispatcher) {
+    this(
+        plugin,
+        status,
+        control,
+        requests,
+        proposalResponses,
+        AgentUiControl.unavailable(),
+        toggleAuthorizer,
+        replyDispatcher);
+  }
+
+  public AgentCommand(
+      Plugin plugin,
+      Supplier<AgentStatus> status,
+      AgentControl control,
+      AgentRequestGateway requests,
+      ProposalResponseGateway proposalResponses,
+      AgentUiControl uiControl,
+      ToggleAuthorizer toggleAuthorizer,
+      Consumer<Runnable> replyDispatcher) {
     super(
         "agent",
         "Controls Minecraft Agent readiness",
-        "/agent [say <message>|resume [session]|module list|module <name> <message>|confirm"
+        "/agent [say <message>|resume [session]|module list|module <name> <message>|ui"
+            + " <pin|unpin|clear>|confirm"
             + " <proposal>|reject <proposal>|doctor|off|on]",
         List.of());
     this.plugin = Objects.requireNonNull(plugin);
@@ -110,6 +136,7 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
     this.control = Objects.requireNonNull(control);
     this.requests = Objects.requireNonNull(requests);
     this.proposalResponses = Objects.requireNonNull(proposalResponses);
+    this.uiControl = Objects.requireNonNull(uiControl);
     this.toggleAuthorizer = Objects.requireNonNull(toggleAuthorizer);
     this.replyDispatcher = Objects.requireNonNull(replyDispatcher);
   }
@@ -154,6 +181,10 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
       module(sender, arguments);
       return true;
     }
+    if (arguments.length >= 1 && arguments[0].equalsIgnoreCase("ui")) {
+      ui(sender, arguments);
+      return true;
+    }
     if (arguments.length >= 1 && isProposalResponse(arguments[0])) {
       respondToProposal(sender, arguments);
       return true;
@@ -195,6 +226,15 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
           .filter(candidate -> candidate.startsWith(prefix))
           .toList();
     }
+    if (arguments.length == 2
+        && online
+        && arguments[0].equalsIgnoreCase("ui")
+        && sender.hasPermission(USE_PERMISSION)) {
+      var prefix = arguments[1].toLowerCase(Locale.ROOT);
+      return List.of("pin", "unpin", "clear").stream()
+          .filter(candidate -> candidate.startsWith(prefix))
+          .toList();
+    }
     if (arguments.length != 1) {
       return List.of();
     }
@@ -204,6 +244,7 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
       if (sender.hasPermission(USE_PERMISSION)) {
         candidates.add("say");
         candidates.add("resume");
+        candidates.add("ui");
       }
       if (sender.hasPermission(MODULE_PERMISSION)) {
         candidates.add("module");
@@ -318,6 +359,40 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
     var message = String.join(" ", Arrays.copyOfRange(arguments, 2, arguments.length));
     handleSubmission(
         sender, requests.submitModule(player.getUniqueId(), selected.orElseThrow(), message));
+  }
+
+  private void ui(CommandSender sender, String[] arguments) {
+    if (!sender.hasPermission(USE_PERMISSION)) {
+      sender.sendMessage(PERMISSION_DENIED_MESSAGE);
+      return;
+    }
+    if (!(sender instanceof Player player)) {
+      sender.sendMessage(PLAYER_ONLY_MESSAGE);
+      return;
+    }
+    if (arguments.length != 2) {
+      sender.sendMessage(getUsage());
+      return;
+    }
+    AgentUiControl.Action action =
+        switch (arguments[1].toLowerCase(Locale.ROOT)) {
+          case "pin" -> AgentUiControl.Action.PIN;
+          case "unpin" -> AgentUiControl.Action.UNPIN;
+          case "clear" -> AgentUiControl.Action.CLEAR;
+          default -> null;
+        };
+    if (action == null) {
+      sender.sendMessage(getUsage());
+      return;
+    }
+    AgentUiControl.Result result;
+    try {
+      result = uiControl.invoke(player.getUniqueId(), action);
+    } catch (RuntimeException failure) {
+      result = AgentUiControl.Result.CLIENT_UNAVAILABLE;
+    }
+    sender.sendMessage(
+        result == AgentUiControl.Result.SENT ? UI_UPDATED_MESSAGE : UI_UNAVAILABLE_MESSAGE);
   }
 
   private void respondToProposal(CommandSender sender, String[] arguments) {

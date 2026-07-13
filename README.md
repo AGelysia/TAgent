@@ -2,13 +2,15 @@
 
 Minecraft Agent is a security-first Minecraft assistant composed of a Paper plugin, a local
 TypeScript runtime, and an optional Fabric client mod. This repository currently implements the
-Phase 0-9 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
+Phase 0-10 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
 loopback Runtime-Paper channel, conditional `/agent` registration, persistent emergency Offline
 controls, private model replies, Runtime-owned sessions, resume, explicit one-shot modules, a
 bounded six-tool read-only model loop, and Paper-owned proposal authorization and audit
 infrastructure. It also includes bounded Capability Pack loading, typed validation, and immutable
-catalog publication. The production write catalog is empty: there is no production proposal
-creator, generic execution surface, or Minecraft state mutation.
+catalog publication. Phase 10 adds an optional raw-JSON Fabric channel, exact structured-view
+negotiation, bounded transfer, a local rich overlay with registry item rendering, and a fail-closed
+exact-version Litematica adapter. The production write catalog is empty: there is no production
+proposal creator, generic execution surface, or Minecraft state mutation.
 
 The product and delivery baseline is recorded in
 [`minecraft_agent_vibe_coding_plan.md`](minecraft_agent_vibe_coding_plan.md). Implementation status
@@ -23,6 +25,8 @@ is tracked in [`docs/progress.md`](docs/progress.md).
 | Paper API     | 1.21.11-R0.1-SNAPSHOT |
 | Fabric Loader | 0.19.3                |
 | Fabric API    | 0.141.4+1.21.11       |
+| Litematica    | 0.26.12 (optional)    |
+| MaLiLib       | 0.27.16 (optional)    |
 | Node.js       | 22.16-22.x            |
 
 Minecraft 1.21.11 is intentionally pinned because the product baseline requires Java 21. Paper
@@ -76,7 +80,7 @@ cd ..
 The Fabric build downloads Minecraft artifacts and is deliberately last. Do not run both Gradle
 builds concurrently on a low-memory host.
 
-## Phase 2-8 Runtime
+## Phase 2-10 Runtime
 
 ```bash
 cd agent-runtime
@@ -109,10 +113,16 @@ After the authenticated hello, the same bounded WebSocket accepts agent request/
 session-resume, and correlated tool-result traffic. A fixed six-entry Module Manifest supplies
 trusted per-request instructions and a fixed read-tool allowlist. Runtime publishes only those
 registered functions to the model, validates every call and typed result locally, and permits at
-most eight serial calls. Phase 8 adds shared proposal contracts, but proposal, view, and heartbeat
-transport handlers remain unsupported; schema acceptance alone cannot create or execute a proposal.
+most eight serial calls. Phase 8 adds shared proposal contracts, but proposal, standalone
+`view.publish`, and heartbeat transport handlers remain unsupported; schema acceptance alone cannot
+create or execute a proposal.
+Phase 10 accepts Paper-derived connected-client capabilities as presentation metadata and, when the
+final 64 KiB application envelope permits it, emits a closed version `1.0` text view alongside the
+unconditional fallback. If duplicating the answer into that view would exceed the envelope limit,
+Runtime removes the structured view and keeps the fallback. It never treats a client claim as model,
+tool, permission, or proposal authority.
 
-## Phase 3-9 Paper
+## Phase 3-10 Paper
 
 On first Paper startup, the plugin installs a strict `plugins/MinecraftAgent/config.yml`. Keep its
 Runtime token as the complete `${MINECRAFT_AGENT_SERVER_TOKEN}` environment reference. The endpoint
@@ -200,6 +210,39 @@ remain non-executable Proposal Only material. Production still exposes no generi
 pack-backed Runtime tool, or Capability proposal-creation route. The first write adapter must retain
 the worker-thread durable audit and primary-thread final authorization sequence described above.
 
+Phase 10 registers the separate `minecraftagent:client` Bukkit/Fabric Custom Payload channel. It
+uses closed raw UTF-8 JSON messages, binds capabilities and transfers to the actual player's positive
+connection generation, and never exposes the Runtime token or provider key. Every completion keeps
+private fallback text. Paper sends a structured view only when its exact version registry intersects
+the actual client's advertised features; vanilla and incompatible clients stay on fallback text.
+Client-to-Paper frames are capped at 16 KiB and Paper-to-client frames at 40 KiB before parsing.
+
+View transfers use identity or gzip framing with 24 KiB decoded chunks, at most 1 MiB compressed and
+uncompressed content, 64 chunks, and a 15-second timeout. Paper prepares JSON, compression, hashes,
+and at most eight pending transfers away from its primary thread; its 2 MiB budget counts
+uncompressed view bytes. The client admits at most two active reassemblies and reserves their declared
+compressed bytes against a separate 2 MiB budget. Incoming protocol work uses one 256-entry worker
+queue, and verified client-thread actions use at most 128 pending reservations. A reported
+`DISPLAYED` status only retires fallback bookkeeping; rejection, a transfer-scoped client error, or
+server timeout sends the correlated private fallback once. None of those client reports is authority.
+
+The client performs bounded reassembly, gzip, per-chunk/complete SHA-256, strict UTF-8, and closed view
+decoding away from the render loop. The overlay renders version `1.0` Text, ItemStack, ItemList, and
+RecipeGrid views, including real registry icons, counts, vanilla tooltips, and explicit missing items.
+It supports scroll, drag, bounded resize, pin/unpin, close, clear, `/agent ui pin|unpin|clear`, and
+atomic local preferences at `config/minecraftagent/overlay.json`.
+
+The base client loads without Litematica. Optional integration is enabled only for Minecraft 1.21.11,
+Fabric Loader 0.19.3,
+[Litematica 0.26.12](https://modrinth.com/mod/litematica/version/b3dJnV8d), and
+[MaLiLib 0.27.16](https://modrinth.com/mod/malilib/version/oaU4Ys3J). It isolates the reviewed
+reflection adapter, derives only managed `<view-uuid>.litematica` files, supports local preview
+load/remove and the native Material List HUD, and leaves the base overlay available on a tuple or
+linkage mismatch. Load preparation reads and hashes at most 16 MiB on the protocol worker; the final
+metadata recheck and all Litematica calls run on the Minecraft client thread. A runtime adapter call
+fails only that operation and does not dynamically withdraw the already advertised feature version.
+Palette-to-native `.litematica` generation and end-to-end build preview publication remain Phase 11.
+
 The opt-in exact-server smoke pins Paper `1.21.11-132`, verifies its SHA-256, limits the heap to 512
 MiB, and runs every case serially:
 
@@ -211,7 +254,8 @@ This is intentionally separate from routine checks because it downloads and star
 server. It cleans up all temporary worlds, logs, credentials, and child processes.
 The smoke includes an Offline/restart/on/Runtime-loss/on lifecycle and checks clean dynamic command
 unregistration in addition to the three initial transport-failure cases. It does not connect a real
-player or click a proposal; focused JVM tests cover the Phase 8 authorization and confirmation chain.
+player, graphical Fabric client, or Litematica installation, and does not click a proposal; focused
+tests cover those Phase 8/10 domain and protocol boundaries.
 
 ## Package
 
@@ -223,8 +267,10 @@ Artifacts are placed under `dist/`. The package contains the implemented persist
 resume, explicit module path, shared tool/proposal schemas, Runtime loop, Paper read adapters, and
 Paper proposal authorization and audit infrastructure. It also contains the bounded Capability Pack
 loader, exact approval and immutable catalog/diff model, required-only typed renderer, and parse-only
-Brigadier preflight. The production proposal tool catalog remains empty; Capability proposal
-creation, generic execution, client UI, and world changes remain unavailable.
+Brigadier preflight. It also contains the optional Fabric channel, structured-view transfer and
+rendering, local overlay/preferences, and exact-version Litematica adapter. The production proposal
+tool catalog remains empty; Capability proposal creation, generic execution, Phase 11 build-preview
+generation, and world changes remain unavailable.
 
 The packaged Runtime preserves its compiled layout and includes the shared protocol schemas and
 configuration template. Install production dependencies before startup:
@@ -260,3 +306,7 @@ exact ID/version/hash approval, permanently excludes `example` and `draft`, reje
 and incompatible plugins, compiles required-only typed arguments into bounded fixed templates, and
 keeps Brigadier at parse-only preflight. Immutable catalog publication cannot introduce a generic
 dispatch operation or Capability proposal-creation route; unknown commands remain fail-closed.
+Phase 10 binds optional-client traffic to actual player/generation state, exact view features, fixed
+transfer budgets, and closed presentation models. ACKs, UI controls, selections, preview state, and
+material results never grant permission or confirm a proposal. The only reflection is an isolated,
+exact-version, presentation-only Litematica adapter; it is not a model or server execution surface.

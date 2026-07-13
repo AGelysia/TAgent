@@ -5,9 +5,19 @@ import dev.minecraftagent.paper.capability.PaperInstalledPluginInventory;
 import dev.minecraftagent.paper.capability.load.CapabilityPackLoader;
 import dev.minecraftagent.paper.capability.model.CapabilityDiagnostic;
 import dev.minecraftagent.paper.capability.registry.CapabilityRegistry;
+import dev.minecraftagent.paper.client.ClientConnectionRegistry;
+import dev.minecraftagent.paper.client.ClientPayloadCodec;
+import dev.minecraftagent.paper.client.ClientStateCoordinator;
+import dev.minecraftagent.paper.client.ClientTransferManager;
+import dev.minecraftagent.paper.client.ClientUiCommandGateway;
+import dev.minecraftagent.paper.client.ClientViewPublisher;
+import dev.minecraftagent.paper.client.ClientViewSchemaRegistry;
+import dev.minecraftagent.paper.client.ClientViewSelector;
+import dev.minecraftagent.paper.client.PaperClientChannel;
 import dev.minecraftagent.paper.command.AdminToggleAuthorizer;
 import dev.minecraftagent.paper.command.AgentCommand;
 import dev.minecraftagent.paper.command.AgentControl;
+import dev.minecraftagent.paper.command.AgentUiControl;
 import dev.minecraftagent.paper.command.PaperCommandRegistration;
 import dev.minecraftagent.paper.command.ProposalResponseGateway;
 import dev.minecraftagent.paper.lifecycle.AdminPolicy;
@@ -43,6 +53,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeMap;
@@ -66,6 +77,8 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
       new AtomicReference<>();
   private final AtomicReference<AgentRequestService> requestServiceReference =
       new AtomicReference<>();
+  private final AtomicReference<PaperClientChannel> clientChannelReference =
+      new AtomicReference<>();
   private final AtomicReference<ProposalService> proposalServiceReference = new AtomicReference<>();
   private final AtomicReference<ProposalAuthorizer.Policy> proposalPolicyReference =
       new AtomicReference<>(lockedProposalPolicy());
@@ -73,6 +86,7 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
 
   @Override
   public void onEnable() {
+    clientChannelReference.set(null);
     proposalServiceReference.set(null);
     proposalPolicyReference.set(lockedProposalPolicy());
     var dataDirectory = getDataFolder().toPath().toAbsolutePath().normalize();
@@ -120,6 +134,18 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     var toolExecutor =
         new BukkitReadToolExecutor(
             getServer(), toolRegistry, task -> getServer().getScheduler().runTask(this, task));
+    var clientConnections = new ClientConnectionRegistry();
+    var clientTransfers = ClientTransferManager.withProductionLimits();
+    var clientState = new ClientStateCoordinator(clientConnections, clientTransfers);
+    var clientChannel =
+        new PaperClientChannel(this, new ClientPayloadCodec(), clientState, clientTransfers);
+    clientChannel.start();
+    clientChannelReference.set(clientChannel);
+    var clientViews =
+        new ClientViewPublisher(
+            new ClientViewSelector(clientConnections, ClientViewSchemaRegistry.versionOne()),
+            clientTransfers);
+    var clientUi = new ClientUiCommandGateway(clientConnections, clientChannel.uiControlSink());
     var requests =
         new AgentRequestService(
             operationalGate,
@@ -135,7 +161,25 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
             code -> getLogger().warning("event=request_warning code=" + code),
             toolRegistry,
             toolExecutor,
-            worker);
+            worker,
+            clientState::capabilitySnapshot,
+            (playerId, fallbackText, views) -> {
+              var publication = clientViews.prepare(playerId, fallbackText, views, Instant.now());
+              return new AgentRequestService.PreparedStructuredReply() {
+                @Override
+                public boolean send() {
+                  var player = getServer().getPlayer(playerId);
+                  return player != null
+                      && player.isOnline()
+                      && clientChannel.sendPublication(player, publication);
+                }
+
+                @Override
+                public void discard() {
+                  clientViews.discard(publication);
+                }
+              };
+            });
     requestServiceReference.set(requests);
     getServer()
         .getPluginManager()
@@ -177,6 +221,17 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
             control,
             requests,
             proposalResponses(),
+            (playerId, action) -> {
+              var clientAction =
+                  switch (action) {
+                    case PIN -> ClientUiCommandGateway.Action.PIN;
+                    case UNPIN -> ClientUiCommandGateway.Action.UNPIN;
+                    case CLEAR -> ClientUiCommandGateway.Action.CLEAR;
+                  };
+              return clientUi.invoke(playerId, clientAction) == ClientUiCommandGateway.Result.SENT
+                  ? AgentUiControl.Result.SENT
+                  : AgentUiControl.Result.CLIENT_UNAVAILABLE;
+            },
             new AdminToggleAuthorizer(
                 () -> {
                   var current = coordinatorReference.get();
@@ -292,7 +347,7 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
                   }
                 },
                 (epoch, reason) -> {},
-                (epoch, reason) -> {}),
+                (epoch, reason) -> clientChannel.clearTransientViews()),
             operationalGate,
             requests);
     coordinatorReference.set(coordinator);
@@ -311,6 +366,10 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     var requests = requestServiceReference.getAndSet(null);
     if (requests != null) {
       requests.close();
+    }
+    var clientChannel = clientChannelReference.getAndSet(null);
+    if (clientChannel != null) {
+      clientChannel.close();
     }
   }
 

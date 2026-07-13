@@ -7,15 +7,18 @@ Protocol 1.0 defines contracts for two separate links:
 1. Paper to the local Agent Runtime over an authenticated WebSocket. Phase 7
    keeps the Phase 3 hello exchange and enables the bounded agent, session, and
    read-tool exchanges after authentication. Phase 8 adds proposal contracts
-   without enabling proposal transport handlers.
+   without enabling proposal transport handlers. Phase 10 permits negotiated
+   client capabilities on `agent.request` and closed structured views inside
+   `agent.complete`; standalone `view.publish` remains unsupported.
 2. Paper to the optional Fabric client over versioned Minecraft custom payloads
-   in a later phase.
+   on the Phase 10 `minecraftagent:client` channel.
 
 Phase 1 owns JSON Schemas, fixtures, and cross-language contract tests. Later
 phases add closed payloads while keeping the socket open for a strictly bounded
-conversation and read-tool channel. The current implementation still does not
-register Fabric payload handlers or dispatch proposal, control, or view
-messages.
+conversation and read-tool channel. Phase 10 registers the separate Fabric
+payload handlers and dispatches only the closed client handshake, view framing,
+clear, UI-control, ACK, and error messages described below. Runtime-Paper
+proposal messages and every write route remain disabled.
 
 The canonical schema source is `protocol/schemas/`. JVM builds copy those files
 as resources; the TypeScript Runtime loads the same files through its schema
@@ -121,7 +124,9 @@ a connection to ready.
 
 The Fabric handshake is separate. `client-handshake.schema.json` advertises the
 client protocol, mod version, fixed feature versions, and detected Litematica
-and MaLiLib versions. It contains no Runtime authentication fields.
+and MaLiLib versions. It contains no Runtime authentication fields or player
+identity. Paper binds it to the player on the actual plugin-message connection
+and replies with the current positive connection generation.
 
 ## Payload contracts
 
@@ -142,6 +147,7 @@ Phase 1 includes or targets these closed contracts:
 | `proposal-confirmed` | Redacted correlation after trusted confirmation admission             |
 | `proposal-cancelled` | Redacted correlation and a closed cancellation reason                 |
 | `client-handshake`   | Client feature and dependency negotiation                             |
+| `client-payload`     | Closed raw-JSON client channel envelope and message directions         |
 | `structured-view`    | Trusted fixed view variants and fallback relationship                 |
 | `recipe-view`        | Structured server recipe representation                               |
 | `build-preview`      | Bounded target projection and transform metadata                      |
@@ -150,12 +156,15 @@ Phase 1 includes or targets these closed contracts:
 Schemas can exist before their behavior. Phase 5 enables agent request,
 completion, error, and cancellation after hello; Phase 6 adds dedicated session
 resume and explicit modules; Phase 7 adds the bounded read-tool exchange. A
-request has a nullable owned session, one of six explicit modules, and no
-connected-client features. A completion always contains non-empty
-`fallbackText`; conversation storage can leave its session null, and the current
-implementation emits an empty `structuredViews` array. Resume uses the
-authenticated server ID and player UUID for both exact and latest lookup, and
-all unavailable exact IDs share `SESSION_NOT_FOUND`.
+request has a nullable owned session and one of six explicit modules. Phase 10
+adds the Paper-owned snapshot of the actual player's negotiated client features;
+the Runtime validates but never treats those features as authority. A completion
+always contains non-empty `fallbackText`; conversation storage can leave its
+session null, and Phase 10 attaches a trusted version `1.0` text view derived
+from the same final answer only when the final application envelope remains
+within 64 KiB. Otherwise the encoder removes `structuredViews` and preserves the
+fallback. Resume uses the authenticated server ID and player UUID for both exact
+and latest lookup, and all unavailable exact IDs share `SESSION_NOT_FOUND`.
 
 During a live query, Runtime may send one serial `tool.call` at a time and Paper
 returns one correlated `tool.result`. The result repeats session, player, tool,
@@ -164,8 +173,9 @@ and Paper both apply the six-tool contract and module allowlist. Sequence is
 zero-based and protocol 1.0 permits `0..7`; an eighth completed call exhausts
 the loop and no ninth call is emitted. Failed/rejected results require
 `result: null`, while a successful result requires typed object data and fixed
-source/trust provenance. The implementation still does not publish a structured
-view, create a proposal through the authenticated channel, or load a capability.
+source/trust provenance. Structured views now travel only as validated fields of
+`agent.complete`; the implementation still does not create a proposal through
+the authenticated channel or expose a pack-backed Runtime capability.
 
 Phase 8 registers `proposal.create`, `proposal.confirmed`, and
 `proposal.cancelled` payload schemas and a shared RFC 8785 argument-hash golden.
@@ -183,6 +193,73 @@ wired. The Paper-local synchronous proposal service also has no production
 `create` caller and its production typed write catalog is empty. A valid
 proposal envelope therefore cannot cause a proposal or Minecraft write.
 
+## Client custom payload channel
+
+Paper and Fabric exchange one raw UTF-8 JSON document per plugin message on
+`minecraftagent:client`. The bytes are not prefixed with a Java/Minecraft UTF
+length and do not reuse the authenticated WebSocket envelope. The closed outer
+shape is capped before parsing at 16 KiB from client to Paper and 40 KiB from
+Paper to client:
+
+```json
+{
+  "clientPayloadVersion": "1.0",
+  "messageId": "00000000-0000-4000-8000-000000000020",
+  "type": "view.begin",
+  "payload": {}
+}
+```
+
+Directions are fixed:
+
+| Direction       | Types                                                                  |
+| --------------- | ---------------------------------------------------------------------- |
+| Client to Paper | `client.hello`, `client.ack`, `client.error`                       |
+| Paper to client | `server.hello`, `view.begin`, `view.chunk`, `view.clear`, `ui.control` |
+
+Paper assigns a positive per-player generation on the actual connection. Every
+post-handshake message repeats it, and reconnect, disconnect, world transition,
+Offline cleanup, or plugin disable invalidates pending state from older
+generations. `client.hello` advertises protocol `1.0`, the client mod version,
+independent feature versions `0` or `1`, and nullable detected dependency
+versions. `server.hello` selects only server-known view schema `1.0`; it cannot
+be expanded by a client claim.
+
+`agent.complete.structuredViews` is an ordered alternatives list. Paper
+validates every entry but publishes only the first view whose schema and
+required features intersect the negotiated client state.
+
+`view.begin` binds a transfer to generation, transfer, view, request, revision,
+show/update mode, identity/gzip encoding, exact byte counts, chunk count, and
+whole-content SHA-256. A `view.chunk` supplies the same generation and transfer,
+one zero-based index, decoded length, per-chunk SHA-256, and canonical base64.
+Production enforces 24 KiB decoded chunks, at most 1 MiB compressed and 1 MiB
+uncompressed per view, at most 64 chunks, and a 15-second timeout. Paper permits
+eight pending transfers and charges their uncompressed view bytes against a
+2 MiB per-connection budget. The client permits two active reassemblies and
+reserves their declared compressed bytes against its own 2 MiB budget.
+
+Paper serializes, optionally compresses, hashes, and reserves each selected view
+on its worker. The 15-second deadline starts at that reservation; the primary
+thread rechecks the actual player, generation, and pending transfer before
+sending the bounded plugin frames. A stale or expired reservation returns to the
+private fallback path.
+
+The client serializes inbound protocol work through one 256-entry worker queue
+and performs reassembly plus bounded gzip and hash validation away from the
+render thread. It rejects a stale generation, duplicate or missing index,
+non-canonical base64, length/hash mismatch, invalid gzip framing, expansion,
+invalid strict UTF-8, or metadata mismatch, and releases reserved bytes on every
+terminal path. Only a verified view update can use one of the 128 pending
+client-thread action reservations.
+
+`client.ack` reports only `DISPLAYED` or `REJECTED`; `client.error` reports a
+stable transport/presentation code. `DISPLAYED` retires the correlated fallback
+record. `REJECTED`, a transfer-scoped client error, Paper-side timeout, or
+generation replacement sends that private fallback once and cancels any
+remaining correlated transfers. Neither message contains or creates permission,
+proposal, selection, material, or execution authority.
+
 ## Client views
 
 An agent completion always has usable `fallbackText`. Structured views are sent
@@ -190,17 +267,43 @@ only when the connected client declared support for the exact view version.
 Paper validates and sanitizes a fixed view model before publishing it. The model
 cannot supply arbitrary widgets, texture paths, NBT, or click commands.
 
-Client action fields are enums with typed IDs. A proposal action, for example,
-contains a proposal ID that Paper resolves; it cannot contain `/op`, `/execute`,
-or any other command text.
+Phase 10 renders version `1.0` Text, ItemStack, ItemList, and RecipeGrid views.
+Text requires `overlay: 1`; item views additionally require `itemIcons: 1`; and
+recipe views also require `recipeView: 1`. Item IDs resolve through the local
+Minecraft registry to real item icons, counts, and vanilla tooltips. An unknown
+ID stays visible as an explicit missing-item state. Unsupported view types or
+older/incompatible feature versions are not partially decoded; Paper uses the
+private fallback instead.
+
+The overlay bounds scroll, drag, resize, pin/unpin, close, clear, and open-view
+count. Client-local position, size, and pin preference persist independently of
+server state. The only server controls are the closed `ui.control` action enum;
+they carry a nullable view UUID and no arbitrary command or layout payload.
+
+The Litematica feature versions are `1` only when the optional resolver matches
+Minecraft 1.21.11, Fabric Loader 0.19.3, Litematica 0.26.12, and MaLiLib 0.27.16.
+Its closed controls are `litematica.preview.load`,
+`litematica.preview.remove`, and `litematica.material_list.open`. A load derives
+the managed `<view-uuid>.litematica` name locally; no client filesystem path is
+on the wire. Preparation reads and hashes at most 16 MiB on the protocol worker;
+the final file metadata recheck and reflected load, remove, and Material List
+operations run on the Minecraft client thread. An operation failure does not
+dynamically withdraw the feature version already advertised for that connection.
+Phase 10 does not generate that native file from Palette v1.
+
+Phase 10 defines no client proposal action. Proposal and selection view actions
+remain later contracts and cannot be inferred from the closed `ui.control` enum.
 
 ## Build preview transfer framing
 
 The Phase 1 `build-preview` contract contains both preview metadata and a
 bounded array of transfer chunks. Semantic validation treats the chunk array as
 a transport layer even though protocol 1.0 carries it in the same JSON object.
-The content hash is calculated from the complete uncompressed content, so it
-remains stable when only chunk boundaries change.
+This is distinct from the Phase 10 outer view framing above: Phase 10 can
+transport verified structured view JSON, but does not yet publish or decode a
+`build_preview` view. The content hash is calculated from the complete
+uncompressed preview content, so it remains stable when only chunk boundaries
+change.
 
 The top-level object includes:
 
@@ -224,9 +327,9 @@ limit.
 
 For `operation = create`, `baseRegionHash` is null. For `operation = modify`, it
 is required. An ACK correlates to preview ID and content hash but conveys no
-server-side trust. Transfer timeout and per-connection aggregate budgets are
-runtime controls for the later client-network phase, not claims made by the
-Phase 1 JSON Schema.
+server-side trust. The complete Palette, geometry, base-region, change-policy,
+native `.litematica` generation, and end-to-end publication path remain Phase 11
+work; the Phase 10 generic transfer limits do not make this preview executable.
 
 ## Build preview canonical form
 

@@ -35,7 +35,21 @@ export interface AgentCompletionPayload {
   readonly sessionId: string | null;
   readonly playerUuid: string;
   readonly fallbackText: string;
-  readonly structuredViews: readonly [];
+  readonly structuredViews: readonly StructuredTextView[];
+}
+
+export interface StructuredTextView {
+  readonly viewSchemaVersion: "1.0";
+  readonly viewId: string;
+  readonly requestId: string;
+  readonly viewType: "text";
+  readonly revision: 1;
+  readonly title: string;
+  readonly fallbackText: string;
+  readonly pinnable: true;
+  readonly content: {
+    readonly text: string;
+  };
 }
 
 export type AgentErrorCode =
@@ -195,18 +209,28 @@ function providerError(
 }
 
 function isUsableFallbackText(value: unknown): value is string {
-  if (typeof value !== "string" || value.trim().length === 0 || value.length > 8192) {
+  if (typeof value !== "string" || value.trim().length === 0) {
     return false;
   }
-  for (let index = 0; index < value.length; index += 1) {
-    const unit = value.charCodeAt(index);
-    if (unit >= 0xd800 && unit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (index + 1 >= value.length || next < 0xdc00 || next > 0xdfff) {
-        return false;
-      }
-      index += 1;
-    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+  let codePoints = 0;
+  for (const character of value) {
+    codePoints += 1;
+    if (codePoints > 8192) {
+      return false;
+    }
+    const codePoint = character.codePointAt(0);
+    if (
+      codePoint === undefined ||
+      (codePoint >= 0xd800 && codePoint <= 0xdfff) ||
+      ((codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) &&
+        codePoint !== 0x09 &&
+        codePoint !== 0x0a) ||
+      codePoint === 0x061c ||
+      codePoint === 0x200e ||
+      codePoint === 0x200f ||
+      (codePoint >= 0x202a && codePoint <= 0x202e) ||
+      (codePoint >= 0x2066 && codePoint <= 0x2069)
+    ) {
       return false;
     }
   }
@@ -593,7 +617,19 @@ export class AgentRequestService {
         sessionId: record.preparedSessionId,
         playerUuid: record.input.playerUuid,
         fallbackText,
-        structuredViews: [],
+        structuredViews: [
+          {
+            viewSchemaVersion: "1.0",
+            viewId: this.#randomUuid(),
+            requestId: record.input.requestId,
+            viewType: "text",
+            revision: 1,
+            title: "Agent response",
+            fallbackText,
+            pinnable: true,
+            content: { text: fallbackText },
+          },
+        ],
       },
     });
   }

@@ -83,6 +83,10 @@ function invalid(): ApplicationProtocolFailure {
   return new ApplicationProtocolFailure("APPLICATION_MESSAGE_INVALID");
 }
 
+function encodedByteLength(envelope: Record<string, unknown>): number {
+  return Buffer.byteLength(JSON.stringify(envelope), "utf8");
+}
+
 function envelopeRecord(value: unknown): EnvelopeRecord {
   if (!isRecord(value) || !isRecord(value["payload"])) {
     throw invalid();
@@ -160,23 +164,7 @@ export class ApplicationEnvelopeProtocol {
 
     let message: PaperApplicationMessage;
     if (envelope.type === "agent.request") {
-      const clientCapabilities = envelope.payload["clientCapabilities"];
-      const features =
-        isRecord(clientCapabilities) && isRecord(clientCapabilities["features"])
-          ? clientCapabilities["features"]
-          : undefined;
-      if (
-        envelope.messageId !== envelope.requestId ||
-        !isRecord(clientCapabilities) ||
-        clientCapabilities["connected"] !== false ||
-        clientCapabilities["clientProtocolVersion"] !== null ||
-        features === undefined ||
-        features["overlay"] !== 0 ||
-        features["itemIcons"] !== 0 ||
-        features["recipeView"] !== 0 ||
-        features["litematicaPreview"] !== 0 ||
-        features["litematicaMaterialList"] !== 0
-      ) {
+      if (envelope.messageId !== envelope.requestId) {
         throw invalid();
       }
       message = {
@@ -274,7 +262,7 @@ export class ApplicationEnvelopeProtocol {
     }
 
     const responseTimestamp = this.#now().toISOString();
-    const envelope: Record<string, unknown> = {
+    const responseFields = {
       protocolVersion: SUPPORTED_PROTOCOL_VERSION,
       messageId,
       requestId,
@@ -282,10 +270,31 @@ export class ApplicationEnvelopeProtocol {
       type: response.type,
       timestamp: responseTimestamp,
       nonce: this.#randomBytes(16).toString("base64url"),
+    };
+    let envelope: Record<string, unknown> = {
+      ...responseFields,
       payload: response.payload,
     };
     if (!this.#schemaRegistry.validate("envelope.schema.json", envelope).valid) {
       throw new Error(`Runtime generated an invalid ${response.type} envelope.`);
+    }
+
+    if (
+      encodedByteLength(envelope) > APPLICATION_MAXIMUM_BYTES &&
+      response.type === "agent.complete" &&
+      response.payload.structuredViews.length > 0
+    ) {
+      const fallbackPayload = { ...response.payload, structuredViews: [] };
+      if (!this.#schemaRegistry.validate(payloadSchema, fallbackPayload).valid) {
+        throw new Error(`Runtime generated an invalid ${response.type} fallback payload.`);
+      }
+      envelope = { ...responseFields, payload: fallbackPayload };
+      if (!this.#schemaRegistry.validate("envelope.schema.json", envelope).valid) {
+        throw new Error(`Runtime generated an invalid ${response.type} fallback envelope.`);
+      }
+    }
+    if (encodedByteLength(envelope) > APPLICATION_MAXIMUM_BYTES) {
+      throw new Error(`Runtime generated an oversized ${response.type} envelope.`);
     }
     return envelope;
   }
