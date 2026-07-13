@@ -107,7 +107,7 @@ const runtimeConfigSchema = z
       .object({
         maxConcurrentRequests: z.number().int().min(1).max(64),
         maxQueuedRequests: z.number().int().min(0).max(10_000),
-        maxToolRounds: z.number().int().min(1).max(32),
+        maxToolRounds: z.number().int().min(1).max(8),
         maxContextMessages: z.number().int().min(1).max(100).default(30),
         maxContextCharacters: z.number().int().min(4096).max(65_536).default(32_768),
         perPlayerCooldownSeconds: z.number().int().min(0).max(3600),

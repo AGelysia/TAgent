@@ -33,7 +33,7 @@ public final class CoreToolRuntime {
         .forEach(
             id ->
                 defaults.add(
-                    new CoreToolDescriptor(id, CoreToolDescriptor.AccessMode.READ, true, false)));
+                    new CoreToolDescriptor(id, CoreToolDescriptor.AccessMode.READ, true, true)));
     return initialize(defaults);
   }
 
@@ -49,7 +49,7 @@ public final class CoreToolRuntime {
             || !TOOL_ID.matcher(descriptor.id()).matches()
             || descriptor.accessMode() != CoreToolDescriptor.AccessMode.READ
             || !descriptor.schemaClosed()
-            || descriptor.executionCapable()) {
+            || !descriptor.executionCapable()) {
           throw failure(StartupFailure.Code.CORE_TOOL_UNSAFE);
         }
         if (indexed.putIfAbsent(descriptor.id(), descriptor) != null) {
@@ -79,7 +79,7 @@ public final class CoreToolRuntime {
   }
 
   public boolean executionAvailable() {
-    return false;
+    return ready() && descriptors.values().stream().allMatch(CoreToolDescriptor::executionCapable);
   }
 
   private static StartupFailure failure(StartupFailure.Code code) {

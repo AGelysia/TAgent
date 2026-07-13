@@ -38,11 +38,16 @@ export {
   modelGenerationFailureCodes,
   UnsupportedModelProvider,
   type ModelGenerationFailureCode,
+  type ModelGenerationContinuation,
+  type ModelFinalResult,
   type ModelInputMessage,
   type ModelGenerationRequest,
   type ModelGenerationResult,
   type ModelGenerationUsage,
   type ModelProvider,
+  type ModelToolCallResult,
+  type ModelToolDefinition,
+  type ModelToolOutput,
 } from "./providers/model-provider.js";
 export {
   OpenAiResponsesProvider,
@@ -55,6 +60,7 @@ export {
   type AgentErrorPayload,
   type AgentRequestInput,
   type AgentRequestServiceOptions,
+  type AgentRuntimeResponse,
   type AgentTerminalResponse,
   type SessionResumeInput,
   type SessionResumeResponse,
@@ -78,6 +84,17 @@ export {
   type SqliteConversationRepositoryOptions,
 } from "./storage/conversation-repository.js";
 export { CURRENT_RUNTIME_SCHEMA_VERSION, migrateRuntimeStorage } from "./storage/migrations.js";
+export { ToolRegistry, type CoreToolDescriptor } from "./tools/tool-registry.js";
+export {
+  coreToolIds,
+  type CoreToolId,
+  type ToolCallPayload,
+  type ToolResultError,
+  type ToolResultPayload,
+  type ToolResultSource,
+  type ToolResultStatus,
+  type ToolResultTrust,
+} from "./tools/tool-types.js";
 export { buildContextWindow, type ContextWindowLimits } from "./sessions/context-window.js";
 export {
   RequestAdmissionController,

@@ -18,7 +18,7 @@ const runtime = await startRuntime({
       if (input.at(-1)?.role !== "user") {
         throw new Error("Smoke provider did not receive a bounded user context");
       }
-      return { fallbackText: "Paper smoke response." };
+      return { type: "final", fallbackText: "Paper smoke response." };
     },
   },
 });

@@ -128,7 +128,7 @@ Phase 1 includes or targets these closed contracts:
 | ------------------ | --------------------------------------------------------------------- |
 | `handshake`        | Runtime-Paper version and authentication negotiation                  |
 | `agent-request`    | Session, actual player identity, module, message, and client features |
-| `agent-complete`   | Correlated private fallback text and bounded structured views        |
+| `agent-complete`   | Correlated private fallback text and bounded structured views         |
 | `agent-error`      | Correlated stable error code, safe fallback text, and retry hint      |
 | `agent-cancel`     | Correlated Paper-originated cancellation reason                       |
 | `session-resume`   | Player-owned exact or latest session selection request                |
@@ -142,15 +142,25 @@ Phase 1 includes or targets these closed contracts:
 | `build-preview`    | Bounded target projection and transform metadata                      |
 | `capability`       | Declarative Capability Pack manifest                                  |
 
-Schemas can exist before their behavior. Phase 6 enables agent request,
-completion, error, cancellation, and dedicated session resume exchanges after
-hello. A request has a nullable owned session, one of six explicit modules, and
-no connected-client features. A completion always contains non-empty
-`fallbackText`; conversation storage can leave its session null, and Phase 6
-emits an empty `structuredViews` array. Resume uses the authenticated server ID
-and player UUID for both exact and latest lookup, and all unavailable exact IDs
-share `SESSION_NOT_FOUND`. The implementation does not publish a view, call a
-tool, create a proposal, or load a capability.
+Schemas can exist before their behavior. Phase 5 enables agent request,
+completion, error, and cancellation after hello; Phase 6 adds dedicated session
+resume and explicit modules; Phase 7 adds the bounded read-tool exchange. A
+request has a nullable owned session, one of six explicit modules, and no
+connected-client features. A completion always contains non-empty
+`fallbackText`; conversation storage can leave its session null, and the current
+implementation emits an empty `structuredViews` array. Resume uses the
+authenticated server ID and player UUID for both exact and latest lookup, and
+all unavailable exact IDs share `SESSION_NOT_FOUND`.
+
+During a live query, Runtime may send one serial `tool.call` at a time and Paper
+returns one correlated `tool.result`. The result repeats session, player, tool,
+and sequence in addition to the envelope request ID and unique call ID. Runtime
+and Paper both apply the six-tool contract and module allowlist. Sequence is
+zero-based and protocol 1.0 permits `0..7`; an eighth completed call exhausts
+the loop and no ninth call is emitted. Failed/rejected results require
+`result: null`, while a successful result requires typed object data and fixed
+source/trust provenance. The implementation still does not publish a structured
+view, create a proposal, or load a capability.
 
 ## Client views
 

@@ -264,6 +264,13 @@ export class PaperHandshakeService {
         this.#agentRequests.cancel(message.cancellation.requestId, message.cancellation.playerUuid);
         return;
       }
+      if (message.type === "tool.result") {
+        const outcome = this.#agentRequests.acceptToolResult(message.requestId, message.result);
+        if (outcome === "violation") {
+          throw new ApplicationProtocolFailure("APPLICATION_MESSAGE_INVALID");
+        }
+        return;
+      }
       const requestId =
         message.type === "session.resume" ? message.resume.requestId : message.request.requestId;
       const respond = (terminal: Parameters<ApplicationEnvelopeProtocol["createResponse"]>[1]) => {

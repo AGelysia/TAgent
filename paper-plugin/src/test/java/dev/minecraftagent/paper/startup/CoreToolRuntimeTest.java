@@ -1,7 +1,6 @@
 package dev.minecraftagent.paper.startup;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -11,11 +10,11 @@ import org.junit.jupiter.api.Test;
 
 class CoreToolRuntimeTest {
   @Test
-  void initializesAllPinnedReadOnlyClosedDescriptorsWithoutExecution() throws Exception {
+  void initializesAllPinnedReadOnlyClosedExecutableDescriptors() throws Exception {
     var runtime = CoreToolRuntime.initializeDefaults();
 
     assertTrue(runtime.ready());
-    assertFalse(runtime.executionAvailable());
+    assertTrue(runtime.executionAvailable());
     assertEquals(CoreToolRuntime.REQUIRED_TOOL_IDS, descriptorIds(runtime.descriptors()));
     assertTrue(
         runtime.descriptors().stream()
@@ -23,7 +22,7 @@ class CoreToolRuntimeTest {
                 descriptor ->
                     descriptor.accessMode() == CoreToolDescriptor.AccessMode.READ
                         && descriptor.schemaClosed()
-                        && !descriptor.executionCapable()));
+                        && descriptor.executionCapable()));
     assertThrows(
         UnsupportedOperationException.class,
         () -> runtime.descriptors().add(runtime.descriptors().getFirst()));
@@ -47,10 +46,10 @@ class CoreToolRuntimeTest {
         0, new CoreToolDescriptor(first.id(), CoreToolDescriptor.AccessMode.WRITE, true, false));
     assertCode(StartupFailure.Code.CORE_TOOL_UNSAFE, writable);
 
-    var executable = new ArrayList<>(defaults);
-    executable.set(
-        0, new CoreToolDescriptor(first.id(), CoreToolDescriptor.AccessMode.READ, true, true));
-    assertCode(StartupFailure.Code.CORE_TOOL_UNSAFE, executable);
+    var nonExecutable = new ArrayList<>(defaults);
+    nonExecutable.set(
+        0, new CoreToolDescriptor(first.id(), CoreToolDescriptor.AccessMode.READ, true, false));
+    assertCode(StartupFailure.Code.CORE_TOOL_UNSAFE, nonExecutable);
 
     var unknown = new ArrayList<>(defaults);
     unknown.add(

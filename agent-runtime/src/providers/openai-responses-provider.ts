@@ -17,6 +17,8 @@ import {
 const OPENAI_API_ROOT = "https://api.openai.com/v1";
 const MAXIMUM_PROVIDER_RESPONSE_BYTES = 1024 * 1024;
 const MAXIMUM_FALLBACK_TEXT_LENGTH = 8192;
+const MAXIMUM_TOOL_ARGUMENT_CHARACTERS = 16 * 1024;
+const PROVIDER_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/u;
 
 type FetchImplementation = (
   input: string | URL | globalThis.Request,
@@ -33,26 +35,66 @@ const healthResponseSchema = z
   })
   .loose();
 
+const assistantMessageSchema = z
+  .object({
+    id: z.string().min(1).max(256).optional(),
+    type: z.literal("message"),
+    role: z.literal("assistant"),
+    content: z
+      .array(
+        z
+          .object({
+            type: z.string().min(1).max(64),
+            text: z.string().max(8192).optional(),
+          })
+          .loose(),
+      )
+      .max(64),
+  })
+  .loose();
+
+const functionCallSchema = z
+  .object({
+    id: z.string().min(1).max(256).optional(),
+    type: z.literal("function_call"),
+    call_id: z.string().min(1).max(256),
+    name: z.string().regex(PROVIDER_TOOL_NAME),
+    arguments: z.string().max(MAXIMUM_TOOL_ARGUMENT_CHARACTERS),
+    status: z.enum(["in_progress", "completed", "incomplete"]).optional(),
+  })
+  .loose();
+
+const reasoningItemSchema = z
+  .object({
+    id: z.string().min(1).max(256),
+    type: z.literal("reasoning"),
+    encrypted_content: z.string().max(MAXIMUM_PROVIDER_RESPONSE_BYTES).optional(),
+    summary: z
+      .array(z.object({ type: z.literal("summary_text"), text: z.string().max(8192) }).strict())
+      .max(16),
+  })
+  .loose();
+
+const functionCallOutputSchema = z
+  .object({
+    type: z.literal("function_call_output"),
+    call_id: z.string().min(1).max(256),
+    output: z.string().min(1).max(MAXIMUM_PROVIDER_RESPONSE_BYTES),
+  })
+  .strict();
+
+const continuationItemSchema = z.union([
+  assistantMessageSchema,
+  functionCallSchema,
+  functionCallOutputSchema,
+  reasoningItemSchema,
+]);
+
 const providerResponseSchema = z
   .object({
-    output: z.array(
-      z
-        .object({
-          type: z.string(),
-          role: z.string().optional(),
-          content: z
-            .array(
-              z
-                .object({
-                  type: z.string(),
-                  text: z.string().optional(),
-                })
-                .loose(),
-            )
-            .optional(),
-        })
-        .loose(),
-    ),
+    output: z
+      .array(z.union([assistantMessageSchema, functionCallSchema, reasoningItemSchema]))
+      .max(64),
     usage: z
       .object({
         input_tokens: z.number().int().nonnegative(),
@@ -62,6 +104,76 @@ const providerResponseSchema = z
       .optional(),
   })
   .loose();
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function toolArguments(source: string): Readonly<Record<string, unknown>> {
+  let parsed: unknown;
+  try {
+    parsed = parseStrictJson(source, { maximumDepth: 16, maximumTokens: 2048 });
+  } catch {
+    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+  }
+  if (!isRecord(parsed)) {
+    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+  }
+  return parsed;
+}
+
+function continuationItems(
+  request: ModelGenerationRequest,
+): readonly Readonly<Record<string, unknown>>[] {
+  const continuation = request.continuation;
+  const toolOutput = request.toolOutput;
+  if ((continuation === undefined) !== (toolOutput === undefined)) {
+    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+  }
+  if (continuation === undefined || toolOutput === undefined) {
+    return [];
+  }
+  if (continuation.provider !== "openai") {
+    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+  }
+
+  const parsedItems = continuation.items.map((item) => continuationItemSchema.safeParse(item));
+  if (parsedItems.some((item) => !item.success)) {
+    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+  }
+  const calls = parsedItems
+    .filter((item) => item.success && item.data.type === "function_call")
+    .map((item) => item.data);
+  const pending = calls.at(-1);
+  if (pending?.call_id !== toolOutput.providerCallId) {
+    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+  }
+  return [
+    ...continuation.items,
+    {
+      type: "function_call_output",
+      call_id: toolOutput.providerCallId,
+      output: toolOutput.output,
+    },
+  ];
+}
+
+function providerTools(request: ModelGenerationRequest): readonly Record<string, unknown>[] {
+  const names = new Set<string>();
+  return (request.tools ?? []).map((tool) => {
+    if (!PROVIDER_TOOL_NAME.test(tool.providerName) || names.has(tool.providerName)) {
+      throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+    }
+    names.add(tool.providerName);
+    return {
+      type: "function",
+      name: tool.providerName,
+      description: tool.description,
+      parameters: tool.parameters,
+      strict: true,
+    };
+  });
+}
 
 function authorization(apiKey: string): string {
   return `Bearer ${apiKey}`;
@@ -232,6 +344,8 @@ export class OpenAiResponsesProvider implements ModelProvider {
 
   public async generate(request: ModelGenerationRequest): Promise<ModelGenerationResult> {
     let response: Response;
+    const priorItems = continuationItems(request);
+    const tools = providerTools(request);
     try {
       response = await this.#fetch(`${OPENAI_API_ROOT}/responses`, {
         method: "POST",
@@ -244,11 +358,13 @@ export class OpenAiResponsesProvider implements ModelProvider {
         body: JSON.stringify({
           model: request.model,
           instructions: request.instructions,
-          input: request.input,
+          input: [...request.input, ...priorItems],
           max_output_tokens: request.maxOutputTokens,
           store: false,
-          tools: [],
-          tool_choice: "none",
+          tools,
+          tool_choice: tools.length === 0 ? "none" : "auto",
+          parallel_tool_calls: false,
+          include: ["reasoning.encrypted_content"],
         }),
       });
     } catch {
@@ -268,25 +384,84 @@ export class OpenAiResponsesProvider implements ModelProvider {
       throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
     }
 
-    const fallbackText = boundedFallbackText(
-      parsed.data.output
-        .filter((item) => item.type === "message" && item.role === "assistant")
-        .flatMap((item) => item.content ?? [])
-        .filter((content) => content.type === "output_text")
-        .map((content) => content.text ?? "")
-        .join(""),
-    );
+    const calls = parsed.data.output.filter((item) => item.type === "function_call");
+    if (calls.length > 1 || (tools.length === 0 && calls.length !== 0)) {
+      throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+    }
     const usage = parsed.data.usage;
-    return {
-      fallbackText,
-      ...(usage === undefined
+    const generationUsage =
+      usage === undefined
         ? {}
         : {
             usage: {
               inputTokens: usage.input_tokens,
               outputTokens: usage.output_tokens,
             },
-          }),
+          };
+    const call = calls[0];
+    if (call !== undefined) {
+      if (call.status !== undefined && call.status !== "completed") {
+        throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+      }
+      const allowedNames = new Set(tools.map((tool) => String(tool["name"])));
+      if (!allowedNames.has(call.name)) {
+        throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+      }
+      const currentContinuation = parsed.data.output.map((item) => {
+        if (item.type === "function_call") {
+          return {
+            ...(item.id === undefined ? {} : { id: item.id }),
+            type: item.type,
+            call_id: item.call_id,
+            name: item.name,
+            arguments: item.arguments,
+            ...(item.status === undefined ? {} : { status: item.status }),
+          };
+        }
+        if (item.type === "reasoning") {
+          return {
+            id: item.id,
+            type: item.type,
+            summary: item.summary,
+            ...(item.encrypted_content === undefined
+              ? {}
+              : { encrypted_content: item.encrypted_content }),
+          };
+        }
+        return {
+          ...(item.id === undefined ? {} : { id: item.id }),
+          type: item.type,
+          role: item.role,
+          content: item.content.map((content) => ({
+            type: content.type,
+            ...(content.text === undefined ? {} : { text: content.text }),
+          })),
+        };
+      });
+      return {
+        type: "tool_call",
+        providerCallId: call.call_id,
+        providerName: call.name,
+        arguments: toolArguments(call.arguments),
+        continuation: {
+          provider: "openai",
+          items: [...priorItems, ...currentContinuation],
+        },
+        ...generationUsage,
+      };
+    }
+
+    const fallbackText = boundedFallbackText(
+      parsed.data.output
+        .flatMap((item) => (item.type === "message" ? item.content : []))
+        .filter((content) => content.type === "output_text")
+        .map((content) => content.text ?? "")
+        .join(""),
+    );
+    return {
+      type: "final",
+      fallbackText,
+      ...generationUsage,
     };
   }
 }

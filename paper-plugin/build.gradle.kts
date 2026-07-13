@@ -29,6 +29,7 @@ dependencies {
     testImplementation(libs.java.websocket)
     testImplementation(libs.json.schema.validator)
     testImplementation(libs.junit.jupiter)
+    testImplementation(libs.mockito)
     testImplementation(libs.paper.api)
     testImplementation(libs.snakeyaml)
     testRuntimeOnly(libs.junit.platform.launcher)

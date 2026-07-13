@@ -5,6 +5,8 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import dev.minecraftagent.paper.request.AgentModule;
+import dev.minecraftagent.paper.tool.ReadToolCall;
+import dev.minecraftagent.paper.tool.ReadToolResult;
 import dev.minecraftagent.paper.transport.RuntimeConnectionFailure;
 import dev.minecraftagent.paper.transport.StrictJson;
 import java.nio.CharBuffer;
@@ -49,6 +51,9 @@ public final class AgentProtocolCodec {
   private static final Set<String> ERROR_FIELDS =
       Set.of("playerUuid", "code", "fallbackText", "retryable");
   private static final Set<String> SESSION_RESUMED_FIELDS = Set.of("sessionId", "playerUuid");
+  private static final Set<String> TOOL_CALL_FIELDS =
+      Set.of("toolCallId", "sessionId", "playerUuid", "module", "tool", "arguments", "sequence");
+  private static final Pattern TOOL_ID = Pattern.compile("[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+");
 
   private final String serverId;
   private final SecureRandom secureRandom;
@@ -130,6 +135,80 @@ public final class AgentProtocolCodec {
     return encodeEnvelope(newMessageId(requestId), requestId, "agent.cancel", payload);
   }
 
+  public String encodeToolResult(UUID requestId, ReadToolCall call, ReadToolResult toolResult) {
+    Objects.requireNonNull(requestId);
+    Objects.requireNonNull(call);
+    Objects.requireNonNull(toolResult);
+    try {
+      return encodeToolResultPayload(requestId, call, toolResult);
+    } catch (RuntimeConnectionFailure failure) {
+      if (!"APPLICATION_MESSAGE_TOO_LARGE".equals(failure.code())
+          || toolResult.status() != ReadToolResult.Status.SUCCEEDED) {
+        throw failure;
+      }
+      return encodeToolResultPayload(
+          requestId,
+          call,
+          ReadToolResult.failed(
+              call.tool().startsWith("server.recipe.")
+                  ? ReadToolResult.Source.SERVER_REGISTRY
+                  : ReadToolResult.Source.PAPER_API,
+              "TOOL_RESULT_TOO_LARGE",
+              "The tool result exceeded the application frame limit.",
+              false));
+    }
+  }
+
+  private String encodeToolResultPayload(
+      UUID requestId, ReadToolCall call, ReadToolResult toolResult) {
+    var payload = new JsonObject();
+    payload.addProperty("toolCallId", call.toolCallId().toString());
+    payload.addProperty("sessionId", call.sessionId().toString());
+    payload.addProperty("playerUuid", call.playerUuid().toString());
+    payload.addProperty("tool", call.tool());
+    payload.addProperty("sequence", call.sequence());
+    payload.addProperty("status", toolResult.status().protocolName());
+    payload.addProperty("source", toolResult.source().protocolName());
+    payload.addProperty("trust", toolResult.trust().protocolName());
+    if (toolResult.result() == null) {
+      payload.add("result", JsonNull.INSTANCE);
+    } else {
+      payload.add("result", toolResult.result().deepCopy());
+    }
+    if (toolResult.error() == null) {
+      payload.add("error", JsonNull.INSTANCE);
+    } else {
+      var error = new JsonObject();
+      error.addProperty("code", toolResult.error().code());
+      error.addProperty("message", toolResult.error().message());
+      error.addProperty("retryable", toolResult.error().retryable());
+      payload.add("error", error);
+    }
+    // Runtime's strict JSON scanner accepts 4096 structural tokens for the full envelope.
+    if (toolResult.status() == ReadToolResult.Status.SUCCEEDED && jsonTokens(payload) > 3500) {
+      throw failure("APPLICATION_MESSAGE_TOO_LARGE");
+    }
+    return encodeEnvelope(newMessageId(requestId), requestId, "tool.result", payload);
+  }
+
+  private static int jsonTokens(JsonElement value) {
+    if (value.isJsonObject()) {
+      var total = 1;
+      for (var entry : value.getAsJsonObject().entrySet()) {
+        total = Math.addExact(total, 1 + jsonTokens(entry.getValue()));
+      }
+      return total;
+    }
+    if (value.isJsonArray()) {
+      var total = 1;
+      for (var element : value.getAsJsonArray()) {
+        total = Math.addExact(total, jsonTokens(element));
+      }
+      return total;
+    }
+    return 1;
+  }
+
   public InboundMessage decode(String source) {
     requireWireText(source);
     var root = StrictJson.parseObject(source, "PROTOCOL_MESSAGE_INVALID", "application-protocol");
@@ -162,6 +241,7 @@ public final class AgentProtocolCodec {
       case "agent.complete" -> decodeCompletion(messageId, requestId, payload);
       case "agent.error" -> decodeError(messageId, requestId, payload);
       case "session.resumed" -> decodeSessionResumed(messageId, requestId, payload);
+      case "tool.call" -> decodeToolCall(messageId, requestId, payload);
       default -> throw failure("UNSUPPORTED_MESSAGE_TYPE");
     };
   }
@@ -196,6 +276,33 @@ public final class AgentProtocolCodec {
     requireFields(payload, SESSION_RESUMED_FIELDS);
     return new SessionResumed(
         messageId, requestId, uuid(payload, "sessionId"), uuid(payload, "playerUuid"));
+  }
+
+  private ToolCall decodeToolCall(UUID messageId, UUID requestId, JsonObject payload) {
+    requireFields(payload, TOOL_CALL_FIELDS);
+    var toolCallId = uuid(payload, "toolCallId");
+    var sessionId = uuid(payload, "sessionId");
+    var playerUuid = uuid(payload, "playerUuid");
+    var moduleName = string(payload, "module");
+    var module =
+        AgentModule.fromProtocolName(moduleName)
+            .filter(value -> value.protocolName().equals(moduleName))
+            .orElseThrow(AgentProtocolCodec::invalid);
+    var tool = string(payload, "tool");
+    if (tool.length() < 3 || tool.length() > 128 || !TOOL_ID.matcher(tool).matches()) {
+      throw invalid();
+    }
+    var arguments = object(payload, "arguments");
+    if (arguments.size() > 64) {
+      throw invalid();
+    }
+    var sequence = integer(payload, "sequence", 0, 7);
+    return new ToolCall(
+        messageId,
+        requestId,
+        playerUuid,
+        new ReadToolCall(
+            toolCallId, requestId, sessionId, playerUuid, module, tool, arguments, sequence));
   }
 
   private String encodeEnvelope(UUID messageId, UUID requestId, String type, JsonObject payload) {
@@ -306,6 +413,23 @@ public final class AgentProtocolCodec {
     return value.getAsBoolean();
   }
 
+  private static int integer(JsonObject object, String name, int minimum, int maximum) {
+    var value = object.get(name);
+    if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) {
+      throw invalid();
+    }
+    try {
+      var number = value.getAsBigDecimal();
+      var integer = number.intValueExact();
+      if (integer < minimum || integer > maximum) {
+        throw invalid();
+      }
+      return integer;
+    } catch (ArithmeticException error) {
+      throw invalid();
+    }
+  }
+
   private static UUID uuid(JsonObject object, String name) {
     return canonicalUuid(string(object, name));
   }
@@ -385,10 +509,12 @@ public final class AgentProtocolCodec {
     REQUEST_LIMITED,
     SESSION_NOT_FOUND,
     CONVERSATION_STORAGE_DISABLED,
+    TOOL_REJECTED,
+    TOOL_ROUND_LIMIT,
     RUNTIME_INTERNAL_ERROR
   }
 
-  public sealed interface InboundMessage permits Completion, AgentError, SessionResumed {
+  public sealed interface InboundMessage permits Completion, AgentError, SessionResumed, ToolCall {
     UUID messageId();
 
     UUID requestId();
@@ -410,6 +536,9 @@ public final class AgentProtocolCodec {
       implements InboundMessage {}
 
   public record SessionResumed(UUID messageId, UUID requestId, UUID sessionId, UUID playerUuid)
+      implements InboundMessage {}
+
+  public record ToolCall(UUID messageId, UUID requestId, UUID playerUuid, ReadToolCall call)
       implements InboundMessage {}
 
   private static final class ReplayWindow {

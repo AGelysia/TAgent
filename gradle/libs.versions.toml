@@ -8,6 +8,7 @@ json-schema-validator = "1.5.9"
 junit = "5.14.4"
 loom = "1.17.13"
 minecraft = "1.21.11"
+mockito = "5.18.0"
 paper = "1.21.11-R0.1-SNAPSHOT"
 spotless = "8.8.0"
 
@@ -19,6 +20,7 @@ junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
 junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
 minecraft = { module = "com.mojang:minecraft", version.ref = "minecraft" }
+mockito = { module = "org.mockito:mockito-core", version.ref = "mockito" }
 paper-api = { module = "io.papermc.paper:paper-api", version.ref = "paper" }
 gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
 java-websocket = { module = "org.java-websocket:Java-WebSocket", version.ref = "java-websocket" }

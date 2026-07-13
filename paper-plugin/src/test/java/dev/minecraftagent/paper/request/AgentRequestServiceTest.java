@@ -10,6 +10,10 @@ import com.google.gson.JsonParser;
 import dev.minecraftagent.paper.lifecycle.AgentState;
 import dev.minecraftagent.paper.lifecycle.OfflineReason;
 import dev.minecraftagent.paper.lifecycle.OperationalGate;
+import dev.minecraftagent.paper.tool.ReadToolCall;
+import dev.minecraftagent.paper.tool.ReadToolExecutor;
+import dev.minecraftagent.paper.tool.ReadToolRegistry;
+import dev.minecraftagent.paper.tool.ReadToolResult;
 import dev.minecraftagent.paper.transport.AuthenticatedRuntimeConnection;
 import java.time.Duration;
 import java.time.Instant;
@@ -320,6 +324,109 @@ class AgentRequestServiceTest {
         fixture.service.submit(UUID.randomUUID(), "one too many"));
   }
 
+  @Test
+  void toolCallIsAnIntermediateBoundRoundAndCompletionMayFollowImmediately() {
+    var tools = new ManualTools();
+    var fixture = new Fixture(tools);
+    var playerId = UUID.randomUUID();
+    var sessionId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Where am I?");
+    var request = fixture.connection.sent.getFirst();
+
+    fixture.connection.deliver(
+        toolCall(
+            request, playerId, sessionId, "general", "player.context.read", new JsonObject(), 0));
+    assertEquals(1, tools.calls.size());
+    assertEquals(1, fixture.connection.sent.size());
+
+    var result = new JsonObject();
+    result.addProperty("online", true);
+    tools.complete(ReadToolResult.succeeded(ReadToolResult.Source.PAPER_API, result));
+    assertEquals("tool.result", object(fixture.connection.sent.get(1)).get("type").getAsString());
+
+    fixture.connection.deliver(completion(request, playerId, "You are online.", sessionId));
+    fixture.main.drain();
+    assertTrue(fixture.connection.isOpen());
+    assertEquals(List.of(playerId + ":You are online."), fixture.replies);
+  }
+
+  @Test
+  void unknownToolIsRejectedWithoutExecutionAndConsumesTheRound() {
+    var tools = new ManualTools();
+    var fixture = new Fixture(tools);
+    var playerId = UUID.randomUUID();
+    var sessionId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Run something");
+    var request = fixture.connection.sent.getFirst();
+
+    fixture.connection.deliver(
+        toolCall(
+            request,
+            playerId,
+            sessionId,
+            "general",
+            "server.command.execute",
+            new JsonObject(),
+            0));
+
+    assertTrue(tools.calls.isEmpty());
+    var result = object(fixture.connection.sent.get(1));
+    assertEquals("tool.result", result.get("type").getAsString());
+    assertEquals("rejected", result.getAsJsonObject("payload").get("status").getAsString());
+    assertEquals(
+        "TOOL_UNKNOWN",
+        result.getAsJsonObject("payload").getAsJsonObject("error").get("code").getAsString());
+  }
+
+  @Test
+  void timeoutDropsAQueuedToolResultAndItsLateCompletion() {
+    var tools = new ManualTools();
+    var fixture = new Fixture(tools);
+    var playerId = UUID.randomUUID();
+    var sessionId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Slow tool");
+    var request = fixture.connection.sent.getFirst();
+    fixture.connection.deliver(
+        toolCall(request, playerId, sessionId, "general", "server.info.read", new JsonObject(), 0));
+
+    fixture.timeouts.fire();
+    tools.complete(ReadToolResult.succeeded(ReadToolResult.Source.PAPER_API, new JsonObject()));
+
+    assertEquals(
+        List.of("agent.request", "agent.cancel"),
+        fixture.connection.sent.stream()
+            .map(AgentRequestServiceTest::object)
+            .map(message -> message.get("type").getAsString())
+            .toList());
+  }
+
+  @Test
+  void offlineCancelsAnActiveToolExecutionAndDropsItsLateCompletion() {
+    var tools = new ManualTools();
+    var fixture = new Fixture(tools);
+    var playerId = UUID.randomUUID();
+    var sessionId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Slow tool");
+    var request = fixture.connection.sent.getFirst();
+    fixture.connection.deliver(
+        toolCall(request, playerId, sessionId, "general", "server.info.read", new JsonObject(), 0));
+
+    assertFalse(tools.pending.isCancelled());
+    fixture.gate.transitionTo(AgentState.STOPPING);
+    fixture.service.quiesce(fixture.gate.epoch(), OfflineReason.MANUAL);
+
+    assertTrue(tools.pending.isCancelled());
+    assertEquals(
+        List.of("agent.request", "agent.cancel"),
+        fixture.connection.sent.stream()
+            .map(AgentRequestServiceTest::object)
+            .map(message -> message.get("type").getAsString())
+            .toList());
+    assertFalse(
+        tools.pending.complete(
+            ReadToolResult.succeeded(ReadToolResult.Source.PAPER_API, new JsonObject())));
+  }
+
   private static JsonObject completion(
       String requestEnvelope, UUID playerId, String fallbackText, UUID sessionId) {
     var request = object(requestEnvelope);
@@ -348,6 +455,25 @@ class AgentRequestServiceTest {
                 UUID.randomUUID().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8)));
     response.add("payload", payload);
     return response;
+  }
+
+  private static JsonObject toolCall(
+      String requestEnvelope,
+      UUID playerId,
+      UUID sessionId,
+      String module,
+      String tool,
+      JsonObject arguments,
+      int sequence) {
+    var payload = new JsonObject();
+    payload.addProperty("toolCallId", UUID.randomUUID().toString());
+    payload.addProperty("sessionId", sessionId.toString());
+    payload.addProperty("playerUuid", playerId.toString());
+    payload.addProperty("module", module);
+    payload.addProperty("tool", tool);
+    payload.add("arguments", arguments);
+    payload.addProperty("sequence", sequence);
+    return response(requestEnvelope, "tool.call", payload);
   }
 
   private static JsonObject sessionResumed(String requestEnvelope, UUID playerId, UUID sessionId) {
@@ -397,17 +523,48 @@ class AgentRequestServiceTest {
     private final List<String> replies = new ArrayList<>();
     private final List<String> events = new ArrayList<>();
     private final FakeConnection connection = new FakeConnection();
-    private final AgentRequestService service =
-        new AgentRequestService(
-            gate,
-            Duration.ofSeconds(30),
-            timeouts,
-            main::execute,
-            (playerId, message) -> replies.add(playerId + ":" + message),
-            events::add);
+    private final AgentRequestService service;
 
     private Fixture() {
+      this(
+          call ->
+              CompletableFuture.completedFuture(
+                  ReadToolResult.failed(
+                      ReadToolResult.Source.PAPER_POLICY,
+                      "TOOL_EXECUTION_UNAVAILABLE",
+                      "Unavailable.",
+                      true)));
+    }
+
+    private Fixture(ReadToolExecutor tools) {
+      service =
+          new AgentRequestService(
+              gate,
+              Duration.ofSeconds(30),
+              timeouts,
+              main::execute,
+              (playerId, message) -> replies.add(playerId + ":" + message),
+              events::add,
+              new ReadToolRegistry(),
+              tools,
+              Runnable::run);
       service.attach(connection, SERVER_ID);
+    }
+  }
+
+  private static final class ManualTools implements ReadToolExecutor {
+    private final List<ReadToolCall> calls = new ArrayList<>();
+    private CompletableFuture<ReadToolResult> pending;
+
+    @Override
+    public CompletionStage<ReadToolResult> execute(ReadToolCall call) {
+      calls.add(call);
+      pending = new CompletableFuture<>();
+      return pending;
+    }
+
+    private void complete(ReadToolResult result) {
+      pending.complete(result);
     }
   }
 

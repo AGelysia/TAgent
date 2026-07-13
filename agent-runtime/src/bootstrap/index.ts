@@ -18,6 +18,7 @@ import {
   SqliteConversationRepository,
 } from "../storage/conversation-repository.js";
 import { migrateRuntimeStorage } from "../storage/migrations.js";
+import { ToolRegistry } from "../tools/tool-registry.js";
 import { registerPaperHandshakeRoute } from "../transport/paper-handshake.js";
 import { runtimeIdentity, type RuntimeIdentity } from "../version.js";
 
@@ -65,6 +66,20 @@ async function checkProtocolSchema(protocolRoot?: string): Promise<SchemaRegistr
       "envelope.schema.json",
       "session-resume.schema.json",
       "session-resumed.schema.json",
+      "tool-call.schema.json",
+      "tool-result.schema.json",
+      "tools/player-context-read-arguments.schema.json",
+      "tools/player-context-read-result.schema.json",
+      "tools/player-held-item-read-arguments.schema.json",
+      "tools/player-held-item-read-result.schema.json",
+      "tools/server-info-read-arguments.schema.json",
+      "tools/server-info-read-result.schema.json",
+      "tools/server-plugins-list-arguments.schema.json",
+      "tools/server-plugins-list-result.schema.json",
+      "tools/server-recipe-lookup-arguments.schema.json",
+      "tools/server-recipe-lookup-result.schema.json",
+      "tools/server-recipe-uses-arguments.schema.json",
+      "tools/server-recipe-uses-result.schema.json",
     ];
     if (requiredSchemas.some((schema) => !registry.schemaReferences.includes(schema))) {
       throw new Error("A required protocol schema alias is unavailable");
@@ -93,6 +108,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
 
     await checkLogDirectory(loaded.paths.rootDirectory, loaded.paths.logDirectory);
     const schemaRegistry = await checkProtocolSchema(options.protocolRoot);
+    const tools = new ToolRegistry(schemaRegistry);
     sqlite = await checkRuntimeSqlite(loaded.paths.rootDirectory, loaded.paths.sqlite);
     const storageNow = options.now?.() ?? new Date();
     let conversations: DisabledConversationRepository | SqliteConversationRepository;
@@ -130,6 +146,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
       provider,
       config: loaded.config,
       conversations,
+      tools,
       ...(options.now === undefined ? {} : { now: () => options.now?.().getTime() ?? Date.now() }),
     });
     app = createRuntimeApp();

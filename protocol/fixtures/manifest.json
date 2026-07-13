@@ -277,6 +277,33 @@
           "schema": "tool-call.schema.json",
           "documentPointer": "",
           "expectedValid": true
+        },
+        {
+          "schema": "tools/server-recipe-lookup-arguments.schema.json",
+          "documentPointer": "/arguments",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "envelope.tool-call.valid",
+      "category": "valid",
+      "file": "valid/envelope-tool-call.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        },
+        {
+          "schema": "tool-call.schema.json",
+          "documentPointer": "/payload",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/server-recipe-lookup-arguments.schema.json",
+          "documentPointer": "/payload/arguments",
+          "expectedValid": true
         }
       ]
     },
@@ -289,6 +316,184 @@
           "schema": "tool-result.schema.json",
           "documentPointer": "",
           "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "envelope.tool-result.valid",
+      "category": "valid",
+      "file": "valid/envelope-tool-result.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        },
+        {
+          "schema": "tool-result.schema.json",
+          "documentPointer": "/payload",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/server-recipe-lookup-result.schema.json",
+          "documentPointer": "/payload/result",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "tool-result.rejected-valid",
+      "category": "valid",
+      "file": "valid/tool-result-rejected.json",
+      "validations": [
+        {
+          "schema": "tool-result.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "core-tools.valid",
+      "category": "valid",
+      "file": "valid/core-tool-contracts.json",
+      "validations": [
+        {
+          "schema": "tools/player-context-read-arguments.schema.json",
+          "documentPointer": "/playerContext/arguments",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/player-context-read-result.schema.json",
+          "documentPointer": "/playerContext/result",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/player-held-item-read-arguments.schema.json",
+          "documentPointer": "/heldItem/arguments",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/player-held-item-read-result.schema.json",
+          "documentPointer": "/heldItem/result",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/server-info-read-arguments.schema.json",
+          "documentPointer": "/serverInfo/arguments",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/server-info-read-result.schema.json",
+          "documentPointer": "/serverInfo/result",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/server-plugins-list-arguments.schema.json",
+          "documentPointer": "/pluginsList/arguments",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/server-plugins-list-result.schema.json",
+          "documentPointer": "/pluginsList/result",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/server-recipe-lookup-arguments.schema.json",
+          "documentPointer": "/recipeLookup/arguments",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/server-recipe-lookup-result.schema.json",
+          "documentPointer": "/recipeLookup/result",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/server-recipe-uses-arguments.schema.json",
+          "documentPointer": "/recipeUses/arguments",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/server-recipe-uses-result.schema.json",
+          "documentPointer": "/recipeUses/result",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/server-recipe-lookup-result.schema.json",
+          "documentPointer": "/emptyRecipeLookupResult",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "tool-call.sequence-eight-invalid",
+      "category": "invalid_range",
+      "file": "invalid/tool-call-sequence-eight.json",
+      "validations": [
+        {
+          "schema": "tool-call.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "tool-result.failure-with-result-invalid",
+      "category": "invalid_state",
+      "file": "invalid/tool-result-failure-with-result.json",
+      "validations": [
+        {
+          "schema": "tool-result.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "tool-result.missing-correlation-invalid",
+      "category": "invalid_field",
+      "file": "invalid/tool-result-missing-correlation.json",
+      "validations": [
+        {
+          "schema": "tool-result.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "player-context.extra-argument-invalid",
+      "category": "invalid_field",
+      "file": "invalid/player-context-read-extra-argument.json",
+      "validations": [
+        {
+          "schema": "tools/player-context-read-arguments.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "recipe-lookup.extra-argument-invalid",
+      "category": "invalid_field",
+      "file": "invalid/recipe-lookup-extra-argument.json",
+      "validations": [
+        {
+          "schema": "tools/server-recipe-lookup-arguments.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "recipe-lookup.plain-text-result-invalid",
+      "category": "invalid_type",
+      "file": "invalid/recipe-lookup-result-plain-text.json",
+      "validations": [
+        {
+          "schema": "tools/server-recipe-lookup-result.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
         }
       ]
     },

@@ -4,8 +4,8 @@ Last updated: 2026-07-13
 
 ## Current status
 
-Phase 0 through Phase 6 are complete. Phase 7 typed read-only tools and the
-Runtime tool loop are next.
+Phase 0 through Phase 7 are complete. Phase 8 permissions and server-owned
+proposals are next.
 
 ## Locked decisions
 
@@ -50,6 +50,14 @@ Runtime tool loop are next.
   session, and ordinary `/agent say` always returns to `general`.
 - Conversation storage is controlled by `privacy.storeConversations`. Disabled
   storage persists no prompts or completions and makes resume unavailable.
+- Protocol 1.0 permits one in-flight Tool Call and sequences at most eight
+  calls as `0..7`. Runtime owns the provider loop; Paper owns the executable
+  catalog and repeats policy before every fixed adapter.
+- Privacy-disabled requests use an ephemeral tool-correlation Session UUID but
+  still return a null completion Session and write no conversation content.
+- Recipe results are typed bounded snapshots. Registry scans are split across
+  ticks and preserve real recipe variants, layouts, ingredient choices, item
+  stacks, processing metadata, and available remaining items.
 
 ## Phase 0: repository scaffold
 
@@ -135,7 +143,7 @@ Completed:
       reference, checks Java/Minecraft compatibility, and rejects unsafe policy,
       paths, permissions, symlinks, state probes, and core descriptors.
 - [x] Six closed, read-only, non-executable core descriptors satisfy the Phase 3
-      readiness check. Typed tool adapters and invocation remain Phase 7.
+      readiness check. Phase 7 later binds those descriptors to fixed adapters.
 - [x] Missing or invalid optional capability storage produces
       `OPTIONAL_CAPABILITY_UNAVAILABLE` and `DEGRADED` without blocking command
       registration. Capability Pack loading remains Phase 9.
@@ -246,6 +254,43 @@ Completed:
       returns nullable completion sessions, and rejects resume explicitly while
       ordinary private questions continue to work.
 
+## Phase 7: bounded read-only tool loop
+
+Completed:
+
+- [x] Shared `tool.call` and `tool.result` contracts strongly correlate request,
+      session, player, tool, sequence, and call ID. Successful and failed result
+      states are mutually exclusive and carry explicit source/trust labels.
+- [x] Six closed argument/result Schema pairs cover player context, held items,
+      server metadata, plugins, recipe lookup, and recipe usage. Empty recipe
+      matches are valid typed results.
+- [x] Runtime publishes only the current module's registered tools through
+      provider-safe function names and strict schemas, then reapplies the full
+      shared argument Schema before Paper traffic.
+- [x] The OpenAI Responses adapter supports serial function calls with provider
+      storage disabled, preserves bounded assistant/reasoning/call output, and
+      returns correlated function output without trusting provider call IDs as
+      wire identities.
+- [x] The loop allows one call in flight, consumes at most eight sequence slots,
+      gives the model a tool-disabled final turn at the configured limit, and
+      shares one timeout/cancellation signal across every provider/tool round.
+- [x] Runtime rejects unknown, module-disallowed, malformed, mismatched, or
+      provenance-invalid calls/results. Cancellation, disconnect, and timeout
+      suppress late results and never commit a partial conversation exchange.
+- [x] Paper independently repeats live request, player, session, module,
+      sequence, unique call ID, permission, connection, and Online-epoch checks.
+      Invalid registered-tool requests return a typed policy rejection.
+- [x] Bukkit reads are scheduled on the primary thread without blocking the
+      WebSocket thread. Recipe scans use bounded per-tick slices and cancellable
+      futures rather than scanning the complete registry in one tick.
+- [x] Recipe adapters preserve shaped, shapeless, cooking, stonecutting,
+      smithing transform/trim, and transmute layouts plus IngredientChoice,
+      ItemStack, processing, source, and remaining-item data. Unsupported
+      plugin recipes remain explicit instead of becoming model-authored text.
+- [x] Tool results enforce both the 64 KiB application frame and Runtime's JSON
+      structural-token budget; an oversized success becomes a bounded typed
+      failure.
+
 ## Verification
 
 Verified serially on 2026-07-13:
@@ -265,19 +310,20 @@ cd ..
 
 Results:
 
-- Runtime: 12 Vitest files, 90 tests passed; TypeScript build, ESLint, and
+- Runtime: 13 Vitest files, 101 tests passed; TypeScript build, ESLint, and
   Prettier passed; full and production-only npm audits reported 0
   vulnerabilities.
-- Paper: build and Spotless passed; 172 tests passed, including 53 shared dynamic
+- Paper: build and Spotless passed; 197 tests passed, including 63 shared dynamic
   Schema/HMAC cases plus strict desired-state parsing/atomic persistence,
   operational epoch invalidation, Owner/OP/console authorization, cancellable
   real-WebSocket handshake/application exchange, provider request correlation,
   cancellation/timeout/late-response races, lifecycle/persistence races,
-  session selection/resume binding, explicit module routing, command-map
-  transactions, private reply gating, exact Offline output, doctor output, and
-  descriptor tests.
-- Fabric: remapped JAR build and Spotless passed; 54 tests passed, including the
-  same 53 shared protocol cases plus client metadata.
+  session selection/resume binding, explicit module routing, fixed read-tool
+  policy and correlation, typed Bukkit recipe mapping, malformed recipe
+  isolation, output-budget downgrade, command-map transactions, private reply
+  gating, exact Offline output, doctor output, and descriptor tests.
+- Fabric: remapped JAR build and Spotless passed; 64 tests passed, including the
+  same 63 shared protocol cases plus client metadata.
 - Both JVM reports contain no remote Schema load, `UnknownHostException`,
   invalid-schema error, skipped test, or failed test.
 - Paper `1.21.11-132` JAR SHA-256
@@ -291,38 +337,42 @@ Results:
   exception-free plugin disable. No Paper, Runtime, or
   Gradle process remained.
 - Packaged Runtime preserved its compiled authenticated application endpoint,
-  OpenAI provider, migrations, session/message repository, context reducer,
-  Module Manifest, configuration template, and session protocol schemas.
+  OpenAI tool-loop provider, migrations, session/message repository, context
+  reducer, Module Manifest, fixed Tool Registry, configuration template, and
+  all shared read-tool schemas. The Paper JAR contains the fixed registry,
+  Bukkit adapters, and the same tool schemas.
 - All protocol JSON files parse successfully; Bash scripts pass `bash -n`.
 
 PowerShell scripts were reviewed for native exit-code propagation but were not
 executed because `pwsh` is unavailable on this Linux host. A graphical Fabric
-client, a real online player executing `/agent say`, and Litematica were not
-started. Ordinary-player UUID binding, primary-thread private reply, no
-broadcast, timeout, and concurrent-request behavior are covered by JVM tests;
-the pinned smoke only proves that Console cannot enter the model path. Resume
-ownership, one-shot modules, nullable storage mode, session correlation, and
-command permissions are covered by JVM/Runtime tests. Gradle
-reports Loom-originated deprecation warnings for future
-Gradle 10 compatibility, but both builds pass on the locked Gradle 9.5.1
-wrapper. Node emits its documented ExperimentalWarning when the built-in SQLite
-module is loaded; it is not suppressed.
+client, a real online player executing `/agent say`, a live OpenAI tool call,
+and Litematica were not started. Ordinary-player UUID binding, primary-thread
+private reply, no broadcast, timeout, concurrent-request behavior, provider
+function-call continuation, and typed Paper tool execution are covered by
+JVM/Runtime tests; the pinned smoke only proves that Console cannot enter the
+model path. Resume ownership, one-shot modules, nullable storage mode, session
+correlation, and command permissions are covered by JVM/Runtime tests. Gradle
+reports Loom-originated deprecation warnings for future Gradle 10 compatibility,
+but both builds pass on the locked Gradle 9.5.1 wrapper. Node emits its
+documented ExperimentalWarning when the built-in SQLite module is loaded; it is
+not suppressed.
 
 ## Explicitly not implemented
 
 - Heartbeat or automatic reconnect. Phase 5 recovery still creates a fresh
   authenticated connection only after explicit `/agent on`.
-- Proposal repositories, executable tools, and client transfers. The request
-  cleanup port is live; proposal, operation, and client-state ports remain empty.
+- Proposal repositories, write-capable or external-command tools, and client
+  transfers. The request and fixed read-tool paths are live; proposal,
+  write-operation, and client-state ports remain empty.
 - Paper conversation repositories; Paper retains only a transient current
   session selection. Runtime owns the conversation database exclusively.
 - Durable rate accounting, token/cost accounting, or monthly budget
   enforcement.
-- Tool registry/execution, policy enforcement, proposals, confirmation, or
-  audit persistence.
+- Write-tool policy, proposals, confirmation, or audit persistence.
 - Capability Pack discovery, approval, reload, or command execution.
 - Client custom payload networking, overlay UI, item rendering, or preferences.
-- Recipe, guide, locate, project, build, world mutation, or Litematica behavior.
+- Structured recipe client views, locate/project/build behavior, world mutation,
+  or Litematica behavior. The recipe tools expose server data only to the model.
 - Full build-preview logical validation: strict single-member gzip framing,
   RFC 8785 content/Palette canonicalization, geometry, block count,
   base-region hash, and change-policy checks. These remain mandatory Phase 10
@@ -334,11 +384,12 @@ The presence of a schema does not mark the corresponding feature implemented.
 
 ### Provider boundary
 
-Phase 6 supplies one fixed OpenAI Responses adapter with safe status mapping,
-bounded bodies, timeout/cancellation, and no prompt/completion logging. It does
-not retry, stream, rotate providers, persist usage, or enforce the configured
-monthly budget. Provider account-side retention and policy remain an operator
-responsibility even though requests set `store: false`.
+Phase 7 supplies one fixed OpenAI Responses adapter with safe status mapping,
+bounded bodies, a serial strict-function loop, timeout/cancellation, and no
+prompt/completion logging. It does not retry, stream, rotate providers, persist
+usage, or enforce the configured monthly budget. Provider account-side
+retention and policy remain an operator responsibility even though requests set
+`store: false`.
 
 ### Node SQLite stability
 
@@ -379,8 +430,8 @@ adapter.
 
 ## Next gates
 
-1. Implement the Phase 7 Runtime tool loop and Paper-authoritative typed
-   read-only tools without broadening the generic execution surface.
+1. Implement Phase 8 server-owned proposals, expiry, argument hashes, live OP
+   revalidation, and redacted audit records before any write tool is enabled.
 2. Add durable usage/cost accounting before treating daily/monthly limits as
    restart-stable budgets.
 3. Add a real online-player integration lane for private `/agent say` delivery

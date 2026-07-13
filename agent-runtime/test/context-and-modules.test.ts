@@ -43,10 +43,18 @@ describe("context windows and module manifests", () => {
     ).toEqual([{ role: "user", content: "current-is-always-kept" }]);
   });
 
-  it("defines exactly the six explicit one-shot module prompts with no Phase 6 tools", () => {
+  it("defines six one-shot module prompts with fixed read-only Tool allowlists", () => {
     const registry = new ModuleRegistry();
     expect(registry.list().map((manifest) => manifest.id)).toEqual(moduleIds);
-    expect(registry.list().every((manifest) => manifest.toolAllowlist.length === 0)).toBe(true);
+    expect(registry.get("recipe").toolAllowlist).toEqual([
+      "player.held_item.read",
+      "server.recipe.lookup",
+      "server.recipe.uses",
+    ]);
+    expect(registry.get("locate").toolAllowlist).toEqual([
+      "player.context.read",
+      "server.info.read",
+    ]);
     expect(new Set(registry.list().map((manifest) => manifest.instructions)).size).toBe(
       moduleIds.length,
     );

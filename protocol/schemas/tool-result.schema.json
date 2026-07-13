@@ -4,11 +4,41 @@
   "title": "Minecraft Agent Tool Result Payload",
   "type": "object",
   "additionalProperties": false,
-  "required": ["toolCallId", "status", "source", "trust", "result", "error"],
+  "required": [
+    "toolCallId",
+    "sessionId",
+    "playerUuid",
+    "tool",
+    "sequence",
+    "status",
+    "source",
+    "trust",
+    "result",
+    "error"
+  ],
   "properties": {
     "toolCallId": {
       "type": "string",
       "format": "uuid"
+    },
+    "sessionId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "playerUuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "tool": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+$"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 7
     },
     "status": {
       "enum": ["succeeded", "rejected", "failed"]
@@ -16,6 +46,7 @@
     "source": {
       "enum": [
         "paper_api",
+        "paper_policy",
         "server_registry",
         "plugin_provider",
         "server_docs",
@@ -71,6 +102,7 @@
       },
       "else": {
         "properties": {
+          "result": { "type": "null" },
           "error": { "type": "object" }
         }
       }

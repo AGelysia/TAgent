@@ -168,6 +168,39 @@ function sessionResume(
   };
 }
 
+function toolResult(callEnvelope: Record<string, unknown>): Record<string, unknown> {
+  const call = asRecord(callEnvelope["payload"]);
+  return {
+    protocolVersion: "1.0",
+    messageId: uuid(),
+    requestId: callEnvelope["requestId"],
+    serverId: "test-server",
+    type: "tool.result",
+    timestamp: NOW.toISOString(),
+    nonce: Buffer.alloc(16, nextUuidSuffix).toString("base64url"),
+    payload: {
+      toolCallId: call["toolCallId"],
+      sessionId: call["sessionId"],
+      playerUuid: call["playerUuid"],
+      tool: call["tool"],
+      sequence: call["sequence"],
+      status: "succeeded",
+      source: "paper_api",
+      trust: "authoritative",
+      result: {
+        serverName: "Paper",
+        minecraftVersion: "1.21.11",
+        serverVersion: "1.21.11-132",
+        onlinePlayers: 1,
+        maxPlayers: 20,
+        viewDistance: 10,
+        simulationDistance: 10,
+      },
+      error: null,
+    },
+  };
+}
+
 async function createConfig(port: number): Promise<string> {
   const directory = await temporaryRuntimeDirectory();
   temporaryDirectories.push(directory);
@@ -469,6 +502,7 @@ describe("Paper WebSocket handshake", () => {
     const generate = vi
       .fn()
       .mockImplementation(async ({ input }: Parameters<ModelProvider["generate"]>[0]) => ({
+        type: "final" as const,
         fallbackText: `answer:${input.at(-1)?.content ?? "missing"}`,
       }));
     const modelProvider: ModelProvider = {
@@ -512,6 +546,53 @@ describe("Paper WebSocket handshake", () => {
     expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 
+  it("round-trips a correlated typed Tool call and result before completion", async () => {
+    let generation = 0;
+    const generate = vi.fn(async () => {
+      generation += 1;
+      return generation === 1
+        ? {
+            type: "tool_call" as const,
+            providerCallId: "provider-call-1",
+            providerName: "server_info_read",
+            arguments: {},
+            continuation: { provider: "openai" as const, items: [] },
+          }
+        : { type: "final" as const, fallbackText: "One player is online." };
+    });
+    const modelProvider: ModelProvider = {
+      check: vi.fn().mockResolvedValue({ ok: true }),
+      generate,
+    };
+    const { url } = await startFixture({ modelProvider });
+    const socket = await openClient(url);
+    await exchange(socket, paperHello());
+    const request = agentRequest("How many players are online?");
+    const call = asRecord(await exchange(socket, request));
+
+    expect(call).toMatchObject({
+      requestId: request["requestId"],
+      type: "tool.call",
+      payload: {
+        playerUuid: "44444444-4444-4444-8444-444444444444",
+        tool: "server.info.read",
+        sequence: 0,
+      },
+    });
+    const registry = await SchemaRegistry.load();
+    expect(registry.validate("tool-call.schema.json", asRecord(call["payload"])).valid).toBe(true);
+
+    const completion = asRecord(await exchange(socket, toolResult(call)));
+    expect(completion).toMatchObject({
+      requestId: request["requestId"],
+      type: "agent.complete",
+      payload: { fallbackText: "One player is online." },
+    });
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(generate.mock.calls[1]?.[0].toolOutput.output).toContain('"source":"paper_api"');
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
+
   it("cancels an active request, releases it, and keeps the application channel open", async () => {
     let generation = 0;
     let reportStarted: (() => void) | undefined;
@@ -527,7 +608,7 @@ describe("Paper WebSocket handshake", () => {
       generate: vi.fn(async ({ signal }) => {
         generation += 1;
         if (generation > 1) {
-          return { fallbackText: "replacement answer" };
+          return { type: "final", fallbackText: "replacement answer" };
         }
         reportStarted?.();
         return new Promise((_resolve, reject) => {
@@ -565,7 +646,7 @@ describe("Paper WebSocket handshake", () => {
   it("resumes only sessions owned by the authenticated server player", async () => {
     const modelProvider: ModelProvider = {
       check: vi.fn().mockResolvedValue({ ok: true }),
-      generate: vi.fn().mockResolvedValue({ fallbackText: "stored answer" }),
+      generate: vi.fn().mockResolvedValue({ type: "final", fallbackText: "stored answer" }),
     };
     const { url } = await startFixture({ modelProvider });
     const socket = await openClient(url);
@@ -594,7 +675,7 @@ describe("Paper WebSocket handshake", () => {
   it("closes on replayed, binary, and not-yet-supported client capability messages", async () => {
     const modelProvider: ModelProvider = {
       check: vi.fn().mockResolvedValue({ ok: true }),
-      generate: vi.fn().mockResolvedValue({ fallbackText: "answer" }),
+      generate: vi.fn().mockResolvedValue({ type: "final", fallbackText: "answer" }),
     };
 
     const replayFixture = await startFixture({ modelProvider });

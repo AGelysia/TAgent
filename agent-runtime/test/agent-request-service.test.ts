@@ -3,23 +3,33 @@ import { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeConfig } from "../src/config/runtime-config.js";
-import type {
-  ModelGenerationRequest,
-  ModelGenerationResult,
-  ModelProvider,
+import {
+  ModelGenerationError,
+  type ModelGenerationRequest,
+  type ModelGenerationResult,
+  type ModelProvider,
 } from "../src/providers/model-provider.js";
 import {
   AgentRequestService,
+  type AgentRuntimeResponse,
   type AgentRequestInput,
+  type AgentRequestServiceOptions,
   type AgentTerminalResponse,
 } from "../src/requests/agent-request-service.js";
+import { SchemaRegistry } from "../src/protocol/schema-registry.js";
 import { SqliteConversationRepository } from "../src/storage/conversation-repository.js";
 import { migrateRuntimeStorage } from "../src/storage/migrations.js";
+import { ToolRegistry } from "../src/tools/tool-registry.js";
 
 const PLAYER_ONE = "11111111-1111-4111-8111-111111111111";
 const PLAYER_TWO = "22222222-2222-4222-8222-222222222222";
 const PERSISTENT_REQUEST_ONE = "33333333-3333-4333-8333-333333333333";
 const PERSISTENT_REQUEST_TWO = "44444444-4444-4444-8444-444444444444";
+const tools = new ToolRegistry(await SchemaRegistry.load());
+
+function agentService(options: Omit<AgentRequestServiceOptions, "tools">): AgentRequestService {
+  return new AgentRequestService({ ...options, tools });
+}
 
 function config(overrides: Partial<RuntimeConfig["limits"]> = {}): RuntimeConfig {
   return {
@@ -69,11 +79,16 @@ function request(requestId: string, playerUuid = PLAYER_ONE): AgentRequestInput 
 }
 
 function provider(
-  generate: (requestValue: ModelGenerationRequest) => Promise<ModelGenerationResult>,
+  generate: (
+    requestValue: ModelGenerationRequest,
+  ) => Promise<ModelGenerationResult | { readonly fallbackText: string }>,
 ): ModelProvider {
   return {
     check: vi.fn().mockResolvedValue({ ok: true }),
-    generate: vi.fn(generate),
+    generate: vi.fn(async (requestValue) => {
+      const result = await generate(requestValue);
+      return "type" in result ? result : { type: "final", fallbackText: result.fallbackText };
+    }),
   };
 }
 
@@ -110,7 +125,7 @@ describe("Agent request service", () => {
         ? first.promise
         : second.promise,
     );
-    const service = new AgentRequestService({ provider: adapter, config: config() });
+    const service = agentService({ provider: adapter, config: config() });
     const responses: AgentTerminalResponse[] = [];
 
     service.submit(request("request-1"), (response) => responses.push(response));
@@ -131,7 +146,7 @@ describe("Agent request service", () => {
       ),
     ).toEqual(["REQUEST_LIMITED", "REQUEST_LIMITED"]);
 
-    first.resolve({ fallbackText: "first answer" });
+    first.resolve({ type: "final", fallbackText: "first answer" });
     await flush();
     expect(adapter.generate).toHaveBeenCalledTimes(2);
     expect(responses.at(-1)).toMatchObject({
@@ -139,7 +154,7 @@ describe("Agent request service", () => {
       payload: { playerUuid: PLAYER_ONE, fallbackText: "first answer" },
     });
 
-    second.resolve({ fallbackText: "second answer" });
+    second.resolve({ type: "final", fallbackText: "second answer" });
     await flush();
     expect(service.activeCount).toBe(0);
     expect(service.queuedCount).toBe(0);
@@ -153,7 +168,7 @@ describe("Agent request service", () => {
       calls += 1;
       return calls === 1 ? abandoned.promise : replacement.promise;
     });
-    const service = new AgentRequestService({ provider: adapter, config: config() });
+    const service = agentService({ provider: adapter, config: config() });
     const firstResponses: AgentTerminalResponse[] = [];
     const secondResponses: AgentTerminalResponse[] = [];
 
@@ -168,12 +183,12 @@ describe("Agent request service", () => {
     expect(adapter.generate).toHaveBeenCalledTimes(2);
     expect(service.activeCount).toBe(1);
 
-    abandoned.resolve({ fallbackText: "late answer" });
+    abandoned.resolve({ type: "final", fallbackText: "late answer" });
     await flush();
     expect(firstResponses).toEqual([]);
     expect(service.activeCount).toBe(1);
 
-    replacement.resolve({ fallbackText: "replacement answer" });
+    replacement.resolve({ type: "final", fallbackText: "replacement answer" });
     await flush();
     expect(secondResponses).toHaveLength(1);
     expect(service.activeCount).toBe(0);
@@ -183,7 +198,7 @@ describe("Agent request service", () => {
     const database = new DatabaseSync(":memory:");
     migrateRuntimeStorage(database, "2026-07-13T00:00:00.000Z");
     const pending = deferred<ModelGenerationResult>();
-    const service = new AgentRequestService({
+    const service = agentService({
       provider: provider(() => pending.promise),
       config: config(),
       conversations: new SqliteConversationRepository(database),
@@ -193,7 +208,7 @@ describe("Agent request service", () => {
     service.submit(request(PERSISTENT_REQUEST_ONE), () => undefined);
     await flush();
     service.close();
-    pending.resolve({ fallbackText: "late answer" });
+    pending.resolve({ type: "final", fallbackText: "late answer" });
     await flush();
 
     expect(database.prepare("SELECT COUNT(*) AS count FROM sessions").get()?.["count"]).toBe(0);
@@ -205,7 +220,7 @@ describe("Agent request service", () => {
     vi.useFakeTimers();
     const abandoned = deferred<ModelGenerationResult>();
     const adapter = provider(() => abandoned.promise);
-    const service = new AgentRequestService({
+    const service = agentService({
       provider: adapter,
       config: config(),
       timeoutMilliseconds: 10,
@@ -229,7 +244,7 @@ describe("Agent request service", () => {
       },
     ]);
 
-    abandoned.resolve({ fallbackText: "late answer" });
+    abandoned.resolve({ type: "final", fallbackText: "late answer" });
     await flush();
     expect(responses).toHaveLength(1);
   });
@@ -237,7 +252,7 @@ describe("Agent request service", () => {
   it("does not let a duplicate request id replace the live request", async () => {
     const pending = deferred<ModelGenerationResult>();
     const adapter = provider(() => pending.promise);
-    const service = new AgentRequestService({ provider: adapter, config: config() });
+    const service = agentService({ provider: adapter, config: config() });
     const duplicateResponses: AgentTerminalResponse[] = [];
 
     service.submit(request("same-id", PLAYER_ONE), () => undefined);
@@ -250,7 +265,7 @@ describe("Agent request service", () => {
     ]);
     expect(service.cancel("same-id", PLAYER_ONE)).toBe(true);
     expect(service.activeCount).toBe(0);
-    pending.resolve({ fallbackText: "ignored" });
+    pending.resolve({ type: "final", fallbackText: "ignored" });
     await flush();
   });
 
@@ -261,7 +276,7 @@ describe("Agent request service", () => {
         throw new Error("private provider detail");
       }),
     };
-    const service = new AgentRequestService({ provider: adapter, config: config() });
+    const service = agentService({ provider: adapter, config: config() });
     const responses: AgentTerminalResponse[] = [];
 
     service.submit(request("request-1"), (response) => responses.push(response));
@@ -278,7 +293,7 @@ describe("Agent request service", () => {
     "maps an unusable provider fallback %j to a safe error",
     async (fallbackText) => {
       const adapter = provider(async () => ({ fallbackText }));
-      const service = new AgentRequestService({ provider: adapter, config: config() });
+      const service = agentService({ provider: adapter, config: config() });
       const responses: AgentTerminalResponse[] = [];
 
       service.submit(request("request-1"), (response) => responses.push(response));
@@ -293,7 +308,7 @@ describe("Agent request service", () => {
 
   it("contains a synchronous responder exception and releases admission", async () => {
     const adapter = provider(async () => ({ fallbackText: "answer" }));
-    const service = new AgentRequestService({ provider: adapter, config: config() });
+    const service = agentService({ provider: adapter, config: config() });
 
     service.submit(request("request-1"), () => {
       throw new Error("transport stopped");
@@ -316,7 +331,7 @@ describe("Agent request service", () => {
       generated.push(generation);
       return { fallbackText: `answer-${String(generated.length)}` };
     });
-    const service = new AgentRequestService({
+    const service = agentService({
       provider: adapter,
       config: config(),
       conversations,
@@ -361,7 +376,7 @@ describe("Agent request service", () => {
     ).toEqual(["recipe", "recipe", "general", "general"]);
 
     service.close();
-    const restarted = new AgentRequestService({
+    const restarted = agentService({
       provider: adapter,
       config: config(),
       conversations: new SqliteConversationRepository(database),
@@ -394,7 +409,7 @@ describe("Agent request service", () => {
 
   it("keeps disabled conversation mode stateless and rejects resume", async () => {
     const adapter = provider(async () => ({ fallbackText: "stateless answer" }));
-    const service = new AgentRequestService({ provider: adapter, config: config() });
+    const service = agentService({ provider: adapter, config: config() });
     const completions: AgentTerminalResponse[] = [];
     service.submit(request(PERSISTENT_REQUEST_ONE), (response) => completions.push(response));
     await vi.waitFor(() => expect(service.activeCount).toBe(0));
@@ -409,4 +424,266 @@ describe("Agent request service", () => {
       { type: "agent.error", payload: { code: "CONVERSATION_STORAGE_DISABLED" } },
     ]);
   });
+
+  it("runs two correlated read Tool rounds and keeps an ephemeral private session off disk", async () => {
+    let generation = 0;
+    const generated: ModelGenerationRequest[] = [];
+    const adapter = provider(async (generationRequest) => {
+      generated.push(generationRequest);
+      generation += 1;
+      if (generation <= 2) {
+        const providerCallId = `provider-call-${String(generation)}`;
+        return {
+          type: "tool_call",
+          providerCallId,
+          providerName: "server_info_read",
+          arguments: {},
+          continuation: {
+            provider: "openai",
+            items: [
+              {
+                type: "function_call",
+                call_id: providerCallId,
+                name: "server_info_read",
+                arguments: "{}",
+              },
+            ],
+          },
+        };
+      }
+      return { type: "final", fallbackText: "There is one player online." };
+    });
+    const allocated = [
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    ];
+    const service = agentService({
+      provider: adapter,
+      config: config(),
+      randomUuid: () => allocated.shift() ?? "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    });
+    const responses: AgentRuntimeResponse[] = [];
+    service.submit(request(PERSISTENT_REQUEST_ONE), (response) => responses.push(response));
+
+    await vi.waitFor(() =>
+      expect(responses.filter((response) => response.type === "tool.call")).toHaveLength(1),
+    );
+    const firstCall = responses.find((response) => response.type === "tool.call");
+    if (firstCall?.type !== "tool.call") {
+      throw new Error("missing first Tool call");
+    }
+    expect(firstCall.payload).toMatchObject({
+      sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      toolCallId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      tool: "server.info.read",
+      sequence: 0,
+    });
+    expect(
+      service.acceptToolResult(PERSISTENT_REQUEST_ONE, {
+        toolCallId: firstCall.payload.toolCallId,
+        sessionId: firstCall.payload.sessionId,
+        playerUuid: PLAYER_TWO,
+        tool: firstCall.payload.tool,
+        sequence: 0,
+        status: "succeeded",
+        source: "paper_api",
+        trust: "authoritative",
+        result: serverInfoResult(),
+        error: null,
+      }),
+    ).toBe("violation");
+    expect(
+      service.acceptToolResult(PERSISTENT_REQUEST_ONE, {
+        toolCallId: firstCall.payload.toolCallId,
+        sessionId: firstCall.payload.sessionId,
+        playerUuid: PLAYER_ONE,
+        tool: firstCall.payload.tool,
+        sequence: 0,
+        status: "succeeded",
+        source: "paper_api",
+        trust: "authoritative",
+        result: serverInfoResult(),
+        error: null,
+      }),
+    ).toBe("accepted");
+
+    await vi.waitFor(() =>
+      expect(responses.filter((response) => response.type === "tool.call")).toHaveLength(2),
+    );
+    const calls = responses.filter((response) => response.type === "tool.call");
+    const secondCall = calls[1];
+    if (secondCall?.type !== "tool.call") {
+      throw new Error("missing second Tool call");
+    }
+    expect(secondCall.payload).toMatchObject({
+      sessionId: firstCall.payload.sessionId,
+      toolCallId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      sequence: 1,
+    });
+    expect(
+      service.acceptToolResult(PERSISTENT_REQUEST_ONE, {
+        toolCallId: secondCall.payload.toolCallId,
+        sessionId: secondCall.payload.sessionId,
+        playerUuid: PLAYER_ONE,
+        tool: secondCall.payload.tool,
+        sequence: 1,
+        status: "succeeded",
+        source: "paper_api",
+        trust: "authoritative",
+        result: serverInfoResult(),
+        error: null,
+      }),
+    ).toBe("accepted");
+    await vi.waitFor(() => expect(service.activeCount).toBe(0));
+
+    expect(responses.at(-1)).toMatchObject({
+      type: "agent.complete",
+      payload: { sessionId: null, fallbackText: "There is one player online." },
+    });
+    expect(generated[1]?.toolOutput?.output).toContain('"trust":"authoritative"');
+    expect(generated[2]?.toolOutput?.providerCallId).toBe("provider-call-2");
+  });
+
+  it("stops at the configured Tool round limit without sending another call to Paper", async () => {
+    let generation = 0;
+    const adapter = provider(async (generationRequest) => {
+      generation += 1;
+      if (generation > 1) {
+        expect(generationRequest.tools).toEqual([]);
+        throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+      }
+      return {
+        type: "tool_call",
+        providerCallId: `provider-call-${String(generation)}`,
+        providerName: "server_info_read",
+        arguments: {},
+        continuation: { provider: "openai", items: [] },
+      };
+    });
+    const service = agentService({
+      provider: adapter,
+      config: config({ maxToolRounds: 1 }),
+      randomUuid: (() => {
+        const ids = [
+          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        ];
+        return () => ids.shift() ?? "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+      })(),
+    });
+    const responses: AgentRuntimeResponse[] = [];
+    service.submit(request(PERSISTENT_REQUEST_ONE), (response) => responses.push(response));
+    await vi.waitFor(() => expect(responses[0]?.type).toBe("tool.call"));
+    const call = responses[0];
+    if (call?.type !== "tool.call") {
+      throw new Error("missing Tool call");
+    }
+    expect(
+      service.acceptToolResult(PERSISTENT_REQUEST_ONE, {
+        toolCallId: call.payload.toolCallId,
+        sessionId: call.payload.sessionId,
+        playerUuid: PLAYER_ONE,
+        tool: call.payload.tool,
+        sequence: 0,
+        status: "succeeded",
+        source: "paper_api",
+        trust: "authoritative",
+        result: serverInfoResult(),
+        error: null,
+      }),
+    ).toBe("accepted");
+    await vi.waitFor(() => expect(service.activeCount).toBe(0));
+
+    expect(responses.filter((response) => response.type === "tool.call")).toHaveLength(1);
+    expect(responses.at(-1)).toMatchObject({
+      type: "agent.error",
+      payload: { code: "TOOL_ROUND_LIMIT" },
+    });
+    expect((adapter.generate as ReturnType<typeof vi.fn>).mock.calls[1]?.[0].tools).toEqual([]);
+  });
+
+  it.each([
+    ["unknown provider name", "unknown_read", {}, "general"],
+    ["arguments outside the closed schema", "server_info_read", { extra: true }, "general"],
+    ["Tool outside the module allowlist", "server_plugins_list", {}, "locate"],
+  ] as const)(
+    "rejects %s before emitting a Tool call",
+    async (_label, providerName, args, module) => {
+      const adapter = provider(async () => ({
+        type: "tool_call",
+        providerCallId: "provider-call-1",
+        providerName,
+        arguments: args,
+        continuation: { provider: "openai", items: [] },
+      }));
+      const service = agentService({ provider: adapter, config: config() });
+      const responses: AgentRuntimeResponse[] = [];
+      service.submit({ ...request(PERSISTENT_REQUEST_ONE), module }, (response) =>
+        responses.push(response),
+      );
+      await vi.waitFor(() => expect(service.activeCount).toBe(0));
+
+      expect(responses).toMatchObject([
+        { type: "agent.error", payload: { code: "TOOL_REJECTED" } },
+      ]);
+      expect(responses.some((response) => response.type === "tool.call")).toBe(false);
+    },
+  );
+
+  it("times out while waiting for Paper and ignores the late Tool result", async () => {
+    vi.useFakeTimers();
+    const adapter = provider(async () => ({
+      type: "tool_call",
+      providerCallId: "provider-call-1",
+      providerName: "server_info_read",
+      arguments: {},
+      continuation: { provider: "openai", items: [] },
+    }));
+    const service = agentService({
+      provider: adapter,
+      config: config(),
+      timeoutMilliseconds: 10,
+    });
+    const responses: AgentRuntimeResponse[] = [];
+    service.submit(request(PERSISTENT_REQUEST_ONE), (response) => responses.push(response));
+    await flush();
+    const call = responses.find((response) => response.type === "tool.call");
+    if (call?.type !== "tool.call") {
+      throw new Error("missing Tool call");
+    }
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(responses.at(-1)).toMatchObject({
+      type: "agent.error",
+      payload: { code: "MODEL_TIMEOUT" },
+    });
+    expect(
+      service.acceptToolResult(PERSISTENT_REQUEST_ONE, {
+        toolCallId: call.payload.toolCallId,
+        sessionId: call.payload.sessionId,
+        playerUuid: PLAYER_ONE,
+        tool: call.payload.tool,
+        sequence: 0,
+        status: "succeeded",
+        source: "paper_api",
+        trust: "authoritative",
+        result: serverInfoResult(),
+        error: null,
+      }),
+    ).toBe("ignored");
+    expect(adapter.generate).toHaveBeenCalledOnce();
+  });
 });
+
+function serverInfoResult(): Readonly<Record<string, unknown>> {
+  return {
+    serverName: "Paper",
+    minecraftVersion: "1.21.11",
+    serverVersion: "1.21.11-132",
+    onlinePlayers: 1,
+    maxPlayers: 20,
+    viewDistance: 10,
+    simulationDistance: 10,
+  };
+}

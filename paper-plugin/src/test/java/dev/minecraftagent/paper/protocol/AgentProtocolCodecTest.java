@@ -8,6 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SchemaValidatorsConfig;
 import com.networknt.schema.SpecVersion;
@@ -16,7 +18,10 @@ import dev.minecraftagent.paper.protocol.AgentProtocolCodec.AgentErrorCode;
 import dev.minecraftagent.paper.protocol.AgentProtocolCodec.CancelReason;
 import dev.minecraftagent.paper.protocol.AgentProtocolCodec.Completion;
 import dev.minecraftagent.paper.protocol.AgentProtocolCodec.SessionResumed;
+import dev.minecraftagent.paper.protocol.AgentProtocolCodec.ToolCall;
 import dev.minecraftagent.paper.request.AgentModule;
+import dev.minecraftagent.paper.tool.ReadToolCall;
+import dev.minecraftagent.paper.tool.ReadToolResult;
 import dev.minecraftagent.paper.transport.RuntimeConnectionFailure;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -113,6 +118,27 @@ class AgentProtocolCodecTest {
   }
 
   @Test
+  void acceptsToolLoopTerminalErrorCodes() throws Exception {
+    var rejected =
+        assertInstanceOf(
+            AgentError.class,
+            codec()
+                .decode(
+                    fixture("envelope-agent-error.json")
+                        .replace("MODEL_TIMEOUT", "TOOL_REJECTED")));
+    assertEquals(AgentErrorCode.TOOL_REJECTED, rejected.code());
+
+    var limited =
+        assertInstanceOf(
+            AgentError.class,
+            codec()
+                .decode(
+                    fixture("envelope-agent-error.json")
+                        .replace("MODEL_TIMEOUT", "TOOL_ROUND_LIMIT")));
+    assertEquals(AgentErrorCode.TOOL_ROUND_LIMIT, limited.code());
+  }
+
+  @Test
   void decodesStrictSessionResumedFixture() throws Exception {
     var source =
         fixture("envelope-session-resumed.json").replace("2026-07-13T08:00:02Z", NOW.toString());
@@ -157,7 +183,7 @@ class AgentProtocolCodecTest {
   }
 
   @Test
-  void rejectsDuplicateFieldsStaleMessagesAndRuntimeToolCalls() throws Exception {
+  void rejectsDuplicateFieldsAndStaleMessages() throws Exception {
     var valid = fixture("envelope-agent-complete.json");
     assertFailure(
         codec(),
@@ -167,8 +193,86 @@ class AgentProtocolCodecTest {
         codec(),
         valid.replace(NOW.toString(), NOW.minusSeconds(31).toString()),
         "PROTOCOL_MESSAGE_STALE");
-    assertFailure(
-        codec(), valid.replace("agent.complete", "tool.call"), "UNSUPPORTED_MESSAGE_TYPE");
+  }
+
+  @Test
+  void decodesStrictToolCallAndEncodesSchemaValidBoundResult() throws Exception {
+    var codec = codec();
+    var call = assertInstanceOf(ToolCall.class, codec.decode(fixture("envelope-tool-call.json")));
+
+    assertEquals(REQUEST_ID, call.requestId());
+    assertEquals(PLAYER_UUID, call.playerUuid());
+    assertEquals("server.recipe.lookup", call.call().tool());
+    assertEquals(AgentModule.RECIPE, call.call().module());
+    assertEquals(0, call.call().sequence());
+
+    var data = new com.google.gson.JsonObject();
+    data.addProperty("recipeCount", 1);
+    var encoded =
+        JSON.readTree(
+            codec.encodeToolResult(
+                REQUEST_ID,
+                call.call(),
+                ReadToolResult.succeeded(ReadToolResult.Source.SERVER_REGISTRY, data)));
+    assertSchema("envelope.schema.json", encoded);
+    assertSchema("tool-result.schema.json", encoded.path("payload"));
+    assertEquals("tool.result", encoded.path("type").asText());
+    assertEquals(
+        call.call().toolCallId().toString(), encoded.path("payload").path("toolCallId").asText());
+    assertEquals(
+        call.call().sessionId().toString(), encoded.path("payload").path("sessionId").asText());
+  }
+
+  @Test
+  void downgradesToolResultsThatExceedTheRuntimeStructuralTokenLimit() throws Exception {
+    var entries = new JsonArray();
+    for (var index = 0; index < 1_800; index++) {
+      var entry = new JsonObject();
+      entry.addProperty("value", index);
+      entries.add(entry);
+    }
+    var result = new JsonObject();
+    result.add("entries", entries);
+
+    assertTooLargeFallback(result);
+  }
+
+  @Test
+  void downgradesToolResultsThatExceedTheApplicationFrameLimit() throws Exception {
+    var result = new JsonObject();
+    result.addProperty("value", "x".repeat(AgentProtocolCodec.MAX_APPLICATION_BYTES));
+
+    assertTooLargeFallback(result);
+  }
+
+  private static void assertTooLargeFallback(JsonObject result) throws Exception {
+    var call =
+        new ReadToolCall(
+            UUID.randomUUID(),
+            REQUEST_ID,
+            SESSION_ID,
+            PLAYER_UUID,
+            AgentModule.GENERAL,
+            "player.context.read",
+            new JsonObject(),
+            0);
+    var document =
+        JSON.readTree(
+            codec()
+                .encodeToolResult(
+                    REQUEST_ID,
+                    call,
+                    ReadToolResult.succeeded(ReadToolResult.Source.PAPER_API, result)));
+
+    assertSchema("envelope.schema.json", document);
+    assertSchema("tool-result.schema.json", document.path("payload"));
+    assertEquals("failed", document.path("payload").path("status").asText());
+    assertEquals("paper_api", document.path("payload").path("source").asText());
+    assertEquals("authoritative", document.path("payload").path("trust").asText());
+    assertTrue(document.path("payload").path("result").isNull());
+    assertEquals(
+        "TOOL_RESULT_TOO_LARGE", document.path("payload").path("error").path("code").asText());
+    assertEquals(false, document.path("payload").path("error").path("retryable").asBoolean());
   }
 
   private static AgentProtocolCodec codec() {

@@ -2,10 +2,11 @@
 
 Minecraft Agent is a security-first Minecraft assistant composed of a Paper plugin, a local
 TypeScript runtime, and an optional Fabric client mod. This repository currently implements the
-Phase 0-6 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
+Phase 0-7 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
 loopback Runtime-Paper channel, conditional `/agent` registration, persistent emergency Offline
-controls, private model replies, Runtime-owned sessions, resume, and explicit one-shot modules. It
-does not execute tools or mutate Minecraft state.
+controls, private model replies, Runtime-owned sessions, resume, explicit one-shot modules, and a
+bounded six-tool read-only model loop. It does not expose generic execution or mutate Minecraft
+state.
 
 The product and delivery baseline is recorded in
 [`minecraft_agent_vibe_coding_plan.md`](minecraft_agent_vibe_coding_plan.md). Implementation status
@@ -72,7 +73,7 @@ cd ..
 The Fabric build downloads Minecraft artifacts and is deliberately last. Do not run both Gradle
 builds concurrently on a low-memory host.
 
-## Phase 2-6 Runtime
+## Phase 2-7 Runtime
 
 ```bash
 cd agent-runtime
@@ -93,19 +94,21 @@ Startup checks the configuration, private log directory, shared Capability Schem
 SQLite file, and the configured OpenAI model before binding `127.0.0.1`. `/health`
 returns a cached minimal readiness view and does not repeat provider or database work.
 
-The Runtime uses the OpenAI Responses API for bounded, non-streaming plain-text answers with
-provider storage disabled. It applies per-player outstanding/cooldown/daily limits plus global
+The Runtime uses the OpenAI Responses API for bounded, non-streaming answers and serial function
+calls with provider storage disabled. It applies per-player outstanding/cooldown/daily limits plus global
 concurrency and queue limits. With `privacy.storeConversations: true`, a versioned SQLite
 repository commits each successful user/assistant exchange and can restore it after a Runtime
 restart. Every session read is scoped by authenticated server ID and player UUID, and model context
 is bounded by both message count and total text size. Disabling conversation storage leaves no
 prompt or answer rows and makes resume unavailable.
 
-After the authenticated hello, the same bounded WebSocket accepts agent request/cancel and
-session-resume traffic. A fixed six-entry Module Manifest supplies trusted per-request instructions;
-its Phase 6 tool allowlists are empty. Tool, proposal, view, and heartbeat types remain unsupported.
+After the authenticated hello, the same bounded WebSocket accepts agent request/cancel,
+session-resume, and correlated tool-result traffic. A fixed six-entry Module Manifest supplies
+trusted per-request instructions and a fixed read-tool allowlist. Runtime publishes only those
+registered functions to the model, validates every call and typed result locally, and permits at
+most eight serial calls. Proposal, view, and heartbeat types remain unsupported.
 
-## Phase 3-6 Paper
+## Phase 3-7 Paper
 
 On first Paper startup, the plugin installs a strict `plugins/MinecraftAgent/config.yml`. Keep its
 Runtime token as the complete `${MINECRAFT_AGENT_SERVER_TOKEN}` environment reference. The endpoint
@@ -121,8 +124,8 @@ Paper performs configuration, state, policy, descriptor, and Runtime authenticat
 from the server thread. Only a successful result returns to the primary thread and registers
 `agent` plus `minecraftagent:agent` through Paper's public command map. A core failure leaves both
 labels absent; fix the external cause and restart the server. `/agent doctor` reports stable health
-and optional warning codes. The six core tool entries are non-executable readiness descriptors,
-not working Minecraft tools.
+and optional warning codes. The six core entries now back executable read-only adapters; they are
+still closed descriptors and cannot dispatch arbitrary Bukkit, plugin, or command operations.
 
 After initial registration, `/agent off` closes admission before it cancels transient work and
 atomically persists `DISABLED` in `plugins/MinecraftAgent/state/agent-state.yml`. While not ONLINE,
@@ -144,6 +147,14 @@ IDs, and Runtime returns the same safe error for an absent, foreign-player, or f
 Players with `minecraftagent.module` may list modules or run
 `/agent module <name> <message>`. That route applies once: the next `/agent say` uses `general`.
 
+During a live question, Paper may execute only `player.context.read`,
+`player.held_item.read`, `server.info.read`, `server.plugins.list`,
+`server.recipe.lookup`, or `server.recipe.uses`. It repeats module, argument, player,
+permission, connection, session, sequence, and Online-epoch checks. Bukkit snapshots run on the
+server thread without blocking the WebSocket thread; recipe scans are split into bounded slices.
+Results carry fixed source/trust labels, and recipe results retain typed layouts, ingredient
+choices, item stacks, processing metadata, and remaining items instead of model-authored prose.
+
 The opt-in exact-server smoke pins Paper `1.21.11-132`, verifies its SHA-256, limits the heap to 512
 MiB, and runs every case serially:
 
@@ -163,7 +174,8 @@ unregistration in addition to the three initial transport-failure cases.
 ```
 
 Artifacts are placed under `dist/`. The package contains the implemented persistent conversation,
-resume, and explicit module path; tools, proposals, client UI, and world changes remain unavailable.
+resume, explicit module path, shared tool schemas, Runtime loop, and Paper read adapters. Proposals,
+client UI, generic execution, and world changes remain unavailable.
 
 The packaged Runtime preserves its compiled layout and includes the shared protocol schemas and
 configuration template. Install production dependencies before startup:
@@ -189,4 +201,6 @@ command during later Offline transitions, rotates an epoch permit before cleanup
 fresh check before returning Online. Phase 5 binds every private reply to that permit, the live
 authenticated connection, request ID, server ID, and actual player UUID. Phase 6 keeps the same
 live binding for resume, and Runtime additionally scopes every durable session operation by server
-ID plus player UUID.
+ID plus player UUID. Phase 7 additionally requires both Runtime and Paper to accept only the fixed
+module tool intersection and binds every result to the live request, temporary or durable session,
+player, tool ID, sequence, call ID, connection, and Online epoch.

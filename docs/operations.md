@@ -1,19 +1,19 @@
 # Operations
 
-## Phase 0-6 purpose
+## Phase 0-7 purpose
 
 The repository remains a development implementation, not a deployable Minecraft
 Agent service. Its useful operations are build, format, contract, readiness,
 and focused integration tests. The Runtime has strict configuration, local
 filesystem/SQLite/Schema checks, an injectable provider-health port, and a
-loopback `/health` route. Paper Phase 3 adds strict startup inputs, a
-Paper-initiated authenticated Runtime hello, non-executable core descriptors,
+loopback `/health` route. Paper Phase 3 adds strict startup inputs and a
+Paper-initiated authenticated Runtime hello; the current implementation includes
 conditional `/agent` registration, persistent emergency Offline controls,
-private model requests, Runtime-owned sessions, resume, and explicit modules.
-The Fabric artifact remains an entry-point scaffold.
+private model requests, Runtime-owned sessions, resume, explicit modules, and
+six fixed typed read tools. The Fabric artifact remains an entry-point scaffold.
 
 No real API key, production server token, model account, or Litematica
-installation is required for automated Phase 0-6 checks. Tests use temporary
+installation is required for automated Phase 0-7 checks. Tests use temporary
 secrets, private temporary directories, ephemeral loopback ports, fake provider
 adapters, and a fake incompatible Runtime. The exact Paper `1.21.11-132` server
 is used by the Phase 3 decision smoke; successful and token-mismatch cases use
@@ -45,7 +45,7 @@ org.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m
 
 Run one build at a time. Do not run Gradle and npm checks concurrently. Avoid
 Docker, Testcontainers, a local Paper server, or a graphical Fabric client for
-routine Phase 0-6 validation. The pinned Paper smoke is a short, explicit
+routine Phase 0-7 validation. The pinned Paper smoke is a short, explicit
 exception and must not be left running on this host.
 
 If memory pressure appears, keep the one-worker policy and run each subproject
@@ -236,7 +236,7 @@ Runtime, then use `/agent on`; Phase 4 deliberately has no automatic reconnect.
 If `/agent` was never registered because initial startup failed, fix the cause
 and restart Paper instead.
 
-The six core entries are only readiness descriptors:
+The six core read tools are:
 
 ```text
 player.context.read
@@ -247,10 +247,19 @@ server.recipe.lookup
 server.recipe.uses
 ```
 
-All six are read-only, closed-schema, and non-executable. Phase 3 supplies no
-tool invocation or Minecraft adapter. Typed tools begin in Phase 7. Inspecting
-the optional capability directory does not load packs; the Capability Pack
-loader remains Phase 9.
+All six are read-only and closed-schema. Phase 7 enables only their fixed Paper
+adapters; there is no command, reflection, arbitrary plugin, file, shell, or
+generic Bukkit tool. Runtime exposes the current module allowlist to the model,
+and Paper repeats that allowlist plus live request, player, permission, session,
+sequence, connection, and Online-epoch validation.
+
+Player/server snapshots are scheduled on the primary thread while the transport
+and model loops remain asynchronous. Recipe lookup/usage scans at most 128
+registry entries or 2 ms per scheduled slice, returns at most 16 matches, and
+applies both the 64 KiB frame limit and Runtime's structural-token budget.
+Cancellation, quit, Offline, timeout, and Runtime disconnect invalidate pending
+work. Inspecting the optional capability directory still does not load packs;
+the Capability Pack loader remains Phase 9.
 
 ## Paper Phase 6 conversation commands
 
@@ -369,7 +378,7 @@ The exact commands, artifact hash, and outcomes are recorded in
 `docs/progress.md`. An initial core failure has no command recovery path; fix it
 externally and restart.
 
-## Troubleshooting Phase 0-6
+## Troubleshooting Phase 0-7
 
 ### Dependency resolution fails
 
@@ -397,10 +406,10 @@ or raw peer message. Check the strict Paper configuration, state permissions,
 fake or local Runtime availability, token match, and protocol version, then
 restart. There is no initial `/agent on` path.
 
-After registration, Phase 6 adds private questions, resume, and explicit
-one-shot modules. Typed tool execution, proposals, Capability Packs, client
-payloads, overlays, and Litematica adapters remain later phases. The Fabric
-entry point is still a scaffold.
+After registration, Phase 7 supports private questions, resume, explicit
+one-shot modules, and the fixed read-tool loop. Write tools, proposals,
+Capability Packs, client payloads, overlays, and Litematica adapters remain
+later phases. The Fabric entry point is still a scaffold.
 
 ### `/agent` exists but returns `AI offline`
 
@@ -411,8 +420,8 @@ Do not delete or loosen permissions on the state file as a recovery shortcut.
 
 ### Runtime exits during provider health
 
-Phase 6 requires the configured API key and model to pass the production model
-lookup. Use the stable `PROVIDER_AUTH_FAILED`, `MODEL_UNAVAILABLE`,
+Phase 5 and later require the configured API key and model to pass the production
+model lookup. Use the stable `PROVIDER_AUTH_FAILED`, `MODEL_UNAVAILABLE`,
 `PROVIDER_UNAVAILABLE`, `MODEL_HEALTH_FAILED`, or `PROVIDER_TIMEOUT` diagnostic.
 Do not log the key or upstream response body while debugging.
 
@@ -425,7 +434,8 @@ path. Do not print the resolved configuration while debugging.
 
 ### Node prints an SQLite ExperimentalWarning
 
-Node 22 still labels `node:sqlite` active development. Phase 2 accepts this
-warning and confines the synchronous API to bounded startup probes. Do not
-globally suppress warnings; the repository driver decision is revisited before
-request-path persistence is added.
+Node 22 still labels `node:sqlite` active development. The implementation
+accepts this warning and confines the synchronous API to bounded startup probes,
+indexed context reads, retention work, and short atomic exchange writes. Do not
+globally suppress warnings; reassess the repository driver before substantially
+increasing request volume or data scope.

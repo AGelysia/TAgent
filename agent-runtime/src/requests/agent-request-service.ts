@@ -4,8 +4,11 @@ import type { RuntimeConfig } from "../config/runtime-config.js";
 import { type ModuleId, ModuleRegistry } from "../modules/module-manifest.js";
 import {
   ModelGenerationError,
+  type ModelGenerationContinuation,
   type ModelGenerationFailureCode,
+  type ModelGenerationResult,
   type ModelProvider,
+  type ModelToolOutput,
 } from "../providers/model-provider.js";
 import { buildContextWindow } from "../sessions/context-window.js";
 import {
@@ -14,6 +17,8 @@ import {
   type ConversationOwner,
   type ConversationRepository,
 } from "../storage/conversation-repository.js";
+import { type CoreToolDescriptor, ToolRegistry } from "../tools/tool-registry.js";
+import type { ToolCallPayload, ToolResultPayload } from "../tools/tool-types.js";
 import { RequestAdmissionController, type RequestAdmissionRejection } from "./request-admission.js";
 
 const MAXIMUM_MODEL_OUTPUT_TOKENS = 1024;
@@ -42,6 +47,8 @@ export type AgentErrorCode =
   | "REQUEST_LIMITED"
   | "SESSION_NOT_FOUND"
   | "CONVERSATION_STORAGE_DISABLED"
+  | "TOOL_REJECTED"
+  | "TOOL_ROUND_LIMIT"
   | "RUNTIME_INTERNAL_ERROR";
 
 export interface AgentErrorPayload {
@@ -54,6 +61,10 @@ export interface AgentErrorPayload {
 export type AgentTerminalResponse =
   | { readonly type: "agent.complete"; readonly payload: AgentCompletionPayload }
   | { readonly type: "agent.error"; readonly payload: AgentErrorPayload };
+
+export type AgentRuntimeResponse =
+  | AgentTerminalResponse
+  | { readonly type: "tool.call"; readonly payload: ToolCallPayload };
 
 export interface SessionResumeInput {
   readonly requestId: string;
@@ -78,19 +89,41 @@ export interface AgentRequestServiceOptions {
   readonly randomUuid?: () => string;
   readonly conversations?: ConversationRepository;
   readonly modules?: ModuleRegistry;
+  readonly tools: ToolRegistry;
+}
+
+interface PendingToolCall {
+  readonly payload: ToolCallPayload;
+  readonly descriptor: CoreToolDescriptor;
+  readonly resolve: (payload: ToolResultPayload) => void;
+  readonly reject: (reason: unknown) => void;
+  readonly removeAbortListener: () => void;
 }
 
 interface RequestRecord {
   readonly input: AgentRequestInput;
-  readonly respond: (response: AgentTerminalResponse) => void;
+  readonly respond: (response: AgentRuntimeResponse) => void;
   readonly controller: AbortController;
-  phase: "QUEUED" | "ACTIVE";
+  phase: "QUEUED" | "ACTIVE" | "WAITING_TOOL";
   timeout: NodeJS.Timeout | undefined;
   terminalSent: boolean;
   suppressResponse: boolean;
   detached: boolean;
   preparedSessionId: string | null;
+  executionSessionId: string | null;
   createsSession: boolean;
+  pendingTool: PendingToolCall | undefined;
+  readonly issuedToolCallIds: Set<string>;
+}
+
+class ToolLoopError extends Error {
+  public readonly code: "TOOL_REJECTED" | "TOOL_ROUND_LIMIT";
+
+  public constructor(code: "TOOL_REJECTED" | "TOOL_ROUND_LIMIT") {
+    super(code);
+    this.name = "ToolLoopError";
+    this.code = code;
+  }
 }
 
 function limitedError(
@@ -213,6 +246,24 @@ function internalError(playerUuid: string): {
   };
 }
 
+function toolLoopError(
+  playerUuid: string,
+  code: "TOOL_REJECTED" | "TOOL_ROUND_LIMIT",
+): { readonly type: "agent.error"; readonly payload: AgentErrorPayload } {
+  return {
+    type: "agent.error",
+    payload: {
+      playerUuid,
+      code,
+      fallbackText:
+        code === "TOOL_REJECTED"
+          ? "The requested server lookup was not allowed."
+          : "The AI used too many server lookups. Try a more specific question.",
+      retryable: code === "TOOL_ROUND_LIMIT",
+    },
+  };
+}
+
 export class AgentRequestService {
   readonly #provider: ModelProvider;
   readonly #config: RuntimeConfig;
@@ -222,6 +273,7 @@ export class AgentRequestService {
   readonly #randomUuid: () => string;
   readonly #conversations: ConversationRepository;
   readonly #modules: ModuleRegistry;
+  readonly #tools: ToolRegistry;
   readonly #requests = new Map<string, RequestRecord>();
   #closed = false;
 
@@ -237,6 +289,7 @@ export class AgentRequestService {
     this.#randomUuid = options.randomUuid ?? randomUUID;
     this.#conversations = options.conversations ?? new DisabledConversationRepository();
     this.#modules = options.modules ?? new ModuleRegistry();
+    this.#tools = options.tools;
     this.#timeoutMilliseconds = timeoutMilliseconds;
     this.#admission = new RequestAdmissionController(
       {
@@ -249,10 +302,7 @@ export class AgentRequestService {
     );
   }
 
-  public submit(
-    input: AgentRequestInput,
-    respond: (response: AgentTerminalResponse) => void,
-  ): void {
+  public submit(input: AgentRequestInput, respond: (response: AgentRuntimeResponse) => void): void {
     if (this.#closed) {
       this.#safeRespond(respond, {
         type: "agent.error",
@@ -280,7 +330,10 @@ export class AgentRequestService {
       suppressResponse: false,
       detached: false,
       preparedSessionId: null,
+      executionSessionId: null,
       createsSession: false,
+      pendingTool: undefined,
+      issuedToolCallIds: new Set(),
     };
     this.#requests.set(input.requestId, record);
     const decision = this.#admission.admit({
@@ -310,10 +363,51 @@ export class AgentRequestService {
     return true;
   }
 
+  public acceptToolResult(
+    requestId: string,
+    payload: ToolResultPayload,
+  ): "accepted" | "ignored" | "violation" {
+    const record = this.#requests.get(requestId);
+    if (record === undefined || record.terminalSent || record.suppressResponse) {
+      return "ignored";
+    }
+    const pending = record.pendingTool;
+    if (pending === undefined) {
+      return "violation";
+    }
+    const expected = pending.payload;
+    if (
+      payload.toolCallId !== expected.toolCallId ||
+      payload.sessionId !== expected.sessionId ||
+      payload.playerUuid !== expected.playerUuid ||
+      payload.tool !== expected.tool ||
+      payload.sequence !== expected.sequence ||
+      !this.#validToolResult(pending.descriptor, payload)
+    ) {
+      return "violation";
+    }
+    record.pendingTool = undefined;
+    pending.removeAbortListener();
+    pending.resolve(payload);
+    return "accepted";
+  }
+
   public cancelAll(): void {
     for (const record of [...this.#requests.values()]) {
       this.cancel(record.input.requestId, record.input.playerUuid);
     }
+  }
+
+  #validToolResult(descriptor: CoreToolDescriptor, payload: ToolResultPayload): boolean {
+    if (payload.status === "succeeded") {
+      return this.#tools.validateResult(descriptor, payload);
+    }
+    if (payload.result !== null || payload.error === null || payload.trust !== "authoritative") {
+      return false;
+    }
+    return payload.status === "rejected"
+      ? payload.source === "paper_policy"
+      : payload.source === descriptor.source;
   }
 
   public resume(
@@ -363,91 +457,191 @@ export class AgentRequestService {
 
   #start(record: RequestRecord): void {
     record.phase = "ACTIVE";
-    void Promise.resolve()
-      .then(() => {
-        const manifest = this.#modules.get(record.input.module);
-        const history = this.#prepareConversation(record);
-        return this.#provider.generate({
-          provider: this.#config.model.provider,
-          model: this.#config.model.model,
-          apiKey: this.#config.model.apiKey,
-          instructions: manifest.instructions,
-          input: buildContextWindow(history, record.input.message, {
-            maximumMessages: this.#config.limits.maxContextMessages,
-            maximumCharacters: this.#config.limits.maxContextCharacters,
-          }),
-          maxOutputTokens: MAXIMUM_MODEL_OUTPUT_TOKENS,
-          signal: record.controller.signal,
-        });
-      })
-      .then(
-        (result) => {
-          if (!record.terminalSent && !record.suppressResponse) {
-            if (!isUsableFallbackText(result.fallbackText)) {
-              record.terminalSent = true;
-              this.#safeRespond(
-                record.respond,
-                providerError(record.input.playerUuid, "MODEL_RESPONSE_INVALID"),
-              );
-              return;
-            }
-            try {
-              if (record.preparedSessionId !== null) {
-                this.#conversations.commitExchange({
-                  ...this.#owner(record.input.playerUuid),
-                  sessionId: record.preparedSessionId,
-                  createSession: record.createsSession,
-                  requestId: record.input.requestId,
-                  module: record.input.module,
-                  userContent: record.input.message,
-                  assistantContent: result.fallbackText,
-                  createdAt: new Date(this.#now()).toISOString(),
-                });
-              }
-              record.terminalSent = true;
-              this.#safeRespond(record.respond, {
-                type: "agent.complete",
-                payload: {
-                  sessionId: record.preparedSessionId,
-                  playerUuid: record.input.playerUuid,
-                  fallbackText: result.fallbackText,
-                  structuredViews: [],
-                },
-              });
-            } catch (error) {
-              record.terminalSent = true;
-              this.#safeRespond(
-                record.respond,
-                error instanceof ConversationOwnershipError
-                  ? sessionError(record.input.playerUuid, "SESSION_NOT_FOUND")
-                  : internalError(record.input.playerUuid),
-              );
-            }
-          }
-        },
-        (error: unknown) => {
-          if (record.terminalSent || record.suppressResponse) {
-            return;
-          }
-          record.terminalSent = true;
-          this.#safeRespond(
-            record.respond,
-            error instanceof ModelGenerationError
-              ? providerError(record.input.playerUuid, error.code)
-              : error instanceof ConversationOwnershipError
-                ? sessionError(record.input.playerUuid, "SESSION_NOT_FOUND")
+    void this.#run(record)
+      .catch((error: unknown) => {
+        if (record.terminalSent || record.suppressResponse) {
+          return;
+        }
+        record.terminalSent = true;
+        this.#safeRespond(
+          record.respond,
+          error instanceof ModelGenerationError
+            ? providerError(record.input.playerUuid, error.code)
+            : error instanceof ConversationOwnershipError
+              ? sessionError(record.input.playerUuid, "SESSION_NOT_FOUND")
+              : error instanceof ToolLoopError
+                ? toolLoopError(record.input.playerUuid, error.code)
                 : internalError(record.input.playerUuid),
-          );
-        },
-      )
+        );
+      })
       .finally(() => {
         this.#detach(record);
       })
       .catch(() => undefined);
   }
 
+  async #run(record: RequestRecord): Promise<void> {
+    const manifest = this.#modules.get(record.input.module);
+    const history = this.#prepareConversation(record);
+    const input = buildContextWindow(history, record.input.message, {
+      maximumMessages: this.#config.limits.maxContextMessages,
+      maximumCharacters: this.#config.limits.maxContextCharacters,
+    });
+    const allowedTools = this.#tools.forAllowlist(manifest.toolAllowlist);
+    const allowedToolIds = new Set(allowedTools.map((tool) => tool.id));
+    let sequence = 0;
+    let continuation: ModelGenerationContinuation | undefined;
+    let toolOutput: ModelToolOutput | undefined;
+
+    while (!record.controller.signal.aborted) {
+      const toolsAvailable = sequence < this.#config.limits.maxToolRounds;
+      let result: ModelGenerationResult;
+      try {
+        result = await this.#provider.generate({
+          provider: this.#config.model.provider,
+          model: this.#config.model.model,
+          apiKey: this.#config.model.apiKey,
+          instructions: manifest.instructions,
+          input,
+          tools: toolsAvailable ? allowedTools : [],
+          ...(continuation === undefined ? {} : { continuation }),
+          ...(toolOutput === undefined ? {} : { toolOutput }),
+          maxOutputTokens: MAXIMUM_MODEL_OUTPUT_TOKENS,
+          signal: record.controller.signal,
+        });
+      } catch (error) {
+        if (
+          !toolsAvailable &&
+          error instanceof ModelGenerationError &&
+          error.code === "MODEL_RESPONSE_INVALID"
+        ) {
+          throw new ToolLoopError("TOOL_ROUND_LIMIT");
+        }
+        throw error;
+      }
+      if (result.type === "final") {
+        this.#complete(record, result.fallbackText);
+        return;
+      }
+      if (!toolsAvailable) {
+        throw new ToolLoopError("TOOL_ROUND_LIMIT");
+      }
+      const descriptor = this.#tools.byProviderName(result.providerName);
+      if (
+        descriptor === undefined ||
+        !allowedToolIds.has(descriptor.id) ||
+        !this.#tools.validateArguments(descriptor, result.arguments)
+      ) {
+        throw new ToolLoopError("TOOL_REJECTED");
+      }
+      const executionSessionId = record.executionSessionId;
+      if (executionSessionId === null) {
+        throw new Error("Tool execution session was not prepared.");
+      }
+      const payload: ToolCallPayload = {
+        toolCallId: this.#allocateToolCallId(record),
+        sessionId: executionSessionId,
+        playerUuid: record.input.playerUuid,
+        module: record.input.module,
+        tool: descriptor.id,
+        arguments: result.arguments,
+        sequence,
+      };
+      const toolResult = await this.#awaitToolResult(record, descriptor, payload);
+      if (toolResult.status === "rejected") {
+        throw new ToolLoopError("TOOL_REJECTED");
+      }
+      const providerOutput = JSON.stringify({
+        status: toolResult.status,
+        source: toolResult.source,
+        trust: toolResult.trust,
+        result: toolResult.result,
+        error: toolResult.error,
+      });
+      if (providerOutput.length > 64 * 1024) {
+        throw new ToolLoopError("TOOL_REJECTED");
+      }
+      continuation = result.continuation;
+      toolOutput = { providerCallId: result.providerCallId, output: providerOutput };
+      sequence += 1;
+    }
+  }
+
+  #complete(record: RequestRecord, fallbackText: string): void {
+    if (record.terminalSent || record.suppressResponse) {
+      return;
+    }
+    if (!isUsableFallbackText(fallbackText)) {
+      throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+    }
+    if (record.preparedSessionId !== null) {
+      this.#conversations.commitExchange({
+        ...this.#owner(record.input.playerUuid),
+        sessionId: record.preparedSessionId,
+        createSession: record.createsSession,
+        requestId: record.input.requestId,
+        module: record.input.module,
+        userContent: record.input.message,
+        assistantContent: fallbackText,
+        createdAt: new Date(this.#now()).toISOString(),
+      });
+    }
+    record.terminalSent = true;
+    this.#safeRespond(record.respond, {
+      type: "agent.complete",
+      payload: {
+        sessionId: record.preparedSessionId,
+        playerUuid: record.input.playerUuid,
+        fallbackText,
+        structuredViews: [],
+      },
+    });
+  }
+
+  #awaitToolResult(
+    record: RequestRecord,
+    descriptor: CoreToolDescriptor,
+    payload: ToolCallPayload,
+  ): Promise<ToolResultPayload> {
+    return new Promise<ToolResultPayload>((resolve, reject) => {
+      const onAbort = (): void => reject(record.controller.signal.reason);
+      const pending: PendingToolCall = {
+        payload,
+        descriptor,
+        resolve,
+        reject,
+        removeAbortListener: () => record.controller.signal.removeEventListener("abort", onAbort),
+      };
+      record.pendingTool = pending;
+      record.phase = "WAITING_TOOL";
+      record.controller.signal.addEventListener("abort", onAbort, { once: true });
+      if (record.controller.signal.aborted) {
+        onAbort();
+        return;
+      }
+      this.#safeRespond(record.respond, { type: "tool.call", payload });
+    }).finally(() => {
+      record.phase = "ACTIVE";
+    });
+  }
+
   #owner(playerUuid: string): ConversationOwner {
     return { serverId: this.#config.server.id, playerUuid };
+  }
+
+  #allocateToolCallId(record: RequestRecord): string {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const candidate = this.#randomUuid();
+      if (
+        candidate !== record.input.requestId &&
+        candidate !== record.executionSessionId &&
+        !record.issuedToolCallIds.has(candidate)
+      ) {
+        record.issuedToolCallIds.add(candidate);
+        return candidate;
+      }
+    }
+    throw new Error("Unable to allocate a unique Tool call ID.");
   }
 
   #prepareConversation(record: RequestRecord) {
@@ -455,12 +649,14 @@ export class AgentRequestService {
       if (record.input.sessionId !== null) {
         throw new ConversationOwnershipError();
       }
+      record.executionSessionId = this.#randomUuid();
       return [];
     }
 
     const owner = this.#owner(record.input.playerUuid);
     if (record.input.sessionId === null) {
       record.preparedSessionId = this.#randomUuid();
+      record.executionSessionId = record.preparedSessionId;
       record.createsSession = true;
       return [];
     }
@@ -469,6 +665,7 @@ export class AgentRequestService {
       throw new ConversationOwnershipError();
     }
     record.preparedSessionId = session.id;
+    record.executionSessionId = session.id;
     record.createsSession = false;
     const maximumHistory = Math.max(
       0,
@@ -507,6 +704,12 @@ export class AgentRequestService {
       return;
     }
     record.detached = true;
+    const pending = record.pendingTool;
+    if (pending !== undefined) {
+      record.pendingTool = undefined;
+      pending.removeAbortListener();
+      pending.reject(new Error("REQUEST_DETACHED"));
+    }
     this.#clearTimeout(record);
     if (this.#requests.get(record.input.requestId) === record) {
       this.#requests.delete(record.input.requestId);

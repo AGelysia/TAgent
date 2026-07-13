@@ -2,15 +2,14 @@
 
 ## Status and scope
 
-This document records the target architecture and decisions through Phase 6.
+This document records the target architecture and decisions through Phase 7.
 The repository contains build scaffolding, protocol contracts, the Runtime
-configuration/readiness boundary, and Paper-side Phase 3 startup, authenticated
-hello, core-descriptor, conditional-command, Phase 4 Offline lifecycle, and
-Phase 5 private conversation components, and Phase 6 Runtime-owned conversations
-and module routing. Operational tool execution, Paper repositories, client
-views, and Litematica integration remain later work. The conditional command and
-Offline recovery paths have been validated on the pinned Paper `1.21.11-132`
-server artifact.
+configuration/readiness boundary, Paper-side authenticated startup and Offline
+recovery, private conversations, Runtime-owned sessions, one-shot module
+routing, and a bounded loop for six fixed read-only tools. Proposal and write
+execution, Paper repositories, client views, and Litematica integration remain
+later work. The conditional command and Offline recovery paths have been
+validated on the pinned Paper `1.21.11-132` server artifact.
 
 The implementation has three deployable components:
 
@@ -93,13 +92,12 @@ Domain and policy packages must not call Bukkit APIs directly. They receive
 ports implemented by `minecraft`, `client`, or `storage`. This makes policy and
 proposal logic testable without a running server.
 
-Phase 3's `CoreToolRuntime` is deliberately narrower than the future `tool`
-package. It validates six required read-only, closed-schema descriptors and
-reports readiness, but has no invocation API and marks every descriptor
-`executionCapable=false`. Typed Minecraft tool implementations are deferred to
-the Phase 7 milestone. The Phase 3 optional capability-directory inspection is
-not Capability Pack loading; the loader and effective capability registry
-remain Phase 9 work.
+Phase 3 introduced `CoreToolRuntime` as non-executable readiness metadata.
+Phase 7 retains the exact six read-only, closed-schema descriptors, marks them
+executable only after the complete startup gate, and routes calls through the
+separate `tool` domain and Bukkit adapter. It still cannot invoke a descriptor
+generically. The optional capability-directory inspection is not Capability
+Pack loading; the loader and effective capability registry remain Phase 9 work.
 
 ### Agent Runtime
 
@@ -151,6 +149,14 @@ FIFO queue, a concurrency cap, one outstanding request per player, cooldown,
 an in-memory daily request limit, provider timeout, and cooperative abort. The
 monthly budget and durable usage accounting remain later work.
 
+Phase 7 extends that adapter with strict registered functions and a Runtime-
+owned serial loop. Provider-safe function schemas are deliberately smaller than
+the full shared schemas; Runtime applies the complete argument contract before
+emitting `tool.call` and validates correlation, provenance, trust, and the
+tool-specific result contract after `tool.result`. Provider call IDs never
+become protocol identities. The wire call UUID and zero-based sequence are
+Runtime-generated, with at most eight calls and one call in flight.
+
 ### Fabric client
 
 The optional client will own:
@@ -184,9 +190,10 @@ The planned split is:
 
 Paper may send audit or usage events to Runtime for display, but such a copy is
 not authoritative. The two processes exchange IDs and hashes only through the
-versioned protocol. Phase 2 creates only the Runtime-owned readiness database
-file and holds its checked connection. Tables, migrations, and repositories for
-the planned Runtime data remain unimplemented; Paper still opens no database.
+versioned protocol. Phase 2 creates the Runtime-owned readiness database file
+and holds its checked connection. Phase 6 applies versioned session/message
+migrations and uses the same private Runtime-owned connection for bounded
+repository operations. Paper still opens no database.
 
 ## State and health
 
@@ -312,29 +319,36 @@ becomes model input, and tab completion does not enumerate identifiers.
 
 The fixed Module Manifest resolves trusted instructions independently for each
 request. `/agent say` chooses `general`; `/agent module <name> <message>` chooses
-one explicit route for one request. Sessions do not store an active module and
-all Phase 6 module tool allowlists are empty.
+one explicit route for one request. Sessions do not store an active module.
+Phase 6 kept every tool allowlist empty; Phase 7 replaces those placeholders
+with fixed per-module intersections of the six registered read tools.
 
-## Current Phase 6 boundary
+## Phase 7 read-tool boundary
 
-The implemented conversation boundary is:
+The implemented Phase 7 boundary is:
 
 - Paper has no conversation database. Runtime exclusively owns the versioned
   session/message schema and commits only complete successful exchanges.
 - Resume is a dedicated authenticated application exchange. Session lookup and
   context reads always include server ID and player UUID.
-- The six fixed modules provide one-shot prompt routing with empty tool
+- The six fixed modules provide one-shot prompt routing and fixed read-tool
   allowlists. They do not persist an active route on the session.
 - Conversation storage can be disabled. That mode persists no message content,
   returns no durable session, and rejects resume explicitly.
+- The application channel supports intermediate `tool.call` and `tool.result`
+  only for the six fixed read tools. Proposal and write execution remain
+  unsupported.
+- Paper independently repeats the fixed catalog, module, closed-argument,
+  player permission, session, sequence, connection, and epoch checks. Bukkit
+  reads are scheduled on the server thread; recipe registry scans are sliced
+  and all results are bounded before transport.
+- Tool traffic is transient. Only a successful final user/assistant pair is
+  committed to the Runtime conversation transaction.
 
-The following remain outside the Phase 6 implementation boundary:
+The following remain outside the Phase 7 implementation boundary:
 
-- Durable usage accounting and monthly budget enforcement remain later work.
-- Proposals and tool execution remain unsupported; the application channel
-  rejects their reserved message types.
-- The six core tool entries are non-executable readiness descriptors. Real
-  typed tools and Paper adapters are Phase 7.
+- Durable usage accounting and monthly budget enforcement.
+- Proposal creation, confirmation, audit persistence, and every write tool.
 - Capability Pack loading and command-backed capability execution are Phase 9.
 - Client payload networking, overlay UI, item views, recipe behavior, locate,
   guide, project, build, and Litematica behavior.

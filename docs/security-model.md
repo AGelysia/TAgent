@@ -5,13 +5,14 @@
 This is the normative security design for the staged implementation. Phase 0
 and Phase 1 provide scaffolding and schemas. Phase 2 implements local Runtime
 configuration and readiness controls. Phase 3 adds Paper-side strict startup
-checks, authenticated hello handling, non-executable core descriptors, and a
+checks, authenticated hello handling, initial non-executable core descriptors, and a
 conditional command-registration boundary. Phase 4 adds persistent Offline
 state, epoch-based admission, explicit cleanup ports, and authorized recovery.
 Phase 5 adds bounded private model requests, literal text replies, rate limits,
 timeout, and cancellation. Phase 6 adds Runtime-owned sessions, owner-filtered
 resume, bounded model context, and explicit one-shot modules. It still does not
-provide typed tool execution, proposals, or Capability Pack loading.
+provide write execution, proposals, or Capability Pack loading. Phase 7 enables
+only six fixed typed read tools through a bounded, doubly validated loop.
 
 The governing rule is:
 
@@ -77,14 +78,15 @@ behavioral controls before dispatch:
 - Bound message size before parsing, require strict UTF-8 and duplicate-key
   rejection, and validate closed fields afterward.
 
-After authentication, Phase 6 permits `agent.request`, `agent.cancel`, and
-`session.resume` from Paper and `agent.complete`, `agent.error`, and
-`session.resumed` from Runtime. Each terminal message is bound to the active
+After authentication, Phase 7 permits `agent.request`, `agent.cancel`,
+`session.resume`, and `tool.result` from Paper and `agent.complete`,
+`agent.error`, `session.resumed`, and `tool.call` from Runtime. Each message is bound to the active
 connection, server ID, request ID, actual player UUID, expected session
 relationship, and issuing Offline epoch. Resume lookup uses server ID and player
 UUID in the same repository query; it does not reveal whether a rejected ID
-belongs to another owner. Live tool-message correlation is a Phase 7 execution
-requirement; every tool/proposal/view type remains rejected.
+belongs to another owner. Tool traffic additionally binds the unique call ID,
+module, tool, and zero-based sequence. Every proposal/view type remains
+rejected.
 
 Loopback binding limits remote exposure but does not protect against another
 local process. Token file permissions, log redaction, and host account security
@@ -171,19 +173,27 @@ paths are required by the design even though they are not implemented during
 Phase 3. A structured client action carries only an action kind and proposal ID;
 it cannot supply a command string.
 
-## Phase 3 core descriptor boundary
+## Core read-tool boundary
 
 `CoreToolRuntime` validates exactly six required descriptors:
 `player.context.read`, `player.held_item.read`, `server.info.read`,
 `server.plugins.list`, `server.recipe.lookup`, and `server.recipe.uses`. Every
 descriptor must use read access, declare a closed schema, and set
-`executionCapable=false`.
+`executionCapable=true` in the current Phase 7 registry.
 
-These records are readiness metadata, not callable security principals. Phase 3
-has no invocation method, Minecraft adapter, argument execution, request binding,
-or permission decision for them. They therefore cannot be used to bypass the
-execution invariants above. Real typed read tools begin in Phase 7 and must
-reapply live identity, catalog, schema, policy, permission, and thread rules.
+These records do not create a generic invocation API. Runtime publishes only
+the current module intersection and validates the full shared argument schema.
+Paper repeats catalog, schema, module, permission, request, session, player,
+sequence, connection, and epoch checks before its fixed adapter. Rejected calls
+use Paper policy provenance; successful server snapshots use fixed authoritative
+provenance. Cancellation or an Offline/connection generation change cancels or
+drops pending work and late results never reenter model context.
+
+All Bukkit access is scheduled on the primary thread without making the
+transport thread wait. Recipe scans use bounded per-tick slices and preserve
+typed recipe, layout, `IngredientChoice`, `ItemStack`, processing, and remaining
+item data. Byte and structural-token budgets replace oversized successful
+results with a typed failure.
 
 ## Capability safety
 
@@ -295,13 +305,13 @@ Responses request only for admitted player work.
 
 ## Current enforcement gap
 
-At the Phase 6 boundary, Paper-side startup, authenticated application channel,
+At the Phase 7 boundary, Paper-side startup, authenticated application channel,
 conditional registration, persistent Offline state, epoch gate, private
 conversation, request cancellation, Runtime-owned sessions, owner-filtered
-resume, one-shot modules, bounded context, and Runtime provider limits exist. The
-request cleanup port has a real producer; proposal, operation, and client-state
-ports remain empty. Proposal repositories, durable usage accounting, Phase 7
-typed tool execution, the Phase 9 capability loader, audit storage, client
-payload handling, and world mutation remain absent. Protocol schemas and
-readiness descriptors remain necessary contracts, not a complete execution
-security implementation.
+resume, one-shot modules, bounded context, Runtime provider limits, and six
+typed read-only tools exist. The request cleanup port and fixed read-tool runtime
+have real producers; proposal, write-operation, and client-state ports remain
+empty. Proposal repositories, durable usage accounting, the Phase 9 capability
+loader, audit storage, client payload handling, and world mutation remain
+absent. Protocol schemas remain necessary contracts, not evidence that a later
+feature is implemented.

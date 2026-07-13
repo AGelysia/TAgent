@@ -115,8 +115,37 @@ that tool's argument or result schema. Unknown tools, undeclared arguments, and
 extra results are rejected. Risk, permission, and confirmation metadata come
 from the trusted Paper registry, not from these generic objects or the model.
 
-Tool call `sequence` starts at zero and cannot exceed the protocol maximum of
-eight rounds. The Runtime may configure a lower limit.
+Every `tool.result` echoes the call's `toolCallId`, `sessionId`, `playerUuid`,
+`tool`, and `sequence`. The Runtime must match all of them, plus the envelope
+`requestId` and authenticated `serverId`, against the active call. A successful
+result has a non-null `result` and null `error`; a rejected or failed result has
+a null `result` and non-null `error`. `source` and `trust` come from the trusted
+Paper registry and executor, never from model arguments.
+
+Tool call `sequence` is the zero-based model round and is limited to `0..7`,
+for a protocol maximum of eight rounds. Phase 7 permits one active Tool Call per
+request and round. A Runtime supporting parallel calls later must add an
+explicit ordering contract rather than overloading `sequence`.
+
+The Phase 7 core read tools use these closed schemas:
+
+| Tool                    | Arguments schema                                    | Result schema                                    | Source / trust                      |
+| ----------------------- | --------------------------------------------------- | ------------------------------------------------ | ----------------------------------- |
+| `player.context.read`   | `tools/player-context-read-arguments.schema.json`   | `tools/player-context-read-result.schema.json`   | `paper_api` / `authoritative`       |
+| `player.held_item.read` | `tools/player-held-item-read-arguments.schema.json` | `tools/player-held-item-read-result.schema.json` | `paper_api` / `authoritative`       |
+| `server.info.read`      | `tools/server-info-read-arguments.schema.json`      | `tools/server-info-read-result.schema.json`      | `paper_api` / `authoritative`       |
+| `server.plugins.list`   | `tools/server-plugins-list-arguments.schema.json`   | `tools/server-plugins-list-result.schema.json`   | `paper_api` / `authoritative`       |
+| `server.recipe.lookup`  | `tools/server-recipe-lookup-arguments.schema.json`  | `tools/server-recipe-lookup-result.schema.json`  | `server_registry` / `authoritative` |
+| `server.recipe.uses`    | `tools/server-recipe-uses-arguments.schema.json`    | `tools/server-recipe-uses-result.schema.json`    | `server_registry` / `authoritative` |
+
+The player tools take an empty object: their target is always the player bound
+to the active request. Recipe results use the shared typed values in
+`tools/common.schema.json`; they preserve ItemStack fields, IngredientChoice,
+recipe kind, and layout. A zero-match query returns an empty `recipes` array.
+Unsupported custom layouts use the explicit `unsupported` representation and
+are never converted to invented grids or plain text. Result construction must
+also stay within the 64 KiB application-envelope limit; truncate only between
+complete recipes and set `truncated`, never truncate one IngredientChoice.
 
 ## Build preview transfer semantics
 

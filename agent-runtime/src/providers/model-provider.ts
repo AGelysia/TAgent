@@ -15,12 +15,32 @@ export interface ModelInputMessage {
   readonly content: string;
 }
 
+export interface ModelToolDefinition {
+  readonly id: string;
+  readonly providerName: string;
+  readonly description: string;
+  readonly parameters: Readonly<Record<string, unknown>>;
+}
+
+export interface ModelToolOutput {
+  readonly providerCallId: string;
+  readonly output: string;
+}
+
+export interface ModelGenerationContinuation {
+  readonly provider: "openai";
+  readonly items: readonly Readonly<Record<string, unknown>>[];
+}
+
 export interface ModelGenerationRequest {
   readonly provider: "openai";
   readonly model: string;
   readonly apiKey: string;
   readonly instructions: string;
   readonly input: readonly ModelInputMessage[];
+  readonly tools: readonly ModelToolDefinition[];
+  readonly continuation?: ModelGenerationContinuation;
+  readonly toolOutput?: ModelToolOutput;
   readonly maxOutputTokens: number;
   readonly signal: AbortSignal;
 }
@@ -30,10 +50,22 @@ export interface ModelGenerationUsage {
   readonly outputTokens: number;
 }
 
-export interface ModelGenerationResult {
+export interface ModelFinalResult {
+  readonly type: "final";
   readonly fallbackText: string;
   readonly usage?: ModelGenerationUsage;
 }
+
+export interface ModelToolCallResult {
+  readonly type: "tool_call";
+  readonly providerCallId: string;
+  readonly providerName: string;
+  readonly arguments: Readonly<Record<string, unknown>>;
+  readonly continuation: ModelGenerationContinuation;
+  readonly usage?: ModelGenerationUsage;
+}
+
+export type ModelGenerationResult = ModelFinalResult | ModelToolCallResult;
 
 export interface ModelProvider extends ModelProviderHealthCheck {
   generate(request: ModelGenerationRequest): Promise<ModelGenerationResult>;

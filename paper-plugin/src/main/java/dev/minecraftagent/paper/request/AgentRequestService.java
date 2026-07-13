@@ -5,13 +5,20 @@ import dev.minecraftagent.paper.lifecycle.OfflineReason;
 import dev.minecraftagent.paper.lifecycle.OperationalGate;
 import dev.minecraftagent.paper.protocol.AgentProtocolCodec;
 import dev.minecraftagent.paper.protocol.AgentProtocolCodec.CancelReason;
+import dev.minecraftagent.paper.tool.ReadToolCall;
+import dev.minecraftagent.paper.tool.ReadToolExecutor;
+import dev.minecraftagent.paper.tool.ReadToolRegistry;
+import dev.minecraftagent.paper.tool.ReadToolResult;
 import dev.minecraftagent.paper.transport.AuthenticatedRuntimeConnection;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -59,6 +66,9 @@ public final class AgentRequestService
   private final MainThreadExecutor mainThread;
   private final PlayerReplySink replies;
   private final EventSink events;
+  private final ReadToolRegistry toolRegistry;
+  private final ReadToolExecutor toolExecutor;
+  private final Executor callbacks;
   private final AtomicReference<ConnectionBinding> connection = new AtomicReference<>();
   private final AtomicBoolean closed = new AtomicBoolean();
   private final Map<UUID, LiveRequest> requestsById = new HashMap<>();
@@ -75,13 +85,44 @@ public final class AgentRequestService
     this(
         operationalGate,
         requestTimeout,
+        scheduler,
+        mainThread,
+        replies,
+        events,
+        new ReadToolRegistry(),
+        call ->
+            CompletableFuture.completedFuture(
+                ReadToolResult.failed(
+                    ReadToolResult.Source.PAPER_POLICY,
+                    "TOOL_EXECUTION_UNAVAILABLE",
+                    "Read tools are unavailable.",
+                    true)),
+        scheduler);
+  }
+
+  public AgentRequestService(
+      OperationalGate operationalGate,
+      Duration requestTimeout,
+      ScheduledExecutorService scheduler,
+      MainThreadExecutor mainThread,
+      PlayerReplySink replies,
+      EventSink events,
+      ReadToolRegistry toolRegistry,
+      ReadToolExecutor toolExecutor,
+      Executor callbacks) {
+    this(
+        operationalGate,
+        requestTimeout,
         (delay, task) -> {
           var future = scheduler.schedule(task, delay.toMillis(), TimeUnit.MILLISECONDS);
           return () -> future.cancel(false);
         },
         mainThread,
         replies,
-        events);
+        events,
+        toolRegistry,
+        toolExecutor,
+        callbacks);
   }
 
   AgentRequestService(
@@ -91,12 +132,43 @@ public final class AgentRequestService
       MainThreadExecutor mainThread,
       PlayerReplySink replies,
       EventSink events) {
+    this(
+        operationalGate,
+        requestTimeout,
+        timeoutScheduler,
+        mainThread,
+        replies,
+        events,
+        new ReadToolRegistry(),
+        call ->
+            CompletableFuture.completedFuture(
+                ReadToolResult.failed(
+                    ReadToolResult.Source.PAPER_POLICY,
+                    "TOOL_EXECUTION_UNAVAILABLE",
+                    "Read tools are unavailable.",
+                    true)),
+        Runnable::run);
+  }
+
+  AgentRequestService(
+      OperationalGate operationalGate,
+      Duration requestTimeout,
+      TimeoutScheduler timeoutScheduler,
+      MainThreadExecutor mainThread,
+      PlayerReplySink replies,
+      EventSink events,
+      ReadToolRegistry toolRegistry,
+      ReadToolExecutor toolExecutor,
+      Executor callbacks) {
     this.operationalGate = Objects.requireNonNull(operationalGate);
     this.requestTimeout = Objects.requireNonNull(requestTimeout);
     this.timeoutScheduler = Objects.requireNonNull(timeoutScheduler);
     this.mainThread = Objects.requireNonNull(mainThread);
     this.replies = Objects.requireNonNull(replies);
     this.events = Objects.requireNonNull(events);
+    this.toolRegistry = Objects.requireNonNull(toolRegistry);
+    this.toolExecutor = Objects.requireNonNull(toolExecutor);
+    this.callbacks = Objects.requireNonNull(callbacks);
     if (requestTimeout.isZero() || requestTimeout.isNegative()) {
       throw new IllegalArgumentException("Request timeout must be positive");
     }
@@ -144,7 +216,13 @@ public final class AgentRequestService
           operation == Operation.QUERY ? currentSessionsByPlayer.get(playerId) : requestedSessionId;
       request =
           new LiveRequest(
-              UUID.randomUUID(), playerId, permit.orElseThrow(), binding, operation, sessionId);
+              UUID.randomUUID(),
+              playerId,
+              permit.orElseThrow(),
+              binding,
+              operation,
+              sessionId,
+              module);
       if (closed.get()
           || connection.get() != binding
           || !binding.connection().isOpen()
@@ -247,6 +325,7 @@ public final class AgentRequestService
     }
     for (var request : pending) {
       request.cancelTimeout();
+      request.cancelToolExecution();
       sendCancellation(request, cancellationReason);
     }
   }
@@ -290,6 +369,11 @@ public final class AgentRequestService
     }
 
     LiveRequest request;
+    if (message instanceof AgentProtocolCodec.ToolCall toolCall) {
+      receiveToolCall(source, toolCall);
+      return;
+    }
+
     String reply;
     synchronized (lock) {
       request = requestsById.get(message.requestId());
@@ -326,6 +410,114 @@ public final class AgentRequestService
     dispatchBoundReply(request, reply);
   }
 
+  private void receiveToolCall(ConnectionBinding source, AgentProtocolCodec.ToolCall message) {
+    LiveRequest request;
+    ReadToolCall call = message.call();
+    ReadToolResult immediate = null;
+    synchronized (lock) {
+      request = requestsById.get(message.requestId());
+      if (request == null) {
+        return;
+      }
+      if (request.binding() != source || !request.playerId().equals(message.playerUuid())) {
+        rejectBinding(source);
+        return;
+      }
+      if (!validToolBinding(request, call)) {
+        rejectBinding(source);
+        return;
+      }
+      var validation = toolRegistry.validate(call.tool(), call.module(), call.arguments());
+      request.acceptToolCall(call);
+      if (!validation.accepted()) {
+        immediate = validation.rejection();
+      }
+    }
+
+    if (immediate != null) {
+      finishTool(request, call, immediate, null);
+      return;
+    }
+    try {
+      var execution = toolExecutor.execute(call).toCompletableFuture();
+      synchronized (lock) {
+        if (!requestOwnsActiveTool(request, call)) {
+          execution.cancel(false);
+          return;
+        }
+        request.toolExecution(call, execution);
+      }
+      execution.whenCompleteAsync(
+          (result, error) -> finishTool(request, call, result, error), callbacks);
+    } catch (RuntimeException error) {
+      finishTool(request, call, null, error);
+    }
+  }
+
+  private boolean validToolBinding(LiveRequest request, ReadToolCall call) {
+    return request.operation() == Operation.QUERY
+        && request.module() == call.module()
+        && request.activeToolCall() == null
+        && request.nextToolSequence() == call.sequence()
+        && !request.hasToolCallId(call.toolCallId())
+        && request.matchesToolSession(call.sessionId())
+        && operationalGate.revalidate(request.permit());
+  }
+
+  private void finishTool(
+      LiveRequest request, ReadToolCall call, ReadToolResult result, Throwable error) {
+    var safeResult =
+        error == null && result != null
+            ? result
+            : ReadToolResult.failed(
+                toolRegistry
+                    .find(call.tool())
+                    .map(ReadToolRegistry.Descriptor::source)
+                    .orElse(ReadToolResult.Source.PAPER_POLICY),
+                "TOOL_EXECUTION_FAILED",
+                "The server could not execute this read tool.",
+                true);
+    synchronized (lock) {
+      if (!requestOwnsActiveTool(request, call)) {
+        return;
+      }
+    }
+    java.util.concurrent.CompletionStage<Void> sent;
+    try {
+      var encoded =
+          request.binding().codec().encodeToolResult(request.requestId(), call, safeResult);
+      synchronized (lock) {
+        if (!requestOwnsActiveTool(request, call)) {
+          return;
+        }
+        sent = request.binding().connection().sendApplication(encoded);
+        request.completeToolCall(call);
+      }
+      sent.whenCompleteAsync(
+          (ignored, sendError) -> {
+            if (sendError != null) {
+              sendFailed(request);
+            }
+          },
+          callbacks);
+    } catch (RuntimeException sendError) {
+      sendFailed(request);
+    }
+  }
+
+  private boolean requestOwnsActiveTool(LiveRequest request, ReadToolCall call) {
+    return requestsById.get(request.requestId()) == request
+        && request.activeToolCall() == call
+        && connection.get() == request.binding()
+        && request.binding().connection().isOpen()
+        && operationalGate.revalidate(request.permit());
+  }
+
+  private void rejectBinding(ConnectionBinding source) {
+    events.event("RUNTIME_APPLICATION_BINDING_REJECTED");
+    source.connection().close();
+  }
+
   private void timeout(LiveRequest request) {
     synchronized (lock) {
       if (!remove(request)) {
@@ -360,6 +552,7 @@ public final class AgentRequestService
     }
     requestsById.remove(request.requestId());
     requestsByPlayer.remove(request.playerId(), request);
+    request.cancelToolExecution();
     return true;
   }
 
@@ -409,12 +602,13 @@ public final class AgentRequestService
   private static boolean validResponse(
       LiveRequest request, AgentProtocolCodec.InboundMessage message) {
     if (message instanceof AgentProtocolCodec.AgentError) {
-      return true;
+      return request.activeToolCall() == null;
     }
     if (request.operation() == Operation.QUERY
         && message instanceof AgentProtocolCodec.Completion completion) {
       return request.expectedSessionId() == null
-          || request.expectedSessionId().equals(completion.sessionId());
+          ? request.matchesCompletionSession(completion.sessionId())
+          : request.expectedSessionId().equals(completion.sessionId());
     }
     if (request.operation() == Operation.RESUME
         && message instanceof AgentProtocolCodec.SessionResumed resumed) {
@@ -438,6 +632,8 @@ public final class AgentRequestService
       case AgentProtocolCodec.AgentError error -> error.fallbackText();
       case AgentProtocolCodec.SessionResumed resumed ->
           SESSION_RESUMED_PREFIX + resumed.sessionId() + ".";
+      case AgentProtocolCodec.ToolCall ignored ->
+          throw new IllegalStateException("Intermediate tool call");
     };
   }
 
@@ -456,7 +652,13 @@ public final class AgentRequestService
     private final ConnectionBinding binding;
     private final Operation operation;
     private final UUID expectedSessionId;
+    private final AgentModule module;
     private final AtomicReference<Cancellable> timeout = new AtomicReference<>();
+    private final HashSet<UUID> toolCallIds = new HashSet<>();
+    private ReadToolCall activeToolCall;
+    private UUID toolSessionId;
+    private int nextToolSequence;
+    private CompletableFuture<ReadToolResult> toolExecution;
 
     private LiveRequest(
         UUID requestId,
@@ -464,13 +666,15 @@ public final class AgentRequestService
         OperationalGate.Permit permit,
         ConnectionBinding binding,
         Operation operation,
-        UUID expectedSessionId) {
+        UUID expectedSessionId,
+        AgentModule module) {
       this.requestId = requestId;
       this.playerId = playerId;
       this.permit = permit;
       this.binding = binding;
       this.operation = operation;
       this.expectedSessionId = expectedSessionId;
+      this.module = module;
     }
 
     UUID requestId() {
@@ -495,6 +699,63 @@ public final class AgentRequestService
 
     UUID expectedSessionId() {
       return expectedSessionId;
+    }
+
+    AgentModule module() {
+      return module;
+    }
+
+    ReadToolCall activeToolCall() {
+      return activeToolCall;
+    }
+
+    int nextToolSequence() {
+      return nextToolSequence;
+    }
+
+    boolean hasToolCallId(UUID toolCallId) {
+      return toolCallIds.contains(toolCallId);
+    }
+
+    boolean matchesToolSession(UUID sessionId) {
+      if (expectedSessionId != null) {
+        return expectedSessionId.equals(sessionId);
+      }
+      return toolSessionId == null || toolSessionId.equals(sessionId);
+    }
+
+    boolean matchesCompletionSession(UUID sessionId) {
+      return sessionId == null || toolSessionId == null || toolSessionId.equals(sessionId);
+    }
+
+    void acceptToolCall(ReadToolCall call) {
+      activeToolCall = call;
+      toolSessionId = call.sessionId();
+      toolCallIds.add(call.toolCallId());
+    }
+
+    void completeToolCall(ReadToolCall call) {
+      if (activeToolCall == call) {
+        activeToolCall = null;
+        toolExecution = null;
+        nextToolSequence++;
+      }
+    }
+
+    void toolExecution(ReadToolCall call, CompletableFuture<ReadToolResult> execution) {
+      if (activeToolCall != call || toolExecution != null) {
+        execution.cancel(false);
+        throw new IllegalStateException("Tool execution is no longer current");
+      }
+      toolExecution = execution;
+    }
+
+    void cancelToolExecution() {
+      var execution = toolExecution;
+      toolExecution = null;
+      if (execution != null) {
+        execution.cancel(false);
+      }
     }
 
     void timeout(Cancellable scheduled) {

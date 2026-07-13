@@ -17,6 +17,8 @@ import dev.minecraftagent.paper.request.AgentRequestService;
 import dev.minecraftagent.paper.startup.LocalStartupChecks;
 import dev.minecraftagent.paper.startup.StartupFailure;
 import dev.minecraftagent.paper.state.FileDesiredModeStore;
+import dev.minecraftagent.paper.tool.BukkitReadToolExecutor;
+import dev.minecraftagent.paper.tool.ReadToolRegistry;
 import dev.minecraftagent.paper.transport.JavaHttpRuntimeConnector;
 import dev.minecraftagent.paper.transport.RuntimeConnectionSettings;
 import java.io.IOException;
@@ -66,6 +68,10 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     var localChecks = new LocalStartupChecks();
     var connector = new JavaHttpRuntimeConnector(worker);
     var operationalGate = new OperationalGate();
+    var toolRegistry = new ReadToolRegistry();
+    var toolExecutor =
+        new BukkitReadToolExecutor(
+            getServer(), toolRegistry, task -> getServer().getScheduler().runTask(this, task));
     var requests =
         new AgentRequestService(
             operationalGate,
@@ -78,7 +84,10 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
                 player.sendMessage(Component.text(message));
               }
             },
-            code -> getLogger().warning("event=request_warning code=" + code));
+            code -> getLogger().warning("event=request_warning code=" + code),
+            toolRegistry,
+            toolExecutor,
+            worker);
     requestServiceReference.set(requests);
     getServer().getPluginManager().registerEvents(new AgentPlayerListener(requests), this);
 
