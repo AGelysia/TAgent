@@ -14,7 +14,8 @@
     "rotation": 0,
     "mirror": "NONE"
   },
-  "baseRegionHash": null,
+  "baseRegionHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "changeSetHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "contentHash": "04718129d975cb7db4eb62918319a9e17a9630fff7b3cd0cc2ac2e7d288dcd29",
   "paletteHash": "20dcced40879b906acda099d368bbd1720cc78b551ccb73902fcd798e9adfb33",
   "contentFormat": "minecraft-agent.palette-v1",

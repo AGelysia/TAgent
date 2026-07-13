@@ -1,6 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { gunzipSync } from "node:zlib";
+import { inflateRawSync } from "node:zlib";
 
+import { parseStrictJson } from "../transport/strict-json.js";
 import { SUPPORTED_PROTOCOL_VERSION } from "../version.js";
 
 export interface SemanticValidationError {
@@ -449,12 +450,17 @@ function hasValidUnicode(value: string): boolean {
   return true;
 }
 
-function canonicalizeJson(value: unknown): string | undefined {
+function canonicalizeJson(
+  value: unknown,
+  maximumBytes = PROPOSAL_ARGUMENT_CANONICAL_LIMIT_BYTES,
+  maximumNodes = PROPOSAL_ARGUMENT_NODE_LIMIT,
+  maximumDepth = PROPOSAL_ARGUMENT_DEPTH_LIMIT,
+): string | undefined {
   const budget = { nodes: 0, textBytes: 0 };
 
   function encode(candidate: unknown, depth: number): string | undefined {
     budget.nodes += 1;
-    if (depth > PROPOSAL_ARGUMENT_DEPTH_LIMIT || budget.nodes > PROPOSAL_ARGUMENT_NODE_LIMIT) {
+    if (depth > maximumDepth || budget.nodes > maximumNodes) {
       return undefined;
     }
     if (candidate === null) {
@@ -468,10 +474,7 @@ function canonicalizeJson(value: unknown): string | undefined {
     }
     if (typeof candidate === "string") {
       budget.textBytes += Buffer.byteLength(candidate, "utf8");
-      if (
-        !hasValidUnicode(candidate) ||
-        budget.textBytes > PROPOSAL_ARGUMENT_CANONICAL_LIMIT_BYTES
-      ) {
+      if (!hasValidUnicode(candidate) || budget.textBytes > maximumBytes) {
         return undefined;
       }
       return JSON.stringify(candidate);
@@ -501,7 +504,7 @@ function canonicalizeJson(value: unknown): string | undefined {
     const encoded: string[] = [];
     for (const key of Object.keys(candidate).sort()) {
       budget.textBytes += Buffer.byteLength(key, "utf8");
-      if (!hasValidUnicode(key) || budget.textBytes > PROPOSAL_ARGUMENT_CANONICAL_LIMIT_BYTES) {
+      if (!hasValidUnicode(key) || budget.textBytes > maximumBytes) {
         return undefined;
       }
       const item = encode(candidate[key], depth + 1);
@@ -514,8 +517,7 @@ function canonicalizeJson(value: unknown): string | undefined {
   }
 
   const canonical = encode(value, 0);
-  return canonical !== undefined &&
-    Buffer.byteLength(canonical, "utf8") <= PROPOSAL_ARGUMENT_CANONICAL_LIMIT_BYTES
+  return canonical !== undefined && Buffer.byteLength(canonical, "utf8") <= maximumBytes
     ? canonical
     : undefined;
 }
@@ -626,14 +628,7 @@ function decodeContent(
       case "identity":
         return { content: compressedContent };
       case "gzip":
-        return {
-          content: gunzipSync(compressedContent, {
-            maxOutputLength: Math.min(
-              declaredUncompressedBytes,
-              BUILD_PREVIEW_UNCOMPRESSED_HARD_LIMIT_BYTES,
-            ),
-          }),
-        };
+        return decodeSingleGzipMember(compressedContent, declaredUncompressedBytes);
       default:
         return { error: `unsupported build preview encoding ${JSON.stringify(compression)}` };
     }
@@ -642,6 +637,335 @@ function decodeContent(
       error: `unable to decompress transfer content: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+}
+
+function decodeSingleGzipMember(
+  source: Buffer,
+  maximumOutputLength: number,
+): { readonly content?: Buffer; readonly error?: string } {
+  if (source.length < 18 || source[0] !== 0x1f || source[1] !== 0x8b || source[2] !== 8) {
+    return { error: "gzip header is invalid" };
+  }
+  const flags = source[3] ?? 0;
+  if ((flags & 0xe0) !== 0) {
+    return { error: "gzip reserved flags are set" };
+  }
+  if ((flags & 0x02) !== 0) {
+    return { error: "gzip header checksum flag is unsupported" };
+  }
+  let offset = 10;
+  const requireBytes = (count: number): boolean => offset + count <= source.length - 8;
+  if ((flags & 0x04) !== 0) {
+    if (!requireBytes(2)) return { error: "gzip extra header is truncated" };
+    const length = source.readUInt16LE(offset);
+    offset += 2;
+    if (!requireBytes(length)) return { error: "gzip extra field is truncated" };
+    offset += length;
+  }
+  for (const flag of [0x08, 0x10]) {
+    if ((flags & flag) === 0) continue;
+    while (offset < source.length - 8 && source[offset] !== 0) offset += 1;
+    if (offset >= source.length - 8) return { error: "gzip string header is truncated" };
+    offset += 1;
+  }
+  try {
+    const inflated = inflateRawSync(source.subarray(offset), {
+      info: true,
+      maxOutputLength: Math.min(maximumOutputLength, BUILD_PREVIEW_UNCOMPRESSED_HARD_LIMIT_BYTES),
+    }) as unknown as {
+      readonly buffer: Buffer;
+      readonly engine: { readonly bytesWritten: number };
+    };
+    const consumed = inflated.engine.bytesWritten;
+    const trailer = offset + consumed;
+    if (trailer + 8 !== source.length) {
+      return { error: "gzip must contain exactly one member with no trailing data" };
+    }
+    const expectedCrc = source.readUInt32LE(trailer);
+    const expectedSize = source.readUInt32LE(trailer + 4);
+    if (
+      crc32(inflated.buffer) !== expectedCrc ||
+      inflated.buffer.length % 0x1_0000_0000 !== expectedSize
+    ) {
+      return { error: "gzip trailer checksum or size is invalid" };
+    }
+    return { content: inflated.buffer };
+  } catch (error) {
+    return {
+      error: `unable to inflate gzip member: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+let crcTable: readonly number[] | undefined;
+
+function crc32(content: Buffer): number {
+  crcTable ??= Array.from({ length: 256 }, (_, index) => {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value & 1) === 0 ? value >>> 1 : 0xedb8_8320 ^ (value >>> 1);
+    }
+    return value >>> 0;
+  });
+  let value = 0xffff_ffff;
+  for (const byte of content) {
+    value = (crcTable[(value ^ byte) & 0xff] ?? 0) ^ (value >>> 8);
+  }
+  return (value ^ 0xffff_ffff) >>> 0;
+}
+
+interface BuildContentIssue {
+  readonly code: string;
+  readonly path: string;
+  readonly message: string;
+}
+
+function validateBuildContent(
+  metadata: JsonRecord,
+  content: Buffer,
+): BuildContentIssue | undefined {
+  const text = content.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(content)) {
+    return {
+      code: "CONTENT_JSON_INVALID",
+      path: "/chunks",
+      message: "content is not strict UTF-8",
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = parseStrictJson(text, { maximumDepth: 16, maximumTokens: 1_500_000 });
+  } catch {
+    return {
+      code: "CONTENT_JSON_INVALID",
+      path: "/chunks",
+      message: "content is not duplicate-free strict JSON",
+    };
+  }
+  if (!isRecord(parsed) || parsed["version"] !== 1 || !Array.isArray(parsed["blocks"])) {
+    return {
+      code: "CONTENT_JSON_INVALID",
+      path: "/chunks",
+      message: "palette-v1 shape is invalid",
+    };
+  }
+  const canonical = canonicalizeJson(
+    parsed,
+    BUILD_PREVIEW_UNCOMPRESSED_HARD_LIMIT_BYTES,
+    1_500_000,
+    16,
+  );
+  if (canonical !== text) {
+    return {
+      code: "CONTENT_CANONICAL_MISMATCH",
+      path: "/chunks",
+      message: "palette-v1 content must be its RFC 8785 representation",
+    };
+  }
+
+  const palette = metadata["palette"];
+  if (!Array.isArray(palette)) {
+    return { code: "PALETTE_ID_INVALID", path: "/palette", message: "palette is missing" };
+  }
+  const paletteCanonical = canonicalizeJson(palette, 1_048_576, 65_536, 16);
+  if (
+    paletteCanonical === undefined ||
+    sha256(Buffer.from(paletteCanonical, "utf8")) !== metadata["paletteHash"]
+  ) {
+    return {
+      code: "PALETTE_HASH_MISMATCH",
+      path: "/paletteHash",
+      message: "paletteHash does not match the canonical palette",
+    };
+  }
+  const states = new Set<string>();
+  let previousState: string | undefined;
+  for (let index = 0; index < palette.length; index += 1) {
+    const entry = palette[index];
+    if (!isRecord(entry) || entry["id"] !== index || !isRecord(entry["properties"])) {
+      return {
+        code: "PALETTE_ID_INVALID",
+        path: `/palette/${String(index)}`,
+        message: "palette IDs must be contiguous and match array order",
+      };
+    }
+    const blockId = entry["blockId"];
+    if (typeof blockId !== "string" || blockId === "minecraft:air") {
+      return {
+        code: "PALETTE_STATE_INVALID",
+        path: `/palette/${String(index)}/blockId`,
+        message: "air and malformed states cannot be explicit palette entries",
+      };
+    }
+    const properties = entry["properties"];
+    const pairs: string[] = [];
+    for (const key of Object.keys(properties).sort()) {
+      const property = properties[key];
+      if (typeof property !== "string") {
+        return {
+          code: "PALETTE_STATE_INVALID",
+          path: `/palette/${String(index)}/properties`,
+          message: "palette property values must be strings",
+        };
+      }
+      pairs.push(`${key}=${property}`);
+    }
+    const state = `${blockId}${pairs.length === 0 ? "" : `[${pairs.join(",")}]`}`;
+    if (states.has(state)) {
+      return {
+        code: "PALETTE_STATE_DUPLICATE",
+        path: `/palette/${String(index)}`,
+        message: "canonical palette states must be unique",
+      };
+    }
+    // Match Java String.compareTo: protocol state strings are ASCII and sort by code unit.
+    if (previousState !== undefined && previousState >= state) {
+      return {
+        code: "PALETTE_ORDER_INVALID",
+        path: `/palette/${String(index)}`,
+        message: "canonical palette states must be sorted",
+      };
+    }
+    states.add(state);
+    previousState = state;
+  }
+
+  const bounds = metadata["bounds"];
+  const minimum = isRecord(bounds) && isRecord(bounds["min"]) ? bounds["min"] : undefined;
+  const maximum = isRecord(bounds) && isRecord(bounds["max"]) ? bounds["max"] : undefined;
+  const coordinate = (position: JsonRecord | undefined, key: string): number | undefined => {
+    const value = position?.[key];
+    return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
+  };
+  const minX = coordinate(minimum, "x");
+  const minY = coordinate(minimum, "y");
+  const minZ = coordinate(minimum, "z");
+  const maxX = coordinate(maximum, "x");
+  const maxY = coordinate(maximum, "y");
+  const maxZ = coordinate(maximum, "z");
+  const origin = isRecord(metadata["origin"]) ? metadata["origin"] : undefined;
+  const originX = coordinate(origin, "x");
+  const originY = coordinate(origin, "y");
+  const originZ = coordinate(origin, "z");
+  if (
+    minX === undefined ||
+    minY === undefined ||
+    minZ === undefined ||
+    maxX === undefined ||
+    maxY === undefined ||
+    maxZ === undefined ||
+    minX > maxX ||
+    minY > maxY ||
+    minZ > maxZ ||
+    originX === undefined ||
+    originY === undefined ||
+    originZ === undefined ||
+    originX < minX ||
+    originX > maxX ||
+    originY < minY ||
+    originY > maxY ||
+    originZ < minZ ||
+    originZ > maxZ ||
+    maxX - minX + 1 > 32 ||
+    maxY - minY + 1 > 32 ||
+    maxZ - minZ + 1 > 32
+  ) {
+    return {
+      code: "BLOCK_GEOMETRY_INVALID",
+      path: "/bounds",
+      message: "bounds or origin violate the preview geometry policy",
+    };
+  }
+  const volume = (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1);
+  if (volume > 4096) {
+    return {
+      code: "BLOCK_GEOMETRY_INVALID",
+      path: "/bounds",
+      message: "bounds exceed the preview volume policy",
+    };
+  }
+  const blocks = parsed["blocks"];
+  if (metadata["blockCount"] !== blocks.length || blocks.length > volume) {
+    return {
+      code: "BLOCK_COUNT_MISMATCH",
+      path: "/blockCount",
+      message: "blockCount must equal the complete non-air target block list",
+    };
+  }
+  let previous: readonly [number, number, number] | undefined;
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    if (!isRecord(block)) {
+      return {
+        code: "BLOCK_GEOMETRY_INVALID",
+        path: `/blocks/${String(index)}`,
+        message: "block is invalid",
+      };
+    }
+    const x = block["x"];
+    const y = block["y"];
+    const z = block["z"];
+    const state = block["state"];
+    if (
+      typeof x !== "number" ||
+      !Number.isSafeInteger(x) ||
+      typeof y !== "number" ||
+      !Number.isSafeInteger(y) ||
+      typeof z !== "number" ||
+      !Number.isSafeInteger(z) ||
+      typeof state !== "number" ||
+      !Number.isSafeInteger(state) ||
+      x < minX ||
+      x > maxX ||
+      y < minY ||
+      y > maxY ||
+      z < minZ ||
+      z > maxZ ||
+      state < 0 ||
+      state >= palette.length
+    ) {
+      return {
+        code: "BLOCK_GEOMETRY_INVALID",
+        path: `/blocks/${String(index)}`,
+        message: "block position or palette reference is invalid",
+      };
+    }
+    const current = [y, z, x] as const;
+    if (
+      previous !== undefined &&
+      (current[0] < previous[0] ||
+        (current[0] === previous[0] && current[1] < previous[1]) ||
+        (current[0] === previous[0] && current[1] === previous[1] && current[2] <= previous[2]))
+    ) {
+      return {
+        code: "BLOCK_ORDER_INVALID",
+        path: `/blocks/${String(index)}`,
+        message: "blocks must be unique and sorted by y, z, x",
+      };
+    }
+    previous = current;
+  }
+  const difference = metadata["difference"];
+  if (
+    !isRecord(difference) ||
+    !["added", "replaced", "removed"].every(
+      (key) =>
+        typeof difference[key] === "number" &&
+        Number.isSafeInteger(difference[key]) &&
+        (difference[key] as number) >= 0,
+    ) ||
+    (difference["added"] as number) +
+      (difference["replaced"] as number) +
+      (difference["removed"] as number) >
+      volume
+  ) {
+    return {
+      code: "DIFFERENCE_COUNT_INVALID",
+      path: "/difference",
+      message: "difference counts exceed the bounded region",
+    };
+  }
+  return undefined;
 }
 
 export function validateProtocolVersion(
@@ -860,6 +1184,15 @@ export function validateBuildPreviewChunks(value: unknown): SemanticValidationEr
         ),
       ];
     }
+    const metadata = collection.metadataRecords.find(
+      (record) => record["contentFormat"] === "minecraft-agent.palette-v1",
+    );
+    if (metadata !== undefined) {
+      const contentIssue = validateBuildContent(metadata, decodedContent.content);
+      if (contentIssue !== undefined) {
+        return [semanticError(contentIssue.code, rule, contentIssue.path, contentIssue.message)];
+      }
+    }
   }
 
   return [];
@@ -994,6 +1327,457 @@ export function validateRecipeView(value: unknown): SemanticValidationError[] {
   });
 
   return errors;
+}
+
+interface RecipeV2Inspection {
+  readonly recipe: JsonRecord;
+  readonly path: string;
+  readonly logicalSlots: Set<number>;
+  readonly choices: Array<{ readonly value: unknown; readonly path: string }>;
+  readonly itemStacks: Array<{ readonly value: unknown; readonly path: string }>;
+}
+
+const RECIPE_V2_COOKING_TYPES = new Set(["smelting", "blasting", "smoking", "campfire_cooking"]);
+
+function recipeV2Failure(
+  code: string,
+  instancePath: string,
+  message: string,
+): SemanticValidationError[] {
+  return [semanticError(code, "recipe-view-v2", instancePath, message)];
+}
+
+function expectedRecipeV2Layout(recipeType: unknown): string | undefined {
+  if (recipeType === "shaped" || recipeType === "shapeless") {
+    return "grid";
+  }
+  if (RECIPE_V2_COOKING_TYPES.has(String(recipeType)) || recipeType === "stonecutting") {
+    return "single_input";
+  }
+  if (recipeType === "smithing_transform" || recipeType === "smithing_trim") {
+    return "smithing";
+  }
+  if (recipeType === "transmute") {
+    return "transmute";
+  }
+  if (recipeType === "complex" || recipeType === "custom") {
+    return "unsupported";
+  }
+  return undefined;
+}
+
+function inspectRecipeV2Layout(
+  inspection: RecipeV2Inspection,
+): SemanticValidationError | undefined {
+  const layout = inspection.recipe["layout"];
+  if (!isRecord(layout)) {
+    return semanticError(
+      "RECIPE_LAYOUT_INVALID",
+      "recipe-view-v2",
+      `${inspection.path}/layout`,
+      "recipe layout must be an object",
+    );
+  }
+  const expectedKind = expectedRecipeV2Layout(inspection.recipe["recipeType"]);
+  if (expectedKind === undefined || layout["kind"] !== expectedKind) {
+    return semanticError(
+      "RECIPE_LAYOUT_INVALID",
+      "recipe-view-v2",
+      `${inspection.path}/layout/kind`,
+      "recipe type and layout kind do not agree",
+    );
+  }
+
+  if (expectedKind === "grid") {
+    const width = layout["width"];
+    const height = layout["height"];
+    const ingredients = layout["ingredients"];
+    if (
+      !Number.isSafeInteger(width) ||
+      !Number.isSafeInteger(height) ||
+      Number(width) < 1 ||
+      Number(width) > 3 ||
+      Number(height) < 1 ||
+      Number(height) > 3 ||
+      !Array.isArray(ingredients) ||
+      ingredients.length < 1 ||
+      ingredients.length > 9
+    ) {
+      return semanticError(
+        "RECIPE_LAYOUT_INVALID",
+        "recipe-view-v2",
+        `${inspection.path}/layout`,
+        "grid dimensions and ingredients must remain bounded",
+      );
+    }
+    const slots = new Set<number>();
+    const positions = new Set<string>();
+    for (let index = 0; index < ingredients.length; index += 1) {
+      const ingredient = ingredients[index];
+      const ingredientPath = `${inspection.path}/layout/ingredients/${index}`;
+      if (!isRecord(ingredient)) {
+        return semanticError(
+          "RECIPE_LAYOUT_INVALID",
+          "recipe-view-v2",
+          ingredientPath,
+          "grid ingredient must be an object",
+        );
+      }
+      const slot = ingredient["slot"];
+      const x = ingredient["x"];
+      const y = ingredient["y"];
+      if (!Number.isSafeInteger(slot) || !Number.isSafeInteger(x) || !Number.isSafeInteger(y)) {
+        return semanticError(
+          "RECIPE_LAYOUT_INVALID",
+          "recipe-view-v2",
+          ingredientPath,
+          "grid ingredient coordinates must be integers",
+        );
+      }
+      const slotNumber = Number(slot);
+      const xNumber = Number(x);
+      const yNumber = Number(y);
+      if (xNumber < 0 || xNumber >= Number(width) || yNumber < 0 || yNumber >= Number(height)) {
+        return semanticError(
+          "RECIPE_INGREDIENT_OUT_OF_BOUNDS",
+          "recipe-view-v2",
+          ingredientPath,
+          "grid ingredient is outside the declared dimensions",
+        );
+      }
+      const position = `${xNumber},${yNumber}`;
+      if (slots.has(slotNumber) || positions.has(position)) {
+        return semanticError(
+          "RECIPE_INGREDIENT_DUPLICATE",
+          "recipe-view-v2",
+          ingredientPath,
+          "grid ingredient repeats a slot or coordinate",
+        );
+      }
+      if (slotNumber !== yNumber * Number(width) + xNumber) {
+        return semanticError(
+          "RECIPE_SLOT_COORDINATE_MISMATCH",
+          "recipe-view-v2",
+          `${ingredientPath}/slot`,
+          "grid slot does not match its row-major coordinate",
+        );
+      }
+      slots.add(slotNumber);
+      positions.add(position);
+      inspection.logicalSlots.add(slotNumber);
+      inspection.choices.push({
+        value: ingredient["ingredient"],
+        path: `${ingredientPath}/ingredient`,
+      });
+    }
+    return undefined;
+  }
+
+  if (expectedKind === "single_input") {
+    inspection.logicalSlots.add(0);
+    inspection.choices.push({
+      value: layout["ingredient"],
+      path: `${inspection.path}/layout/ingredient`,
+    });
+  } else if (expectedKind === "smithing") {
+    ["template", "base", "addition"].forEach((field, slot) => {
+      inspection.logicalSlots.add(slot);
+      inspection.choices.push({
+        value: layout[field],
+        path: `${inspection.path}/layout/${field}`,
+      });
+    });
+  } else if (expectedKind === "transmute") {
+    ["input", "material"].forEach((field, slot) => {
+      inspection.logicalSlots.add(slot);
+      inspection.choices.push({
+        value: layout[field],
+        path: `${inspection.path}/layout/${field}`,
+      });
+    });
+  } else if (layout["reason"] !== "UNSUPPORTED_RECIPE_LAYOUT") {
+    return semanticError(
+      "RECIPE_LAYOUT_INVALID",
+      "recipe-view-v2",
+      `${inspection.path}/layout/reason`,
+      "unsupported layout must carry its stable reason",
+    );
+  }
+  return undefined;
+}
+
+function inspectRecipeV2Choice(
+  inspection: RecipeV2Inspection,
+  choice: { readonly value: unknown; readonly path: string },
+): SemanticValidationError | undefined {
+  if (!isRecord(choice.value) || !Array.isArray(choice.value["alternatives"])) {
+    return semanticError(
+      "RECIPE_INGREDIENT_CHOICE_INVALID",
+      "recipe-view-v2",
+      choice.path,
+      "ingredient choice must contain an alternatives array",
+    );
+  }
+  const choiceType = choice.value["choiceType"];
+  const alternatives = choice.value["alternatives"];
+  if (choiceType === "unsupported") {
+    if (
+      choice.value["reason"] !== "UNSUPPORTED_INGREDIENT_CHOICE" ||
+      alternatives.length !== 0 ||
+      Object.hasOwn(choice.value, "tagId")
+    ) {
+      return semanticError(
+        "RECIPE_INGREDIENT_CHOICE_INVALID",
+        "recipe-view-v2",
+        choice.path,
+        "unsupported choice must retain its stable reason and no alternatives",
+      );
+    }
+    return undefined;
+  }
+  if (
+    choiceType !== "material" &&
+    choiceType !== "exact" &&
+    choiceType !== "item_type" &&
+    choiceType !== "tag"
+  ) {
+    return semanticError(
+      "RECIPE_INGREDIENT_CHOICE_INVALID",
+      "recipe-view-v2",
+      `${choice.path}/choiceType`,
+      "ingredient choice type is unsupported",
+    );
+  }
+  if (
+    alternatives.length < 1 ||
+    alternatives.length > 64 ||
+    (choiceType === "tag") !== Object.hasOwn(choice.value, "tagId") ||
+    Object.hasOwn(choice.value, "reason")
+  ) {
+    return semanticError(
+      "RECIPE_INGREDIENT_CHOICE_INVALID",
+      "recipe-view-v2",
+      choice.path,
+      "choice alternatives or tag metadata are inconsistent",
+    );
+  }
+  alternatives.forEach((value, index) => {
+    inspection.itemStacks.push({ value, path: `${choice.path}/alternatives/${index}` });
+  });
+  return undefined;
+}
+
+function recipeV2ComponentInvalid(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value["components"])) {
+    return true;
+  }
+  const components = value["components"];
+  const damage = components["damage"];
+  const maximumDamage = components["maxDamage"];
+  const unsafeDisplayText = (text: unknown): boolean => {
+    if (typeof text !== "string" || !hasValidUnicode(text)) {
+      return true;
+    }
+    return [...text].some((character) => {
+      const codePoint = character.codePointAt(0);
+      return (
+        codePoint === undefined ||
+        codePoint <= 0x1f ||
+        (codePoint >= 0x7f && codePoint <= 0x9f) ||
+        codePoint === 0x061c ||
+        codePoint === 0x200e ||
+        codePoint === 0x200f ||
+        (codePoint >= 0x202a && codePoint <= 0x202e) ||
+        (codePoint >= 0x2066 && codePoint <= 0x2069)
+      );
+    });
+  };
+  const customName = components["customName"];
+  const lore = components["lore"];
+  return (
+    (typeof damage === "number" && typeof maximumDamage === "number" && damage > maximumDamage) ||
+    (customName !== undefined && unsafeDisplayText(customName)) ||
+    (lore !== undefined && (!Array.isArray(lore) || lore.some((line) => unsafeDisplayText(line))))
+  );
+}
+
+/** Applies the Phase 11 recipe-view-v2 semantic rules in stable first-error order. */
+export function validateRecipeViewV2(value: unknown): SemanticValidationError[] {
+  if (
+    !isRecord(value) ||
+    value["schemaVersion"] !== "2.0" ||
+    !Array.isArray(value["recipes"]) ||
+    value["recipes"].length < 1 ||
+    value["recipes"].length > 16
+  ) {
+    return recipeV2Failure(
+      "RECIPE_VIEW_STRUCTURE_INVALID",
+      "",
+      "recipe view v2 must contain one to sixteen recipes",
+    );
+  }
+  const recipes = value["recipes"];
+  const selectedRecipe = value["selectedRecipe"];
+  if (
+    !Number.isSafeInteger(selectedRecipe) ||
+    Number(selectedRecipe) < 0 ||
+    Number(selectedRecipe) >= recipes.length
+  ) {
+    return recipeV2Failure(
+      "RECIPE_SELECTED_INDEX_OUT_OF_RANGE",
+      "/selectedRecipe",
+      "selectedRecipe must identify an entry in recipes",
+    );
+  }
+
+  const totalMatches = value["totalMatches"];
+  const truncated = value["truncated"];
+  if (
+    !Number.isSafeInteger(totalMatches) ||
+    Number(totalMatches) < recipes.length ||
+    typeof truncated !== "boolean" ||
+    (!truncated && Number(totalMatches) !== recipes.length)
+  ) {
+    return recipeV2Failure(
+      "RECIPE_RESULT_SUMMARY_INVALID",
+      "/totalMatches",
+      "totalMatches and truncated do not describe the published recipes",
+    );
+  }
+
+  const inspections: RecipeV2Inspection[] = [];
+  const recipeIds = new Set<string>();
+  for (let index = 0; index < recipes.length; index += 1) {
+    const recipe = recipes[index];
+    if (!isRecord(recipe) || typeof recipe["recipeId"] !== "string") {
+      return recipeV2Failure(
+        "RECIPE_VIEW_STRUCTURE_INVALID",
+        `/recipes/${index}`,
+        "recipe entry is incomplete",
+      );
+    }
+    if (recipeIds.has(recipe["recipeId"])) {
+      return recipeV2Failure(
+        "RECIPE_ID_DUPLICATE",
+        `/recipes/${index}/recipeId`,
+        "recipe IDs must identify distinct variants",
+      );
+    }
+    recipeIds.add(recipe["recipeId"]);
+    const inspection: RecipeV2Inspection = {
+      recipe,
+      path: `/recipes/${index}`,
+      logicalSlots: new Set(),
+      choices: [],
+      itemStacks: [],
+    };
+    if (recipe["result"] !== null) {
+      inspection.itemStacks.push({ value: recipe["result"], path: `${inspection.path}/result` });
+    }
+    inspections.push(inspection);
+  }
+
+  for (const inspection of inspections) {
+    const error = inspectRecipeV2Layout(inspection);
+    if (error !== undefined) {
+      return [error];
+    }
+  }
+  for (const inspection of inspections) {
+    for (const choice of inspection.choices) {
+      const error = inspectRecipeV2Choice(inspection, choice);
+      if (error !== undefined) {
+        return [error];
+      }
+    }
+  }
+  for (const inspection of inspections) {
+    const processing = inspection.recipe["processing"];
+    const cooking = RECIPE_V2_COOKING_TYPES.has(String(inspection.recipe["recipeType"]));
+    if (cooking) {
+      if (
+        !isRecord(processing) ||
+        !Number.isSafeInteger(processing["timeTicks"]) ||
+        Number(processing["timeTicks"]) < 0 ||
+        Number(processing["timeTicks"]) > 120_000 ||
+        typeof processing["experience"] !== "number" ||
+        !Number.isFinite(processing["experience"]) ||
+        processing["experience"] < 0 ||
+        processing["experience"] > 1_000_000
+      ) {
+        return recipeV2Failure(
+          "RECIPE_PROCESSING_INVALID",
+          `${inspection.path}/processing`,
+          "cooking recipes require bounded processing data",
+        );
+      }
+    } else if (processing !== undefined) {
+      return recipeV2Failure(
+        "RECIPE_PROCESSING_INVALID",
+        `${inspection.path}/processing`,
+        "non-cooking recipes must not carry processing data",
+      );
+    }
+  }
+  for (const inspection of inspections) {
+    const source = inspection.recipe["source"];
+    if (
+      !isRecord(source) ||
+      (source["kind"] === "server_registry" && source["providerId"] !== null) ||
+      (source["kind"] === "plugin_provider" && typeof source["providerId"] !== "string") ||
+      (source["kind"] !== "server_registry" && source["kind"] !== "plugin_provider")
+    ) {
+      return recipeV2Failure(
+        "RECIPE_SOURCE_INVALID",
+        `${inspection.path}/source`,
+        "recipe source and provider identity do not agree",
+      );
+    }
+  }
+  for (const inspection of inspections) {
+    const remainingItems = inspection.recipe["remainingItems"];
+    if (!Array.isArray(remainingItems)) {
+      return recipeV2Failure(
+        "RECIPE_REMAINING_ITEM_INVALID",
+        `${inspection.path}/remainingItems`,
+        "remainingItems must be an array",
+      );
+    }
+    const remainingSlots = new Set<number>();
+    for (let index = 0; index < remainingItems.length; index += 1) {
+      const remaining = remainingItems[index];
+      const path = `${inspection.path}/remainingItems/${index}`;
+      if (!isRecord(remaining) || !Number.isSafeInteger(remaining["slot"])) {
+        return recipeV2Failure(
+          "RECIPE_REMAINING_ITEM_INVALID",
+          path,
+          "remaining item must identify an integer input slot",
+        );
+      }
+      const slot = Number(remaining["slot"]);
+      if (!inspection.logicalSlots.has(slot) || remainingSlots.has(slot)) {
+        return recipeV2Failure(
+          "RECIPE_REMAINING_ITEM_INVALID",
+          `${path}/slot`,
+          "remaining item slot is absent or duplicated",
+        );
+      }
+      remainingSlots.add(slot);
+      inspection.itemStacks.push({ value: remaining["item"], path: `${path}/item` });
+    }
+  }
+  for (const inspection of inspections) {
+    for (const stack of inspection.itemStacks) {
+      if (recipeV2ComponentInvalid(stack.value)) {
+        return recipeV2Failure(
+          "RECIPE_COMPONENT_INVALID",
+          `${stack.path}/components`,
+          "item display components violate their cross-field invariants",
+        );
+      }
+    }
+  }
+  return [];
 }
 
 export function validateCapabilityManifest(value: unknown): SemanticValidationError[] {
@@ -1504,13 +2288,20 @@ export function validateViewNegotiation(value: unknown): SemanticValidationError
     ];
   }
   for (const capability of requiredCapabilities) {
-    if (capabilities[capability] !== 1) {
+    const requiredVersion =
+      view["viewType"] === "recipe" &&
+      capability === "recipeView" &&
+      isRecord(view["content"]) &&
+      view["content"]["schemaVersion"] === "2.0"
+        ? 2
+        : 1;
+    if (capabilities[capability] !== requiredVersion) {
       return [
         semanticError(
           "VIEW_CAPABILITY_UNDECLARED",
           rule,
           `/client/capabilities/${capability}`,
-          `client did not declare ${capability} version 1`,
+          `client did not declare ${capability} version ${String(requiredVersion)}`,
         ),
       ];
     }
@@ -1526,6 +2317,9 @@ export function runSemanticValidator(validator: string, value: unknown): Semanti
       break;
     case "recipe-view-v1":
       errors = validateRecipeView(value);
+      break;
+    case "recipe-view-v2":
+      errors = validateRecipeViewV2(value);
       break;
     case "build-preview-transfer-v1":
     case "reassemble-and-verify-sha256":
@@ -1608,6 +2402,11 @@ export function validateContractSemantics(
 
     if (rule === "recipe-view-v1") {
       errors.push(...validateRecipeView(value));
+      continue;
+    }
+
+    if (rule === "recipe-view-v2") {
+      errors.push(...validateRecipeViewV2(value));
       continue;
     }
 

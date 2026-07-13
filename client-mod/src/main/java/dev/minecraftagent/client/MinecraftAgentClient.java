@@ -14,6 +14,8 @@ import dev.minecraftagent.client.ui.OverlayController;
 import dev.minecraftagent.client.ui.OverlayInteractionScreen;
 import dev.minecraftagent.client.ui.OverlayPreferenceStore;
 import dev.minecraftagent.client.ui.OverlayRenderer;
+import dev.minecraftagent.client.view.BuildPreviewView;
+import dev.minecraftagent.client.view.StructuredView;
 import dev.minecraftagent.client.view.StructuredViewDecoder;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -34,7 +36,6 @@ import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
-import net.minecraft.core.BlockPos;
 import net.minecraft.resources.Identifier;
 import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
@@ -70,7 +71,7 @@ public final class MinecraftAgentClient implements ClientModInitializer {
             overlay,
             mainTasks::enqueue,
             bytes -> send(mainTasks, bytes),
-            presentationActions(minecraft, litematica));
+            presentationActions(litematica));
 
     registerHud(renderer);
     registerKeys(renderer, overlay);
@@ -141,7 +142,7 @@ public final class MinecraftAgentClient implements ClientModInitializer {
         modVersion,
         1,
         1,
-        1,
+        2,
         litematicaAvailable ? 1 : 0,
         litematicaAvailable ? 1 : 0,
         inventory.version("litematica"),
@@ -149,7 +150,7 @@ public final class MinecraftAgentClient implements ClientModInitializer {
   }
 
   private static ClientPresentationSession.PresentationActionSink presentationActions(
-      Minecraft minecraft, LitematicaClientController litematica) {
+      LitematicaClientController litematica) {
     return new ClientPresentationSession.PresentationActionSink() {
       @Override
       public ClientPresentationSession.PresentationAction prepare(
@@ -159,18 +160,33 @@ public final class MinecraftAgentClient implements ClientModInitializer {
             var prepared =
                 litematica.prepareLoad(
                     viewId, "Agent preview " + viewId.toString().substring(0, 8));
-            yield () -> {
-              BlockPos origin =
-                  minecraft.player == null ? BlockPos.ZERO : minecraft.player.blockPosition();
-              logLitematicaReport(
-                  litematica.load(prepared, origin.getX(), origin.getY(), origin.getZ()));
-            };
+            yield () -> logLitematicaReport(litematica.load(prepared));
           }
           case LITEMATICA_PREVIEW_REMOVE -> () -> logLitematicaReport(litematica.remove(viewId));
           case LITEMATICA_MATERIAL_LIST_OPEN ->
               () -> logLitematicaReport(litematica.openMaterialList(viewId));
           case PIN, UNPIN, CLEAR -> throw new IllegalArgumentException("Not a preview action");
         };
+      }
+
+      @Override
+      public boolean stage(StructuredView view) {
+        return !(view.content() instanceof BuildPreviewView preview)
+            || litematica.stagePreview(preview);
+      }
+
+      @Override
+      public boolean commit(StructuredView view, java.util.Set<UUID> displayedViewIds) {
+        return view.content() instanceof BuildPreviewView preview
+            ? litematica.commitPreview(preview, displayedViewIds)
+            : litematica.reconcileDisplayedPreviews(displayedViewIds);
+      }
+
+      @Override
+      public void discard(StructuredView view) {
+        if (view.content() instanceof BuildPreviewView preview) {
+          litematica.discardPreview(preview);
+        }
       }
 
       @Override

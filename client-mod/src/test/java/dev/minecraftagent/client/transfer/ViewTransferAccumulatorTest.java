@@ -75,6 +75,20 @@ class ViewTransferAccumulatorTest {
   }
 
   @Test
+  void rejectsTheUnsupportedGzipHeaderCrcFlag() throws IOException {
+    var content = "{\"viewSchemaVersion\":\"1.0\"}".getBytes(StandardCharsets.UTF_8);
+    var compressed = gzip(content);
+    compressed[3] |= 0x02;
+    var descriptor = descriptor(compressed, content, ViewTransferEncoding.GZIP, 1);
+    var accumulator = new ViewTransferAccumulator();
+
+    assertTrue(accumulator.begin(descriptor).accepted());
+    assertFailure(
+        accumulator.accept(chunk(descriptor, 0, compressed)),
+        ViewTransferFailure.CONTENT_DECOMPRESSION_FAILED);
+  }
+
+  @Test
   void rejectsExpansionPastDeclaredLengthAndBadTrailer() throws IOException {
     var content = "{\"long\":\"xxxxxxxxxxxxxxxxxxxxxxxx\"}".getBytes(StandardCharsets.UTF_8);
     var compressed = gzip(content);

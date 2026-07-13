@@ -45,6 +45,7 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
   private static final String MODULE_UNKNOWN_MESSAGE = "Unknown AI module. Use /agent module list.";
   private static final String MODULE_LIST_PREFIX = "AI modules: ";
   private static final String PROPOSAL_ID_INVALID_MESSAGE = "Proposal ID must be a canonical UUID.";
+  private static final String VIEW_ID_INVALID_MESSAGE = "View ID must be a canonical UUID.";
   private static final String PROPOSAL_CONFIRMED_MESSAGE = "Proposal confirmed.";
   private static final String PROPOSAL_REJECTED_MESSAGE = "Proposal rejected.";
   private static final String PROPOSAL_UNAVAILABLE_MESSAGE = "Proposal is unavailable.";
@@ -128,7 +129,7 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
         "agent",
         "Controls Minecraft Agent readiness",
         "/agent [say <message>|resume [session]|module list|module <name> <message>|ui"
-            + " <pin|unpin|clear>|confirm"
+            + " <pin|unpin|clear>|ui <preview|materials> <view-id>|confirm"
             + " <proposal>|reject <proposal>|doctor|off|on]",
         List.of());
     this.plugin = Objects.requireNonNull(plugin);
@@ -231,7 +232,7 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
         && arguments[0].equalsIgnoreCase("ui")
         && sender.hasPermission(USE_PERMISSION)) {
       var prefix = arguments[1].toLowerCase(Locale.ROOT);
-      return List.of("pin", "unpin", "clear").stream()
+      return List.of("pin", "unpin", "clear", "preview", "materials").stream()
           .filter(candidate -> candidate.startsWith(prefix))
           .toList();
     }
@@ -370,7 +371,7 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
       sender.sendMessage(PLAYER_ONLY_MESSAGE);
       return;
     }
-    if (arguments.length != 2) {
+    if (arguments.length < 2 || arguments.length > 3) {
       sender.sendMessage(getUsage());
       return;
     }
@@ -379,15 +380,31 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
           case "pin" -> AgentUiControl.Action.PIN;
           case "unpin" -> AgentUiControl.Action.UNPIN;
           case "clear" -> AgentUiControl.Action.CLEAR;
+          case "preview" -> AgentUiControl.Action.PREVIEW;
+          case "materials" -> AgentUiControl.Action.MATERIALS;
           default -> null;
         };
     if (action == null) {
       sender.sendMessage(getUsage());
       return;
     }
+    boolean requiresViewId =
+        action == AgentUiControl.Action.PREVIEW || action == AgentUiControl.Action.MATERIALS;
+    if (arguments.length != (requiresViewId ? 3 : 2)) {
+      sender.sendMessage(getUsage());
+      return;
+    }
+    UUID viewId = null;
+    if (requiresViewId) {
+      viewId = canonicalUuid(arguments[2]);
+      if (viewId == null) {
+        sender.sendMessage(VIEW_ID_INVALID_MESSAGE);
+        return;
+      }
+    }
     AgentUiControl.Result result;
     try {
-      result = uiControl.invoke(player.getUniqueId(), action);
+      result = uiControl.invoke(player.getUniqueId(), action, viewId);
     } catch (RuntimeException failure) {
       result = AgentUiControl.Result.CLIENT_UNAVAILABLE;
     }

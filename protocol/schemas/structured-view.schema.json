@@ -96,7 +96,14 @@
         "required": ["viewType"]
       },
       "then": {
-        "properties": { "content": { "$ref": "recipe-view.schema.json" } }
+        "properties": {
+          "content": {
+            "oneOf": [
+              { "$ref": "recipe-view.schema.json" },
+              { "$ref": "recipe-view-v2.schema.json" }
+            ]
+          }
+        }
       }
     },
     {

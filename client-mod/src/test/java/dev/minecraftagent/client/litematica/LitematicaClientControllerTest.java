@@ -4,11 +4,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.minecraftagent.client.view.BuildPreviewView;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -19,66 +20,180 @@ class LitematicaClientControllerTest {
   @TempDir Path temporaryDirectory;
 
   @Test
-  void derivesTheOnlyAllowedFileAndHashesItBeforeLoading() throws Exception {
+  void onlyLoadsClientGeneratedArtifactsAtTheirDeclaredOrigin() throws Exception {
     var root = Files.createDirectory(temporaryDirectory.resolve("managed"));
-    var content = "local schematic".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-    Files.write(root.resolve(VIEW_ID + ".litematica"), content);
     var adapter = new CapturingAdapter();
-    var controller = new LitematicaClientController(Optional.of(adapter), root, 1024);
+    var controller = controller(Optional.of(adapter), root, 1024 * 1024);
+    BuildPreviewView preview = NativeLitematicaWriterTest.preview();
 
-    var prepared = controller.prepareLoad(VIEW_ID, "Preview");
+    assertTrue(controller.stagePreview(preview));
     assertEquals(0, adapter.loadCalls);
-    var report = controller.load(prepared, 4, 70, -2);
+    assertTrue(controller.commitPreview(preview, Set.of(VIEW_ID)));
+    var report = controller.load(controller.prepareLoad(VIEW_ID, "Preview"));
 
     assertEquals(LitematicaDisplayReport.State.LOADED, report.state());
-    assertEquals(root.resolve(VIEW_ID + ".litematica"), adapter.loaded.managedFile());
-    assertEquals(content.length, adapter.loaded.managedFileBytes());
-    assertEquals(sha256(content), adapter.loaded.contentSha256());
-    assertEquals(4, adapter.loaded.originX());
-    assertEquals(70, adapter.loaded.originY());
-    assertEquals(-2, adapter.loaded.originZ());
+    assertTrue(adapter.loaded.managedFile().startsWith(root));
+    assertEquals(preview.contentHash(), adapter.loaded.contentSha256());
+    assertEquals(preview.origin().x(), adapter.loaded.originX());
+    assertEquals(preview.origin().y(), adapter.loaded.originY());
+    assertEquals(preview.origin().z(), adapter.loaded.originZ());
+    assertEquals(1, adapter.loadCalls);
+  }
+
+  @Test
+  void refusesUnregisteredPreexistingAndTamperedFiles() throws Exception {
+    var root = Files.createDirectory(temporaryDirectory.resolve("managed"));
+    var adapter = new CapturingAdapter();
+    var controller = controller(Optional.of(adapter), root, 1024 * 1024);
+    Path expected = Files.write(root.resolve(VIEW_ID + ".litematica"), new byte[] {1});
+
+    assertFileUnavailable(controller.load(controller.prepareLoad(VIEW_ID, "Preview")));
+    assertEquals(0, adapter.loadCalls);
+    Files.delete(expected);
+
+    BuildPreviewView preview = NativeLitematicaWriterTest.preview();
+    assertTrue(controller.stagePreview(preview));
+    assertTrue(controller.commitPreview(preview, Set.of(VIEW_ID)));
+    Path managed = onlySchematic(root, expected);
+    Files.write(managed, new byte[] {1, 2, 3});
+    assertFileUnavailable(controller.load(controller.prepareLoad(VIEW_ID, "Preview")));
+    assertEquals(0, adapter.loadCalls);
+
+    Files.delete(managed);
+    Path outside = Files.write(temporaryDirectory.resolve("outside.litematica"), new byte[] {1});
+    try {
+      Files.createSymbolicLink(managed, outside);
+      assertFileUnavailable(controller.load(controller.prepareLoad(VIEW_ID, "Preview")));
+    } catch (UnsupportedOperationException exception) {
+      assertFalse(Files.exists(managed));
+    }
+    assertEquals(0, adapter.loadCalls);
+  }
+
+  @Test
+  void rehashesTheManagedFileImmediatelyBeforeCallingTheAdapter() throws Exception {
+    var root = Files.createDirectory(temporaryDirectory.resolve("managed"));
+    var adapter = new CapturingAdapter();
+    var controller = controller(Optional.of(adapter), root, 1024 * 1024);
+    BuildPreviewView preview = NativeLitematicaWriterTest.preview();
+    assertTrue(controller.stagePreview(preview));
+    assertTrue(controller.commitPreview(preview, Set.of(VIEW_ID)));
+    var prepared = controller.prepareLoad(VIEW_ID, "Preview");
+    Path managed = onlySchematic(root, null);
+
+    Files.write(managed, new byte[] {1, 2, 3});
+    assertFileUnavailable(controller.load(prepared));
+    assertEquals(0, adapter.loadCalls);
+  }
+
+  @Test
+  void reconciliationDeletesAnUnloadedPreviewThatIsNoLongerDisplayed() throws Exception {
+    var root = Files.createDirectory(temporaryDirectory.resolve("managed"));
+    var controller = controller(Optional.of(new CapturingAdapter()), root, 1024 * 1024);
+    BuildPreviewView preview = NativeLitematicaWriterTest.preview();
+    assertTrue(controller.stagePreview(preview));
+    assertTrue(controller.commitPreview(preview, Set.of(VIEW_ID)));
+    Path managed = onlySchematic(root, null);
+
+    assertTrue(controller.reconcileDisplayedPreviews(Set.of()));
+
+    assertFalse(Files.exists(managed));
+    assertFileUnavailable(controller.load(controller.prepareLoad(VIEW_ID, "Preview")));
+  }
+
+  @Test
+  void updateReplacesLoadedPlacementAndRemoveDeletesOwnedFile() throws Exception {
+    var root = Files.createDirectory(temporaryDirectory.resolve("managed"));
+    var adapter = new CapturingAdapter();
+    var controller = controller(Optional.of(adapter), root, 1024 * 1024);
+    BuildPreviewView first = NativeLitematicaWriterTest.preview();
+    assertTrue(controller.stagePreview(first));
+    assertTrue(controller.commitPreview(first, Set.of(VIEW_ID)));
+    assertEquals(
+        LitematicaDisplayReport.State.LOADED,
+        controller.load(controller.prepareLoad(VIEW_ID, "Preview")).state());
+
+    BuildPreviewView second = withRevision(first, 2, first.contentHash());
+    assertTrue(controller.stagePreview(second));
+    assertTrue(controller.commitPreview(second, Set.of(VIEW_ID)));
+    assertEquals(
+        LitematicaDisplayReport.State.LOADED,
+        controller.load(controller.prepareLoad(VIEW_ID, "Preview")).state());
+    assertEquals(2, adapter.loadCalls);
+    assertEquals(1, adapter.removeCalls);
+    assertEquals(second.contentHash(), adapter.loaded.contentSha256());
 
     assertEquals(LitematicaDisplayReport.State.REMOVED, controller.remove(VIEW_ID).state());
-    assertEquals(
-        LitematicaDisplayReport.State.MATERIAL_LIST_OPEN,
-        controller.openMaterialList(VIEW_ID).state());
-    assertEquals(1, adapter.removeCalls);
-    assertEquals(1, adapter.materialCalls);
+    try (var files = Files.list(root)) {
+      assertEquals(0, files.count());
+    }
+    assertEquals(2, adapter.removeCalls);
+  }
+
+  @Test
+  void disconnectClosesAdapterAndDeletesConnectionScopedArtifacts() throws Exception {
+    var root = Files.createDirectory(temporaryDirectory.resolve("managed"));
+    var adapter = new CapturingAdapter();
+    var controller = controller(Optional.of(adapter), root, 1024 * 1024);
+    BuildPreviewView preview = NativeLitematicaWriterTest.preview();
+    assertTrue(controller.stagePreview(preview));
+    assertTrue(controller.commitPreview(preview, Set.of(VIEW_ID)));
+
+    controller.close();
+
+    assertEquals(1, adapter.closeCalls);
+    try (var files = Files.list(root)) {
+      assertEquals(0, files.count());
+    }
   }
 
   @Test
   void absentAdapterIsStableUnavailableAndCarriesNoAuthority() throws IOException {
     var root = temporaryDirectory.resolve("not-created-for-unavailable-adapter");
-    var controller = new LitematicaClientController(Optional.empty(), root, 8);
+    var controller = controller(Optional.empty(), root, 8);
 
     assertFalse(controller.available());
-    assertUnavailable(controller.load(controller.prepareLoad(VIEW_ID, "Preview"), 0, 0, 0));
+    assertFalse(controller.stagePreview(NativeLitematicaWriterTest.preview()));
+    assertUnavailable(controller.load(controller.prepareLoad(VIEW_ID, "Preview")));
     assertUnavailable(controller.remove(VIEW_ID));
     assertUnavailable(controller.openMaterialList(VIEW_ID));
   }
 
-  @Test
-  void rejectsOversizedEmptyAndSymlinkedManagedFiles() throws Exception {
-    var root = Files.createDirectory(temporaryDirectory.resolve("managed"));
-    var adapter = new CapturingAdapter();
-    var controller = new LitematicaClientController(Optional.of(adapter), root, 8);
-    Path expected = root.resolve(VIEW_ID + ".litematica");
+  private static LitematicaClientController controller(
+      Optional<LitematicaAdapter> adapter, Path root, long maxBytes) throws IOException {
+    return new LitematicaClientController(
+        adapter, root, maxBytes, new NativeLitematicaWriter(4321));
+  }
 
-    Files.write(expected, new byte[9]);
-    assertFileUnavailable(controller.load(controller.prepareLoad(VIEW_ID, "Preview"), 0, 0, 0));
-
-    Files.write(expected, new byte[0]);
-    assertFileUnavailable(controller.load(controller.prepareLoad(VIEW_ID, "Preview"), 0, 0, 0));
-
-    Files.delete(expected);
-    Path outside = Files.write(temporaryDirectory.resolve("outside.litematica"), new byte[] {1});
-    try {
-      Files.createSymbolicLink(expected, outside);
-      assertFileUnavailable(controller.load(controller.prepareLoad(VIEW_ID, "Preview"), 0, 0, 0));
-    } catch (UnsupportedOperationException exception) {
-      assertTrue(Files.notExists(expected));
+  private static Path onlySchematic(Path root, Path excluded) throws IOException {
+    try (var files = Files.list(root)) {
+      return files
+          .filter(path -> !path.equals(excluded))
+          .filter(path -> path.getFileName().toString().endsWith(".litematica"))
+          .findFirst()
+          .orElseThrow();
     }
-    assertEquals(0, adapter.loadCalls);
+  }
+
+  private static BuildPreviewView withRevision(
+      BuildPreviewView value, int revision, String contentHash) {
+    return new BuildPreviewView(
+        value.schemaVersion(),
+        value.previewId(),
+        value.projectId(),
+        revision,
+        value.operation(),
+        value.dimension(),
+        value.bounds(),
+        value.origin(),
+        value.transform(),
+        value.baseRegionHash(),
+        value.changeSetHash(),
+        contentHash,
+        value.paletteHash(),
+        value.difference(),
+        value.palette(),
+        value.blocks());
   }
 
   private static void assertUnavailable(LitematicaDisplayReport report) {
@@ -93,19 +208,12 @@ class LitematicaClientControllerTest {
         LitematicaDisplayReport.Failure.MANAGED_FILE_UNAVAILABLE, report.failure().orElseThrow());
   }
 
-  private static String sha256(byte[] value) {
-    try {
-      return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value));
-    } catch (java.security.NoSuchAlgorithmException exception) {
-      throw new AssertionError(exception);
-    }
-  }
-
   private static final class CapturingAdapter implements LitematicaAdapter {
     private LitematicaPreviewRequest loaded;
     private int loadCalls;
     private int removeCalls;
     private int materialCalls;
+    private int closeCalls;
 
     @Override
     public LitematicaSupportMatrix.Entry supportedCombination() {
@@ -140,6 +248,8 @@ class LitematicaClientControllerTest {
     }
 
     @Override
-    public void close() {}
+    public void close() {
+      closeCalls++;
+    }
   }
 }

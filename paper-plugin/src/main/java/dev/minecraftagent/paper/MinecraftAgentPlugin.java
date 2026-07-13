@@ -20,6 +20,8 @@ import dev.minecraftagent.paper.command.AgentControl;
 import dev.minecraftagent.paper.command.AgentUiControl;
 import dev.minecraftagent.paper.command.PaperCommandRegistration;
 import dev.minecraftagent.paper.command.ProposalResponseGateway;
+import dev.minecraftagent.paper.landmark.LandmarkCatalog;
+import dev.minecraftagent.paper.landmark.LandmarkCatalogLoader;
 import dev.minecraftagent.paper.lifecycle.AdminPolicy;
 import dev.minecraftagent.paper.lifecycle.AgentHealth;
 import dev.minecraftagent.paper.lifecycle.AgentStatus;
@@ -28,6 +30,8 @@ import dev.minecraftagent.paper.lifecycle.OfflineCleanup;
 import dev.minecraftagent.paper.lifecycle.OfflineReason;
 import dev.minecraftagent.paper.lifecycle.OperationalGate;
 import dev.minecraftagent.paper.lifecycle.PaperStartupCoordinator;
+import dev.minecraftagent.paper.preview.BuildPreviewArtifactRepository;
+import dev.minecraftagent.paper.preview.PaperBuildPreviewService;
 import dev.minecraftagent.paper.proposal.InMemoryProposalRepository;
 import dev.minecraftagent.paper.proposal.ProposalAuthorizer;
 import dev.minecraftagent.paper.proposal.ProposalConfirmationResult;
@@ -93,8 +97,12 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     var configPath = dataDirectory.resolve("config.yml");
     var minecraftVersion = getServer().getMinecraftVersion();
     var componentVersion = getPluginMeta().getVersion();
+    var buildPreviewPublishingEnabled =
+        "true".equals(System.getenv("MINECRAFT_AGENT_BUILD_PREVIEW_ENABLED"));
     var stateDirectoryReference = new AtomicReference<Path>();
     var desiredModeStoreReference = new AtomicReference<FileDesiredModeStore>();
+    var landmarkCatalogReference = new AtomicReference<>(LandmarkCatalog.empty());
+    var serverIdReference = new AtomicReference<String>();
     var worker =
         Executors.newSingleThreadScheduledExecutor(
             runnable -> {
@@ -131,9 +139,21 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
               }
             });
     var toolRegistry = new ReadToolRegistry();
+    var buildArtifacts = new BuildPreviewArtifactRepository();
+    var buildPreviews =
+        new PaperBuildPreviewService(
+            getServer(),
+            task -> getServer().getScheduler().runTask(this, task),
+            worker,
+            serverIdReference::get,
+            buildArtifacts);
     var toolExecutor =
         new BukkitReadToolExecutor(
-            getServer(), toolRegistry, task -> getServer().getScheduler().runTask(this, task));
+            getServer(),
+            toolRegistry,
+            task -> getServer().getScheduler().runTask(this, task),
+            landmarkCatalogReference::get,
+            buildPreviews);
     var clientConnections = new ClientConnectionRegistry();
     var clientTransfers = ClientTransferManager.withProductionLimits();
     var clientState = new ClientStateCoordinator(clientConnections, clientTransfers);
@@ -143,7 +163,9 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     clientChannelReference.set(clientChannel);
     var clientViews =
         new ClientViewPublisher(
-            new ClientViewSelector(clientConnections, ClientViewSchemaRegistry.versionOne()),
+            new ClientViewSelector(
+                clientConnections,
+                ClientViewSchemaRegistry.versionOne(buildPreviewPublishingEnabled)),
             clientTransfers);
     var clientUi = new ClientUiCommandGateway(clientConnections, clientChannel.uiControlSink());
     var requests =
@@ -180,6 +202,7 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
                 }
               };
             });
+    requests.setAuthoritativeViewSource(buildArtifacts::consume);
     requestServiceReference.set(requests);
     getServer()
         .getPluginManager()
@@ -221,14 +244,17 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
             control,
             requests,
             proposalResponses(),
-            (playerId, action) -> {
+            (playerId, action, viewId) -> {
               var clientAction =
                   switch (action) {
                     case PIN -> ClientUiCommandGateway.Action.PIN;
                     case UNPIN -> ClientUiCommandGateway.Action.UNPIN;
                     case CLEAR -> ClientUiCommandGateway.Action.CLEAR;
+                    case PREVIEW -> ClientUiCommandGateway.Action.LITEMATICA_PREVIEW_LOAD;
+                    case MATERIALS -> ClientUiCommandGateway.Action.LITEMATICA_MATERIAL_LIST_OPEN;
                   };
-              return clientUi.invoke(playerId, clientAction) == ClientUiCommandGateway.Result.SENT
+              return clientUi.invoke(playerId, clientAction, viewId)
+                      == ClientUiCommandGateway.Result.SENT
                   ? AgentUiControl.Result.SENT
                   : AgentUiControl.Result.CLIENT_UNAVAILABLE;
             },
@@ -252,6 +278,8 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
                           System.getenv(),
                           Runtime.version().feature(),
                           minecraftVersion));
+              landmarkCatalogReference.set(new LandmarkCatalogLoader().loadOrCreate(dataDirectory));
+              serverIdReference.set(result.config().serverId());
               var runtime = result.config().runtime();
               var settings =
                   new RuntimeConnectionSettings(

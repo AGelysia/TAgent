@@ -3,8 +3,18 @@ package dev.minecraftagent.client.view;
 import com.google.gson.Strictness;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonToken;
+import dev.minecraftagent.client.transfer.StrictGzipDecoder;
+import dev.minecraftagent.client.view.BuildPreviewView.Bounds;
+import dev.minecraftagent.client.view.BuildPreviewView.Difference;
+import dev.minecraftagent.client.view.BuildPreviewView.Mirror;
+import dev.minecraftagent.client.view.BuildPreviewView.Operation;
+import dev.minecraftagent.client.view.BuildPreviewView.PaletteEntry;
+import dev.minecraftagent.client.view.BuildPreviewView.PlacedBlock;
+import dev.minecraftagent.client.view.BuildPreviewView.Position;
+import dev.minecraftagent.client.view.BuildPreviewView.Transform;
 import dev.minecraftagent.client.view.ItemStackView.SafeComponents;
 import dev.minecraftagent.client.view.RecipeView.ChoiceType;
+import dev.minecraftagent.client.view.RecipeView.GridLayout;
 import dev.minecraftagent.client.view.RecipeView.IngredientChoice;
 import dev.minecraftagent.client.view.RecipeView.IngredientSlot;
 import dev.minecraftagent.client.view.RecipeView.Layout;
@@ -14,8 +24,15 @@ import dev.minecraftagent.client.view.RecipeView.QueryMode;
 import dev.minecraftagent.client.view.RecipeView.Recipe;
 import dev.minecraftagent.client.view.RecipeView.RecipeType;
 import dev.minecraftagent.client.view.RecipeView.RemainingItem;
+import dev.minecraftagent.client.view.RecipeView.SingleInputLayout;
+import dev.minecraftagent.client.view.RecipeView.SmithingLayout;
 import dev.minecraftagent.client.view.RecipeView.Source;
 import dev.minecraftagent.client.view.RecipeView.SourceKind;
+import dev.minecraftagent.client.view.RecipeView.TransmuteLayout;
+import dev.minecraftagent.client.view.RecipeView.UnsupportedChoiceReason;
+import dev.minecraftagent.client.view.RecipeView.UnsupportedLayout;
+import dev.minecraftagent.client.view.RecipeView.UnsupportedLayoutReason;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.StringReader;
 import java.math.BigDecimal;
@@ -23,7 +40,12 @@ import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -32,22 +54,45 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import org.erdtman.jcs.JsonCanonicalizer;
 
 /** Decodes the fixed view protocol without materializing an unbounded Gson object graph. */
 public final class StructuredViewDecoder {
   public static final int MAX_PAYLOAD_BYTES = 1024 * 1024;
   public static final int MAX_JSON_DEPTH = 24;
-  public static final int MAX_JSON_NODES = 8192;
-  public static final int MAX_TOTAL_STRING_CHARS = 65536;
+  public static final int MAX_JSON_NODES = 32768;
+  public static final int MAX_TOTAL_STRING_CHARS = MAX_PAYLOAD_BYTES;
   public static final int MAX_ITEM_STACKS = 2048;
 
+  public static final int MAX_BUILD_COMPRESSED_BYTES = 512 * 1024;
+  public static final int MAX_BUILD_UNCOMPRESSED_BYTES = 1024 * 1024;
+  public static final int MAX_BUILD_BLOCKS = 4096;
+  public static final int MAX_BUILD_PALETTE = 256;
+  public static final int MAX_BUILD_AXIS = 32;
+  public static final int MAX_BUILD_VOLUME = 4096;
+  public static final int MAX_BUILD_CHANGES = 4096;
+
   private static final int MAX_OBJECT_FIELDS = 32;
-  private static final int MAX_ARRAY_ITEMS = 2048;
+  private static final int MAX_ARRAY_ITEMS = 4096;
   private static final int MAX_NUMBER_CHARS = 64;
   private static final Pattern NAMESPACED_ID = Pattern.compile("^[a-z0-9_.-]+:[a-z0-9_./-]+$");
   private static final Pattern INTEGER = Pattern.compile("-?(?:0|[1-9][0-9]*)");
+  private static final Pattern SHA_256 = Pattern.compile("[0-9a-f]{64}");
+  private static final Pattern PROPERTY_NAME = Pattern.compile("[a-z0-9_]+");
+  private static final Pattern PROPERTY_VALUE = Pattern.compile("[A-Za-z0-9_.-]+");
+
+  private final BuildPreviewBlockStateResolver blockStateResolver;
+
+  public StructuredViewDecoder() {
+    this(new MinecraftBlockStateResolver());
+  }
+
+  public StructuredViewDecoder(BuildPreviewBlockStateResolver blockStateResolver) {
+    this.blockStateResolver = Objects.requireNonNull(blockStateResolver, "blockStateResolver");
+  }
 
   public StructuredView decode(byte[] payload) throws ViewDecodeException {
     if (payload == null || payload.length == 0) {
@@ -167,8 +212,7 @@ public final class StructuredViewDecoder {
     return new JsonArray(List.copyOf(values));
   }
 
-  private static StructuredView decodeView(JsonNode node, DecodeBudget budget)
-      throws ViewDecodeException {
+  private StructuredView decodeView(JsonNode node, DecodeBudget budget) throws ViewDecodeException {
     JsonObject object =
         closedObject(
             node,
@@ -215,6 +259,8 @@ public final class StructuredViewDecoder {
           case ITEM_STACK -> decodeItemStack(object.fields().get("content"), budget);
           case ITEM_LIST -> decodeItemList(object.fields().get("content"), budget);
           case RECIPE -> decodeRecipeView(object.fields().get("content"), budget);
+          case BUILD_PREVIEW ->
+              decodeBuildPreview(object.fields().get("content"), viewId, revision);
         };
     return new StructuredView(
         schemaVersion, viewId, requestId, viewType, revision, title, fallback, pinnable, content);
@@ -223,6 +269,400 @@ public final class StructuredViewDecoder {
   private static TextView decodeText(JsonNode node) throws ViewDecodeException {
     JsonObject object = closedObject(node, Set.of("text"), Set.of("text"));
     return new TextView(string(object, "text", 1, 32768, true));
+  }
+
+  private BuildPreviewView decodeBuildPreview(JsonNode node, UUID outerViewId, int outerRevision)
+      throws ViewDecodeException {
+    Set<String> fields =
+        Set.of(
+            "schemaVersion",
+            "previewId",
+            "projectId",
+            "revision",
+            "operation",
+            "dimension",
+            "bounds",
+            "origin",
+            "transform",
+            "baseRegionHash",
+            "changeSetHash",
+            "contentHash",
+            "paletteHash",
+            "contentFormat",
+            "encoding",
+            "compressedBytes",
+            "uncompressedBytes",
+            "blockCount",
+            "difference",
+            "palette",
+            "chunkCount",
+            "chunks");
+    JsonObject object = closedObject(node, fields, fields);
+    String schemaVersion = string(object, "schemaVersion", 3, 3, false);
+    if (!"1.0".equals(schemaVersion)) {
+      invalidValue();
+    }
+    UUID previewId = uuid(string(object, "previewId", 36, 36, false));
+    UUID projectId = uuid(string(object, "projectId", 36, 36, false));
+    int revision = integer(object.fields().get("revision"), 1, Integer.MAX_VALUE);
+    if (!previewId.equals(outerViewId) || revision != outerRevision) {
+      throw new ViewDecodeException(ViewDecodeException.Code.METADATA_MISMATCH);
+    }
+
+    Operation operation = enumValue(string(object, "operation", 1, 8, false), Operation.class);
+    String dimension = namespacedId(string(object, "dimension", 3, 256, false));
+    Bounds bounds = decodeBounds(object.fields().get("bounds"));
+    Position origin = decodeBuildPosition(object.fields().get("origin"));
+    Transform transform = decodeTransform(object.fields().get("transform"));
+    String baseRegionHash = hashString(object, "baseRegionHash");
+    String changeSetHash = hashString(object, "changeSetHash");
+    String contentHash = hashString(object, "contentHash");
+    String paletteHash = hashString(object, "paletteHash");
+    if (!"minecraft-agent.palette-v1".equals(string(object, "contentFormat", 1, 64, false))) {
+      invalidValue();
+    }
+    String encoding = string(object, "encoding", 1, 32, false);
+    if (!encoding.equals("identity+base64") && !encoding.equals("gzip+base64")) {
+      invalidValue();
+    }
+    int compressedBytes =
+        integer(object.fields().get("compressedBytes"), 1, MAX_BUILD_COMPRESSED_BYTES);
+    int uncompressedBytes =
+        integer(object.fields().get("uncompressedBytes"), 1, MAX_BUILD_UNCOMPRESSED_BYTES);
+    int blockCount = integer(object.fields().get("blockCount"), 0, MAX_BUILD_BLOCKS);
+    Difference difference = decodeDifference(object.fields().get("difference"));
+    JsonNode paletteNode = object.fields().get("palette");
+    List<PaletteEntry> palette = decodePalette(paletteNode);
+    int chunkCount = integer(object.fields().get("chunkCount"), 1, 256);
+    List<BuildChunk> chunks = decodeBuildChunks(object.fields().get("chunks"));
+
+    byte[] content =
+        verifyBuildTransfer(
+            chunks, chunkCount, compressedBytes, uncompressedBytes, encoding, contentHash);
+    JsonNode contentNode = parseBuildContent(content);
+    requireCanonicalContent(content);
+    List<PlacedBlock> blocks = decodePaletteContent(contentNode);
+
+    if (!hash(canonicalize(jsonBytes(paletteNode))).equals(paletteHash)) {
+      throw new ViewDecodeException(ViewDecodeException.Code.PALETTE_HASH_MISMATCH);
+    }
+    validatePalette(palette);
+    validateBounds(bounds, origin);
+    validateBlocks(blocks, blockCount, palette.size(), bounds);
+    validateDifference(difference, bounds.volume());
+
+    // Rotation and mirror describe planning provenance. Coordinates are already final and absolute.
+    return new BuildPreviewView(
+        schemaVersion,
+        previewId,
+        projectId,
+        revision,
+        operation,
+        dimension,
+        bounds,
+        origin,
+        transform,
+        baseRegionHash,
+        changeSetHash,
+        contentHash,
+        paletteHash,
+        difference,
+        palette,
+        blocks);
+  }
+
+  private static Bounds decodeBounds(JsonNode node) throws ViewDecodeException {
+    JsonObject object = closedObject(node, Set.of("min", "max"), Set.of("min", "max"));
+    return new Bounds(
+        decodeBuildPosition(object.fields().get("min")),
+        decodeBuildPosition(object.fields().get("max")));
+  }
+
+  private static Position decodeBuildPosition(JsonNode node) throws ViewDecodeException {
+    JsonObject object = closedObject(node, Set.of("x", "y", "z"), Set.of("x", "y", "z"));
+    return new Position(
+        integer(object.fields().get("x"), -30_000_000, 30_000_000),
+        integer(object.fields().get("y"), -2048, 2048),
+        integer(object.fields().get("z"), -30_000_000, 30_000_000));
+  }
+
+  private static Transform decodeTransform(JsonNode node) throws ViewDecodeException {
+    JsonObject object =
+        closedObject(node, Set.of("rotation", "mirror"), Set.of("rotation", "mirror"));
+    int rotation = integer(object.fields().get("rotation"), 0, 270);
+    if (rotation != 0 && rotation != 90 && rotation != 180 && rotation != 270) {
+      invalidValue();
+    }
+    return new Transform(rotation, enumValue(string(object, "mirror", 1, 16, false), Mirror.class));
+  }
+
+  private static Difference decodeDifference(JsonNode node) throws ViewDecodeException {
+    JsonObject object =
+        closedObject(
+            node, Set.of("added", "replaced", "removed"), Set.of("added", "replaced", "removed"));
+    return new Difference(
+        integer(object.fields().get("added"), 0, 250_000),
+        integer(object.fields().get("replaced"), 0, 250_000),
+        integer(object.fields().get("removed"), 0, 250_000));
+  }
+
+  private static List<PaletteEntry> decodePalette(JsonNode node) throws ViewDecodeException {
+    List<JsonNode> values = array(node, 0, MAX_BUILD_PALETTE);
+    List<PaletteEntry> palette = new ArrayList<>(values.size());
+    for (JsonNode value : values) {
+      JsonObject object =
+          closedObject(
+              value, Set.of("id", "blockId", "properties"), Set.of("id", "blockId", "properties"));
+      int id = integer(object.fields().get("id"), 0, MAX_BUILD_PALETTE - 1);
+      String blockId = namespacedId(string(object, "blockId", 3, 256, false));
+      JsonObject propertyObject =
+          closedObject(object.fields().get("properties"), Set.of(), Set.of(), true);
+      if (propertyObject.fields().size() > 32) {
+        invalidValue();
+      }
+      Map<String, String> properties = new TreeMap<>();
+      for (Map.Entry<String, JsonNode> property : propertyObject.fields().entrySet()) {
+        if (!PROPERTY_NAME.matcher(property.getKey()).matches()) {
+          invalidValue();
+        }
+        String propertyValue = visibleString(property.getValue(), 1, 64, false);
+        if (!PROPERTY_VALUE.matcher(propertyValue).matches()) {
+          invalidValue();
+        }
+        properties.put(property.getKey(), propertyValue);
+      }
+      palette.add(new PaletteEntry(id, blockId, properties));
+    }
+    return List.copyOf(palette);
+  }
+
+  private static List<BuildChunk> decodeBuildChunks(JsonNode node) throws ViewDecodeException {
+    List<JsonNode> values = array(node, 1, 256);
+    List<BuildChunk> chunks = new ArrayList<>(values.size());
+    for (JsonNode value : values) {
+      JsonObject object =
+          closedObject(
+              value,
+              Set.of("index", "byteLength", "sha256", "data"),
+              Set.of("index", "byteLength", "sha256", "data"));
+      chunks.add(
+          new BuildChunk(
+              integer(object.fields().get("index"), 0, 255),
+              integer(object.fields().get("byteLength"), 1, 1024 * 1024),
+              hashString(object, "sha256"),
+              string(object, "data", 4, 1_398_104, false)));
+    }
+    return List.copyOf(chunks);
+  }
+
+  private static byte[] verifyBuildTransfer(
+      List<BuildChunk> chunks,
+      int chunkCount,
+      int compressedBytes,
+      int uncompressedBytes,
+      String encoding,
+      String contentHash)
+      throws ViewDecodeException {
+    Set<Integer> indexes = new HashSet<>();
+    for (BuildChunk chunk : chunks) {
+      if (!indexes.add(chunk.index())) {
+        throw new ViewDecodeException(ViewDecodeException.Code.CHUNK_INDEX_DUPLICATE);
+      }
+    }
+    if (chunks.size() != chunkCount) {
+      throw new ViewDecodeException(ViewDecodeException.Code.CHUNK_SET_INCOMPLETE);
+    }
+    for (int index = 0; index < chunkCount; index++) {
+      if (!indexes.contains(index)) {
+        throw new ViewDecodeException(ViewDecodeException.Code.CHUNK_SET_INCOMPLETE);
+      }
+    }
+
+    BuildChunk[] ordered = new BuildChunk[chunkCount];
+    for (BuildChunk chunk : chunks) {
+      ordered[chunk.index()] = chunk;
+    }
+    var compressed = new ByteArrayOutputStream(Math.min(compressedBytes, 8192));
+    for (BuildChunk chunk : ordered) {
+      byte[] decoded;
+      try {
+        decoded = Base64.getDecoder().decode(chunk.data());
+      } catch (IllegalArgumentException exception) {
+        throw new ViewDecodeException(ViewDecodeException.Code.CHUNK_BASE64_INVALID, exception);
+      }
+      if (!Base64.getEncoder().encodeToString(decoded).equals(chunk.data())) {
+        throw new ViewDecodeException(ViewDecodeException.Code.CHUNK_BASE64_INVALID);
+      }
+      if (decoded.length != chunk.byteLength()) {
+        throw new ViewDecodeException(ViewDecodeException.Code.CHUNK_LENGTH_MISMATCH);
+      }
+      if (!hash(decoded).equals(chunk.sha256())) {
+        throw new ViewDecodeException(ViewDecodeException.Code.CHUNK_HASH_MISMATCH);
+      }
+      if ((long) compressed.size() + decoded.length > MAX_BUILD_COMPRESSED_BYTES) {
+        throw new ViewDecodeException(ViewDecodeException.Code.CONTENT_COMPRESSED_LENGTH_MISMATCH);
+      }
+      compressed.writeBytes(decoded);
+    }
+    if (compressed.size() != compressedBytes) {
+      throw new ViewDecodeException(ViewDecodeException.Code.CONTENT_COMPRESSED_LENGTH_MISMATCH);
+    }
+
+    byte[] content;
+    if (encoding.equals("identity+base64")) {
+      content = compressed.toByteArray();
+    } else {
+      try {
+        content = StrictGzipDecoder.decode(compressed.toByteArray(), uncompressedBytes);
+      } catch (IOException | ArithmeticException exception) {
+        throw new ViewDecodeException(
+            ViewDecodeException.Code.CONTENT_DECOMPRESSION_FAILED, exception);
+      }
+    }
+    if (content.length != uncompressedBytes) {
+      throw new ViewDecodeException(ViewDecodeException.Code.CONTENT_UNCOMPRESSED_LENGTH_MISMATCH);
+    }
+    if (!hash(content).equals(contentHash)) {
+      throw new ViewDecodeException(ViewDecodeException.Code.CONTENT_HASH_MISMATCH);
+    }
+    return content;
+  }
+
+  private static JsonNode parseBuildContent(byte[] content) throws ViewDecodeException {
+    try {
+      return parse(decodeUtf8(content));
+    } catch (ViewDecodeException exception) {
+      throw new ViewDecodeException(ViewDecodeException.Code.CONTENT_JSON_INVALID, exception);
+    }
+  }
+
+  private static void requireCanonicalContent(byte[] content) throws ViewDecodeException {
+    byte[] canonical;
+    try {
+      canonical = canonicalize(content);
+    } catch (ViewDecodeException exception) {
+      throw new ViewDecodeException(ViewDecodeException.Code.CONTENT_JSON_INVALID, exception);
+    }
+    if (!Arrays.equals(content, canonical)) {
+      throw new ViewDecodeException(ViewDecodeException.Code.CONTENT_NOT_CANONICAL);
+    }
+  }
+
+  private static List<PlacedBlock> decodePaletteContent(JsonNode node) throws ViewDecodeException {
+    try {
+      JsonObject object =
+          closedObject(node, Set.of("blocks", "version"), Set.of("blocks", "version"));
+      if (integer(object.fields().get("version"), 1, 1) != 1) {
+        invalidValue();
+      }
+      List<JsonNode> values = array(object.fields().get("blocks"), 0, MAX_BUILD_BLOCKS);
+      List<PlacedBlock> blocks = new ArrayList<>(values.size());
+      for (JsonNode value : values) {
+        JsonObject block =
+            closedObject(value, Set.of("state", "x", "y", "z"), Set.of("state", "x", "y", "z"));
+        blocks.add(
+            new PlacedBlock(
+                integer(block.fields().get("state"), 0, MAX_BUILD_PALETTE - 1),
+                new Position(
+                    integer(block.fields().get("x"), -30_000_000, 30_000_000),
+                    integer(block.fields().get("y"), -2048, 2048),
+                    integer(block.fields().get("z"), -30_000_000, 30_000_000))));
+      }
+      return List.copyOf(blocks);
+    } catch (ViewDecodeException exception) {
+      throw new ViewDecodeException(ViewDecodeException.Code.CONTENT_SHAPE_INVALID, exception);
+    }
+  }
+
+  private void validatePalette(List<PaletteEntry> palette) throws ViewDecodeException {
+    Set<String> states = new HashSet<>();
+    String previous = null;
+    for (int index = 0; index < palette.size(); index++) {
+      PaletteEntry entry = palette.get(index);
+      String canonicalState = entry.canonicalState();
+      if (entry.id() != index
+          || !states.add(canonicalState)
+          || previous != null && previous.compareTo(canonicalState) >= 0) {
+        throw new ViewDecodeException(ViewDecodeException.Code.PALETTE_INVALID);
+      }
+      try {
+        blockStateResolver.validate(entry.blockId(), entry.properties());
+      } catch (RuntimeException | LinkageError exception) {
+        throw new ViewDecodeException(ViewDecodeException.Code.PALETTE_INVALID, exception);
+      }
+      previous = canonicalState;
+    }
+  }
+
+  private static void validateBounds(Bounds bounds, Position origin) throws ViewDecodeException {
+    try {
+      if (bounds.min().x() > bounds.max().x()
+          || bounds.min().y() > bounds.max().y()
+          || bounds.min().z() > bounds.max().z()
+          || !bounds.contains(origin)
+          || bounds.sizeX() > MAX_BUILD_AXIS
+          || bounds.sizeY() > MAX_BUILD_AXIS
+          || bounds.sizeZ() > MAX_BUILD_AXIS
+          || bounds.volume() > MAX_BUILD_VOLUME) {
+        throw new ViewDecodeException(ViewDecodeException.Code.BOUNDS_INVALID);
+      }
+    } catch (ArithmeticException exception) {
+      throw new ViewDecodeException(ViewDecodeException.Code.BOUNDS_INVALID, exception);
+    }
+  }
+
+  private static void validateBlocks(
+      List<PlacedBlock> blocks, int blockCount, int paletteSize, Bounds bounds)
+      throws ViewDecodeException {
+    if (blocks.size() != blockCount) {
+      throw new ViewDecodeException(ViewDecodeException.Code.BLOCK_CONTENT_INVALID);
+    }
+    Comparator<Position> order =
+        Comparator.comparingInt(Position::y)
+            .thenComparingInt(Position::z)
+            .thenComparingInt(Position::x);
+    Position previous = null;
+    for (PlacedBlock block : blocks) {
+      if (block.state() < 0
+          || block.state() >= paletteSize
+          || !bounds.contains(block.position())
+          || previous != null && order.compare(previous, block.position()) >= 0) {
+        throw new ViewDecodeException(ViewDecodeException.Code.BLOCK_CONTENT_INVALID);
+      }
+      previous = block.position();
+    }
+  }
+
+  private static void validateDifference(Difference difference, int volume)
+      throws ViewDecodeException {
+    long changes = (long) difference.added() + difference.replaced() + difference.removed();
+    if (changes > MAX_BUILD_CHANGES || changes > volume) {
+      throw new ViewDecodeException(ViewDecodeException.Code.CHANGE_LIMIT_EXCEEDED);
+    }
+  }
+
+  private static String hashString(JsonObject object, String field) throws ViewDecodeException {
+    String value = string(object, field, 64, 64, false);
+    if (!SHA_256.matcher(value).matches()) {
+      invalidValue();
+    }
+    return value;
+  }
+
+  private static byte[] canonicalize(byte[] json) throws ViewDecodeException {
+    try {
+      return new JsonCanonicalizer(json).getEncodedUTF8();
+    } catch (IOException | RuntimeException exception) {
+      throw new ViewDecodeException(ViewDecodeException.Code.INVALID_JSON, exception);
+    }
+  }
+
+  private static String hash(byte[] value) {
+    try {
+      return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value));
+    } catch (NoSuchAlgorithmException exception) {
+      throw new IllegalStateException("SHA-256 is unavailable", exception);
+    }
   }
 
   private static ItemListView decodeItemList(JsonNode node, DecodeBudget budget)
@@ -278,23 +718,40 @@ public final class StructuredViewDecoder {
     JsonObject object =
         closedObject(
             node,
-            Set.of("schemaVersion", "query", "selectedRecipe", "recipes"),
-            Set.of("schemaVersion", "query", "selectedRecipe", "recipes"));
+            Set.of(
+                "schemaVersion", "query", "selectedRecipe", "totalMatches", "truncated", "recipes"),
+            Set.of(
+                "schemaVersion",
+                "query",
+                "selectedRecipe",
+                "totalMatches",
+                "truncated",
+                "recipes"));
     String schemaVersion = string(object, "schemaVersion", 3, 3, false);
-    if (!"1.0".equals(schemaVersion)) {
+    if (!"2.0".equals(schemaVersion)) {
       invalidValue();
     }
     Query query = decodeQuery(object.fields().get("query"));
-    int selectedRecipe = integer(object.fields().get("selectedRecipe"), 0, 127);
-    List<JsonNode> values = array(object.fields().get("recipes"), 1, 128);
+    int selectedRecipe = integer(object.fields().get("selectedRecipe"), 0, 15);
+    int totalMatches = integer(object.fields().get("totalMatches"), 1, 1_000_000);
+    boolean truncated = bool(object.fields().get("truncated"));
+    List<JsonNode> values = array(object.fields().get("recipes"), 1, 16);
     if (selectedRecipe >= values.size()) {
       invalidValue();
     }
     List<Recipe> recipes = new ArrayList<>(values.size());
+    Set<String> recipeIds = new HashSet<>();
     for (JsonNode value : values) {
-      recipes.add(decodeRecipe(value, budget));
+      Recipe recipe = decodeRecipe(value, budget);
+      if (!recipeIds.add(recipe.recipeId())) {
+        invalidValue();
+      }
+      recipes.add(recipe);
     }
-    return new RecipeView(schemaVersion, query, selectedRecipe, recipes);
+    if (totalMatches < recipes.size() || (!truncated && totalMatches != recipes.size())) {
+      invalidValue();
+    }
+    return new RecipeView(schemaVersion, query, selectedRecipe, totalMatches, truncated, recipes);
   }
 
   private static Query decodeQuery(JsonNode node) throws ViewDecodeException {
@@ -320,16 +777,23 @@ public final class StructuredViewDecoder {
     String recipeId = namespacedId(string(object, "recipeId", 3, 256, false));
     RecipeType recipeType = enumValue(string(object, "recipeType", 1, 32, false), RecipeType.class);
     Source source = decodeSource(object.fields().get("source"));
-    ItemStackView result = decodeItemStack(object.fields().get("result"), budget);
-    Layout layout = decodeLayout(object.fields().get("layout"), budget);
+    Optional<ItemStackView> result = Optional.empty();
+    if (object.fields().get("result") != JsonNull.INSTANCE) {
+      result = Optional.of(decodeItemStack(object.fields().get("result"), budget));
+    }
+    Set<Integer> logicalSlots = new HashSet<>();
+    Layout layout = decodeLayout(object.fields().get("layout"), budget, recipeType, logicalSlots);
     List<RemainingItem> remainingItems =
-        decodeRemainingItems(object.fields().get("remainingItems"), budget);
+        decodeRemainingItems(object.fields().get("remainingItems"), budget, logicalSlots);
     Optional<Processing> processing = Optional.empty();
     if (object.fields().containsKey("processing")) {
       processing = Optional.of(decodeProcessing(object.fields().get("processing")));
     }
     if (isCooking(recipeType) && processing.isEmpty()) {
       throw new ViewDecodeException(ViewDecodeException.Code.MISSING_FIELD);
+    }
+    if (!isCooking(recipeType) && processing.isPresent()) {
+      invalidValue();
     }
     return new Recipe(recipeId, recipeType, source, result, layout, remainingItems, processing);
   }
@@ -345,16 +809,69 @@ public final class StructuredViewDecoder {
     } else {
       providerId = Optional.of(namespacedId(visibleString(provider, 3, 256, false)));
     }
+    if ((kind == SourceKind.SERVER_REGISTRY) == providerId.isPresent()) {
+      invalidValue();
+    }
     return new Source(kind, providerId);
   }
 
-  private static Layout decodeLayout(JsonNode node, DecodeBudget budget)
+  private static Layout decodeLayout(
+      JsonNode node, DecodeBudget budget, RecipeType recipeType, Set<Integer> logicalSlots)
       throws ViewDecodeException {
+    if (!(node instanceof JsonObject object)) {
+      invalidValue();
+      throw new AssertionError();
+    }
+    String kind = string(object, "kind", 1, 16, false);
+    if (!expectedLayoutKind(recipeType).equals(kind)) {
+      invalidValue();
+    }
+    return switch (kind) {
+      case "grid" -> decodeGridLayout(object, budget, logicalSlots);
+      case "single_input" -> {
+        JsonObject exact =
+            closedObject(object, Set.of("kind", "ingredient"), Set.of("kind", "ingredient"));
+        logicalSlots.add(0);
+        yield new SingleInputLayout(
+            decodeIngredientChoice(exact.fields().get("ingredient"), budget));
+      }
+      case "smithing" -> {
+        JsonObject exact =
+            closedObject(
+                object,
+                Set.of("kind", "template", "base", "addition"),
+                Set.of("kind", "template", "base", "addition"));
+        logicalSlots.addAll(Set.of(0, 1, 2));
+        yield new SmithingLayout(
+            decodeIngredientChoice(exact.fields().get("template"), budget),
+            decodeIngredientChoice(exact.fields().get("base"), budget),
+            decodeIngredientChoice(exact.fields().get("addition"), budget));
+      }
+      case "transmute" -> {
+        JsonObject exact =
+            closedObject(
+                object, Set.of("kind", "input", "material"), Set.of("kind", "input", "material"));
+        logicalSlots.addAll(Set.of(0, 1));
+        yield new TransmuteLayout(
+            decodeIngredientChoice(exact.fields().get("input"), budget),
+            decodeIngredientChoice(exact.fields().get("material"), budget));
+      }
+      case "unsupported" -> {
+        JsonObject exact = closedObject(object, Set.of("kind", "reason"), Set.of("kind", "reason"));
+        yield new UnsupportedLayout(
+            enumValue(string(exact, "reason", 1, 64, false), UnsupportedLayoutReason.class));
+      }
+      default -> throw new ViewDecodeException(ViewDecodeException.Code.INVALID_VALUE);
+    };
+  }
+
+  private static GridLayout decodeGridLayout(
+      JsonObject input, DecodeBudget budget, Set<Integer> logicalSlots) throws ViewDecodeException {
     JsonObject object =
         closedObject(
-            node,
-            Set.of("width", "height", "ingredients"),
-            Set.of("width", "height", "ingredients"));
+            input,
+            Set.of("kind", "width", "height", "ingredients"),
+            Set.of("kind", "width", "height", "ingredients"));
     int width = integer(object.fields().get("width"), 1, 3);
     int height = integer(object.fields().get("height"), 1, 3);
     List<JsonNode> values = array(object.fields().get("ingredients"), 1, 9);
@@ -371,9 +888,10 @@ public final class StructuredViewDecoder {
       if (!slots.add(ingredient.slot()) || !positions.add(ingredient.y() * 3 + ingredient.x())) {
         invalidValue();
       }
+      logicalSlots.add(ingredient.slot());
       ingredients.add(ingredient);
     }
-    return new Layout(width, height, ingredients);
+    return new GridLayout(width, height, ingredients);
   }
 
   private static IngredientSlot decodeIngredientSlot(JsonNode node, DecodeBudget budget)
@@ -393,33 +911,43 @@ public final class StructuredViewDecoder {
     JsonObject object =
         closedObject(
             node,
-            Set.of("choiceType", "tagId", "alternatives"),
+            Set.of("choiceType", "tagId", "reason", "alternatives"),
             Set.of("choiceType", "alternatives"));
     ChoiceType choiceType = enumValue(string(object, "choiceType", 1, 16, false), ChoiceType.class);
     Optional<String> tagId = Optional.empty();
     if (object.fields().containsKey("tagId")) {
       tagId = Optional.of(namespacedId(string(object, "tagId", 3, 256, false)));
     }
-    if ((choiceType == ChoiceType.TAG) != tagId.isPresent()) {
+    Optional<UnsupportedChoiceReason> reason = Optional.empty();
+    if (object.fields().containsKey("reason")) {
+      reason =
+          Optional.of(
+              enumValue(string(object, "reason", 1, 64, false), UnsupportedChoiceReason.class));
+    }
+    boolean unsupported = choiceType == ChoiceType.UNSUPPORTED;
+    if ((choiceType == ChoiceType.TAG) != tagId.isPresent()
+        || unsupported != reason.isPresent()
+        || unsupported && tagId.isPresent()) {
       invalidValue();
     }
-    List<JsonNode> values = array(object.fields().get("alternatives"), 1, 64);
+    List<JsonNode> values =
+        array(object.fields().get("alternatives"), unsupported ? 0 : 1, unsupported ? 0 : 64);
     List<ItemStackView> alternatives = new ArrayList<>(values.size());
     for (JsonNode value : values) {
       alternatives.add(decodeItemStack(value, budget));
     }
-    return new IngredientChoice(choiceType, tagId, alternatives);
+    return new IngredientChoice(choiceType, tagId, reason, alternatives);
   }
 
-  private static List<RemainingItem> decodeRemainingItems(JsonNode node, DecodeBudget budget)
-      throws ViewDecodeException {
+  private static List<RemainingItem> decodeRemainingItems(
+      JsonNode node, DecodeBudget budget, Set<Integer> logicalSlots) throws ViewDecodeException {
     List<JsonNode> values = array(node, 0, 9);
     List<RemainingItem> result = new ArrayList<>(values.size());
     Set<Integer> slots = new HashSet<>();
     for (JsonNode value : values) {
       JsonObject object = closedObject(value, Set.of("slot", "item"), Set.of("slot", "item"));
       int slot = integer(object.fields().get("slot"), 0, 8);
-      if (!slots.add(slot)) {
+      if (!logicalSlots.contains(slot) || !slots.add(slot)) {
         invalidValue();
       }
       result.add(new RemainingItem(slot, decodeItemStack(object.fields().get("item"), budget)));
@@ -431,8 +959,18 @@ public final class StructuredViewDecoder {
     JsonObject object =
         closedObject(node, Set.of("timeTicks", "experience"), Set.of("timeTicks", "experience"));
     return new Processing(
-        integer(object.fields().get("timeTicks"), 1, 120000),
+        integer(object.fields().get("timeTicks"), 0, 120000),
         decimal(object.fields().get("experience"), BigDecimal.ZERO, new BigDecimal("1000000")));
+  }
+
+  private static String expectedLayoutKind(RecipeType type) {
+    return switch (type) {
+      case SHAPED, SHAPELESS -> "grid";
+      case SMELTING, BLASTING, SMOKING, CAMPFIRE_COOKING, STONECUTTING -> "single_input";
+      case SMITHING_TRANSFORM, SMITHING_TRIM -> "smithing";
+      case TRANSMUTE -> "transmute";
+      case COMPLEX, CUSTOM -> "unsupported";
+    };
   }
 
   private static boolean isCooking(RecipeType type) {
@@ -444,12 +982,18 @@ public final class StructuredViewDecoder {
 
   private static JsonObject closedObject(JsonNode node, Set<String> allowed, Set<String> required)
       throws ViewDecodeException {
+    return closedObject(node, allowed, required, false);
+  }
+
+  private static JsonObject closedObject(
+      JsonNode node, Set<String> allowed, Set<String> required, boolean allowAdditional)
+      throws ViewDecodeException {
     if (!(node instanceof JsonObject object)) {
       invalidValue();
       throw new AssertionError();
     }
     for (String field : object.fields().keySet()) {
-      if (!allowed.contains(field)) {
+      if (!allowAdditional && !allowed.contains(field)) {
         throw new ViewDecodeException(ViewDecodeException.Code.UNKNOWN_FIELD);
       }
     }
@@ -459,6 +1003,69 @@ public final class StructuredViewDecoder {
       }
     }
     return object;
+  }
+
+  private static byte[] jsonBytes(JsonNode node) {
+    var json = new StringBuilder();
+    appendJson(json, node);
+    return json.toString().getBytes(StandardCharsets.UTF_8);
+  }
+
+  private static void appendJson(StringBuilder target, JsonNode node) {
+    switch (node) {
+      case JsonObject object -> {
+        target.append('{');
+        boolean first = true;
+        for (Map.Entry<String, JsonNode> field : object.fields().entrySet()) {
+          if (!first) {
+            target.append(',');
+          }
+          appendJsonString(target, field.getKey());
+          target.append(':');
+          appendJson(target, field.getValue());
+          first = false;
+        }
+        target.append('}');
+      }
+      case JsonArray array -> {
+        target.append('[');
+        for (int index = 0; index < array.values().size(); index++) {
+          if (index > 0) {
+            target.append(',');
+          }
+          appendJson(target, array.values().get(index));
+        }
+        target.append(']');
+      }
+      case JsonString string -> appendJsonString(target, string.value());
+      case JsonNumber number -> target.append(number.value());
+      case JsonBoolean bool -> target.append(bool.value());
+      case JsonNull ignored -> target.append("null");
+    }
+  }
+
+  private static void appendJsonString(StringBuilder target, String value) {
+    target.append('"');
+    for (int index = 0; index < value.length(); index++) {
+      char character = value.charAt(index);
+      switch (character) {
+        case '"' -> target.append("\\\"");
+        case '\\' -> target.append("\\\\");
+        case '\b' -> target.append("\\b");
+        case '\f' -> target.append("\\f");
+        case '\n' -> target.append("\\n");
+        case '\r' -> target.append("\\r");
+        case '\t' -> target.append("\\t");
+        default -> {
+          if (character < 0x20) {
+            target.append(String.format(Locale.ROOT, "\\u%04x", (int) character));
+          } else {
+            target.append(character);
+          }
+        }
+      }
+    }
+    target.append('"');
   }
 
   private static String string(
@@ -634,6 +1241,8 @@ public final class StructuredViewDecoder {
   private enum JsonNull implements JsonNode {
     INSTANCE
   }
+
+  private record BuildChunk(int index, int byteLength, String sha256, String data) {}
 
   private static final class ParseBudget {
     private int nodes;

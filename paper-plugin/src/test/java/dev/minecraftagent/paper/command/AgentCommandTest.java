@@ -210,7 +210,7 @@ class AgentCommandTest {
         List.of(
             "Minecraft Agent: ONLINE",
             "/agent [say <message>|resume [session]|module list|module <name> <message>|ui"
-                + " <pin|unpin|clear>|confirm"
+                + " <pin|unpin|clear>|ui <preview|materials> <view-id>|confirm"
                 + " <proposal>|reject <proposal>|doctor|off|on]"),
         messages);
   }
@@ -261,7 +261,7 @@ class AgentCommandTest {
     assertEquals(
         List.of(
             "/agent [say <message>|resume [session]|module list|module <name> <message>|ui"
-                + " <pin|unpin|clear>|confirm"
+                + " <pin|unpin|clear>|ui <preview|materials> <view-id>|confirm"
                 + " <proposal>|reject <proposal>|doctor|off|on]"),
         emptyMessages);
   }
@@ -339,10 +339,11 @@ class AgentCommandTest {
   void uiActionsUseActualPlayerIdentityAndRemainPresentationOnly() {
     var messages = new ArrayList<String>();
     var playerId = UUID.randomUUID();
+    var viewId = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
     var invocations = new ArrayList<String>();
     AgentUiControl ui =
-        (actualPlayerId, action) -> {
-          invocations.add(actualPlayerId + ":" + action.name());
+        (actualPlayerId, action, actualViewId) -> {
+          invocations.add(actualPlayerId + ":" + action.name() + ":" + actualViewId);
           return action == AgentUiControl.Action.CLEAR
               ? AgentUiControl.Result.CLIENT_UNAVAILABLE
               : AgentUiControl.Result.SENT;
@@ -362,10 +363,60 @@ class AgentCommandTest {
     command.execute(player, "agent", new String[] {"ui", "PIN"});
     command.execute(player, "agent", new String[] {"ui", "unpin"});
     command.execute(player, "agent", new String[] {"ui", "clear"});
+    command.execute(player, "agent", new String[] {"ui", "preview", viewId.toString()});
+    command.execute(player, "agent", new String[] {"ui", "materials", viewId.toString()});
 
-    assertEquals(List.of(playerId + ":PIN", playerId + ":UNPIN", playerId + ":CLEAR"), invocations);
     assertEquals(
-        List.of("AI client UI updated.", "AI client UI updated.", "AI client Mod is unavailable."),
+        List.of(
+            playerId + ":PIN:null",
+            playerId + ":UNPIN:null",
+            playerId + ":CLEAR:null",
+            playerId + ":PREVIEW:" + viewId,
+            playerId + ":MATERIALS:" + viewId),
+        invocations);
+    assertEquals(
+        List.of(
+            "AI client UI updated.",
+            "AI client UI updated.",
+            "AI client Mod is unavailable.",
+            "AI client UI updated.",
+            "AI client UI updated."),
+        messages);
+  }
+
+  @Test
+  void uiPreviewActionsRequireUsePermissionAndCanonicalTarget() {
+    var messages = new ArrayList<String>();
+    var invocations = new ArrayList<String>();
+    AgentUiControl ui =
+        (playerId, action, viewId) -> {
+          invocations.add(action + ":" + viewId);
+          return AgentUiControl.Result.SENT;
+        };
+    var command =
+        new AgentCommand(
+            plugin(),
+            AgentCommandTest::healthy,
+            new RecordingControl(),
+            new RecordingRequests(),
+            ProposalResponseGateway.unavailable(),
+            ui,
+            ignored -> false,
+            Runnable::run);
+
+    command.execute(
+        player(messages, UUID.randomUUID(), Set.of()),
+        "agent",
+        new String[] {"ui", "preview", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"});
+    command.execute(
+        player(messages, UUID.randomUUID(), Set.of(AgentCommand.USE_PERMISSION)),
+        "agent",
+        new String[] {"ui", "materials", "not-a-uuid"});
+
+    assertTrue(invocations.isEmpty());
+    assertEquals(
+        List.of(
+            "You do not have permission to use this command.", "View ID must be a canonical UUID."),
         messages);
   }
 
@@ -374,7 +425,7 @@ class AgentCommandTest {
     var messages = new ArrayList<String>();
     var playerId = UUID.randomUUID();
     AgentUiControl failing =
-        (actualPlayerId, action) -> {
+        (actualPlayerId, action, viewId) -> {
           throw new IllegalStateException("sensitive transport detail");
         };
     var command =
@@ -497,7 +548,7 @@ class AgentCommandTest {
         List.of(
             "Proposal ID must be a canonical UUID.",
             "/agent [say <message>|resume [session]|module list|module <name> <message>|ui"
-                + " <pin|unpin|clear>|confirm"
+                + " <pin|unpin|clear>|ui <preview|materials> <view-id>|confirm"
                 + " <proposal>|reject <proposal>|doctor|off|on]"),
         invalidMessages);
     assertNull(proposals.operation);
@@ -590,7 +641,7 @@ class AgentCommandTest {
         List.of("recipe"),
         onlineAuthorized.tabComplete(permitted, "agent", new String[] {"module", "re"}));
     assertEquals(
-        List.of("pin", "unpin", "clear"),
+        List.of("pin", "unpin", "clear", "preview", "materials"),
         onlineAuthorized.tabComplete(permitted, "agent", new String[] {"ui", ""}));
     assertEquals(
         List.of("unpin"),

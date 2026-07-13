@@ -18,10 +18,158 @@ import {
   type ConversationRepository,
 } from "../storage/conversation-repository.js";
 import { type CoreToolDescriptor, ToolRegistry } from "../tools/tool-registry.js";
-import type { ToolCallPayload, ToolResultPayload } from "../tools/tool-types.js";
+import {
+  type LocalToolExecution,
+  UnavailableLocalToolExecutor,
+} from "../tools/local-tool-executor.js";
+import type {
+  ToolCallPayload,
+  ToolExecutionResult,
+  ToolResultPayload,
+} from "../tools/tool-types.js";
 import { RequestAdmissionController, type RequestAdmissionRejection } from "./request-admission.js";
+import {
+  createAuthoritativeRecipePresentation,
+  type RecipeViewContentV2,
+  type RecipeViewPresentation,
+  uncheckedRecipeFallback,
+  unavailableRecipeFallback,
+} from "./recipe-presentation.js";
 
 const MAXIMUM_MODEL_OUTPUT_TOKENS = 1024;
+
+type VerifiedProjectRevisions = Map<string, number>;
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function updateVerifiedProject(
+  verified: VerifiedProjectRevisions,
+  descriptor: CoreToolDescriptor,
+  argumentsValue: Readonly<Record<string, unknown>>,
+  result: ToolExecutionResult,
+): void {
+  if (descriptor.id !== "project.read") {
+    return;
+  }
+  const requestedProjectId = argumentsValue["projectId"];
+  if (typeof requestedProjectId === "string") {
+    verified.delete(requestedProjectId);
+  }
+  if (result.status !== "succeeded" || !isRecord(result.result)) {
+    return;
+  }
+  const project = result.result["project"];
+  if (!isRecord(project)) {
+    return;
+  }
+  const projectId = project["projectId"];
+  const revision = project["revision"];
+  if (typeof projectId === "string" && Number.isSafeInteger(revision) && Number(revision) >= 1) {
+    verified.set(projectId, Number(revision));
+  }
+}
+
+function matchesVerifiedProject(
+  verified: VerifiedProjectRevisions,
+  argumentsValue: Readonly<Record<string, unknown>>,
+): boolean {
+  const projectId = argumentsValue["projectId"];
+  const revision = argumentsValue["revision"];
+  return (
+    typeof projectId === "string" &&
+    Number.isSafeInteger(revision) &&
+    verified.get(projectId) === Number(revision)
+  );
+}
+
+type ProjectMutationKind = "project.create" | "project.update";
+
+function permitsProjectMutation(message: string, kind: ProjectMutationKind): boolean {
+  const normalized = message.normalize("NFKC").trim().toLowerCase();
+  const isQuestionOrHypothetical =
+    /[?？]/u.test(normalized) ||
+    /^(?:how|what|when|where|why|who|which|can|could|would|should|do|does|did|is|are|may|might|if|suppose|imagine)\b/u.test(
+      normalized,
+    ) ||
+    /\b(?:how\s+to|tell\s+me\s+how|explain\s+how|hypothetically)\b|如何|怎么|怎样|是否|能否|可否|为什么|假如|假设/u.test(
+      normalized,
+    );
+  if (isQuestionOrHypothetical) {
+    return false;
+  }
+
+  const verbs =
+    kind === "project.create"
+      ? "save|store|persist|create|record|remember"
+      : "update|edit|rename|revise|modify|change";
+  const chineseVerbs =
+    kind === "project.create" ? "保存|存储|新建|创建|记录|记住" : "更新|修改|编辑|重命名|变更";
+  const negated =
+    new RegExp(
+      `\\b(?:do\\s+not|don't|dont|never|avoid|not\\s+to)\\s+(?:\\w+\\s+){0,3}(?:${verbs})\\b`,
+      "u",
+    ).test(normalized) ||
+    new RegExp(
+      `(?:不要|别|禁止|避免|无需|不用|不想|不能|不可)[^\\r\\n]{0,12}(?:${chineseVerbs})`,
+      "u",
+    ).test(normalized);
+  if (negated) {
+    return false;
+  }
+
+  const directEnglish = new RegExp(
+    `^(?:please(?:\\s+|,\\s*))?(?:${verbs})\\b[^\\r\\n]{0,160}\\b(?:project|plan)\\b`,
+    "u",
+  );
+  const directChinese = new RegExp(
+    `^(?:(?:请|麻烦|请帮我|帮我)[，,\\s]*)?(?:(?:${chineseVerbs})[^\\r\\n]{0,80}(?:项目|计划)|(?:把|将)[^\\r\\n]{0,60}(?:${chineseVerbs})[^\\r\\n]{0,60}(?:项目|计划)|(?:把|将)[^\\r\\n]{0,60}(?:项目|计划)[^\\r\\n]{0,60}(?:${chineseVerbs})|(?:项目|计划)[^\\r\\n]{0,60}(?:${chineseVerbs}))`,
+    "u",
+  );
+  return directEnglish.test(normalized) || directChinese.test(normalized);
+}
+
+function completedProjectMutation(
+  descriptor: CoreToolDescriptor,
+  result: ToolExecutionResult,
+): boolean {
+  if (
+    (descriptor.id !== "project.create" && descriptor.id !== "project.update") ||
+    result.status !== "succeeded" ||
+    !isRecord(result.result)
+  ) {
+    return false;
+  }
+  const outcome = result.result["outcome"];
+  return outcome === "CREATED" || outcome === "UPDATED";
+}
+
+function authoritativeBuildFallback(result: ToolExecutionResult): string | undefined {
+  if (
+    result.status !== "succeeded" ||
+    result.source !== "paper_api" ||
+    result.trust !== "authoritative" ||
+    !isRecord(result.result) ||
+    result.result["previewStatus"] !== "server_validated" ||
+    result.result["worldWriteEnabled"] !== false
+  ) {
+    return undefined;
+  }
+  const previewId = result.result["previewId"];
+  const projectId = result.result["projectId"];
+  const revision = result.result["revision"];
+  const changeCount = result.result["changeCount"];
+  if (
+    typeof previewId !== "string" ||
+    typeof projectId !== "string" ||
+    !Number.isSafeInteger(revision) ||
+    !Number.isSafeInteger(changeCount)
+  ) {
+    return undefined;
+  }
+  return `Paper generated server-validated build preview ${previewId} for project ${projectId} revision ${String(revision)} with ${String(changeCount)} changes. No blocks were changed; loading the preview is an explicit client action.`;
+}
 
 export interface AgentRequestInput {
   readonly requestId: string;
@@ -35,7 +183,7 @@ export interface AgentCompletionPayload {
   readonly sessionId: string | null;
   readonly playerUuid: string;
   readonly fallbackText: string;
-  readonly structuredViews: readonly StructuredTextView[];
+  readonly structuredViews: readonly AgentStructuredView[];
 }
 
 export interface StructuredTextView {
@@ -51,6 +199,20 @@ export interface StructuredTextView {
     readonly text: string;
   };
 }
+
+export interface StructuredRecipeView {
+  readonly viewSchemaVersion: "1.0";
+  readonly viewId: string;
+  readonly requestId: string;
+  readonly viewType: "recipe";
+  readonly revision: 1;
+  readonly title: string;
+  readonly fallbackText: string;
+  readonly pinnable: true;
+  readonly content: RecipeViewContentV2;
+}
+
+export type AgentStructuredView = StructuredTextView | StructuredRecipeView;
 
 export type AgentErrorCode =
   | "MODEL_TIMEOUT"
@@ -104,6 +266,7 @@ export interface AgentRequestServiceOptions {
   readonly conversations?: ConversationRepository;
   readonly modules?: ModuleRegistry;
   readonly tools: ToolRegistry;
+  readonly localTools?: LocalToolExecution;
 }
 
 interface PendingToolCall {
@@ -298,6 +461,7 @@ export class AgentRequestService {
   readonly #conversations: ConversationRepository;
   readonly #modules: ModuleRegistry;
   readonly #tools: ToolRegistry;
+  readonly #localTools: LocalToolExecution;
   readonly #requests = new Map<string, RequestRecord>();
   #closed = false;
 
@@ -314,6 +478,7 @@ export class AgentRequestService {
     this.#conversations = options.conversations ?? new DisabledConversationRepository();
     this.#modules = options.modules ?? new ModuleRegistry();
     this.#tools = options.tools;
+    this.#localTools = options.localTools ?? new UnavailableLocalToolExecutor();
     this.#timeoutMilliseconds = timeoutMilliseconds;
     this.#admission = new RequestAdmissionController(
       {
@@ -516,6 +681,12 @@ export class AgentRequestService {
     let sequence = 0;
     let continuation: ModelGenerationContinuation | undefined;
     let toolOutput: ModelToolOutput | undefined;
+    let recipeToolAttempted = false;
+    let authoritativeRecipe: ReturnType<typeof createAuthoritativeRecipePresentation> = undefined;
+    let buildFallback: string | undefined;
+    let buildToolAttempted = false;
+    const verifiedProjects: VerifiedProjectRevisions = new Map();
+    let projectMutationCompleted = false;
 
     while (!record.controller.signal.aborted) {
       const toolsAvailable = sequence < this.#config.limits.maxToolRounds;
@@ -544,7 +715,25 @@ export class AgentRequestService {
         throw error;
       }
       if (result.type === "final") {
-        this.#complete(record, result.fallbackText);
+        if (authoritativeRecipe !== undefined) {
+          this.#complete(record, authoritativeRecipe.fallbackText, authoritativeRecipe.view);
+        } else if (buildFallback !== undefined) {
+          this.#complete(record, buildFallback);
+        } else if (buildToolAttempted) {
+          this.#complete(
+            record,
+            "Paper could not produce a server-validated build preview. No blocks were changed.",
+          );
+        } else {
+          this.#complete(
+            record,
+            recipeToolAttempted
+              ? unavailableRecipeFallback()
+              : record.input.module === "recipe"
+                ? uncheckedRecipeFallback()
+                : result.fallbackText,
+          );
+        }
         return;
       }
       if (!toolsAvailable) {
@@ -558,22 +747,69 @@ export class AgentRequestService {
       ) {
         throw new ToolLoopError("TOOL_REJECTED");
       }
-      const executionSessionId = record.executionSessionId;
-      if (executionSessionId === null) {
-        throw new Error("Tool execution session was not prepared.");
+      if (
+        descriptor.id === "build.preview.create" &&
+        !matchesVerifiedProject(verifiedProjects, result.arguments)
+      ) {
+        throw new ToolLoopError("TOOL_REJECTED");
       }
-      const payload: ToolCallPayload = {
-        toolCallId: this.#allocateToolCallId(record),
-        sessionId: executionSessionId,
-        playerUuid: record.input.playerUuid,
-        module: record.input.module,
-        tool: descriptor.id,
-        arguments: result.arguments,
-        sequence,
-      };
-      const toolResult = await this.#awaitToolResult(record, descriptor, payload);
+      if (
+        (descriptor.id === "project.create" || descriptor.id === "project.update") &&
+        (projectMutationCompleted || !permitsProjectMutation(record.input.message, descriptor.id))
+      ) {
+        throw new ToolLoopError("TOOL_REJECTED");
+      }
+      const toolCallId = this.#allocateToolCallId(record);
+      let toolResult: ToolExecutionResult;
+      if (descriptor.execution === "runtime_local") {
+        try {
+          toolResult = await this.#localTools.execute({
+            descriptor,
+            serverId: this.#config.server.id,
+            playerUuid: record.input.playerUuid,
+            requestId: record.input.requestId,
+            toolCallId,
+            arguments: result.arguments,
+            now: this.#now(),
+            signal: record.controller.signal,
+          });
+        } catch (error) {
+          if (record.controller.signal.aborted) {
+            throw error;
+          }
+          throw new ToolLoopError("TOOL_REJECTED");
+        }
+        if (!this.#validLocalToolResult(descriptor, toolResult)) {
+          throw new ToolLoopError("TOOL_REJECTED");
+        }
+        updateVerifiedProject(verifiedProjects, descriptor, result.arguments, toolResult);
+        projectMutationCompleted ||= completedProjectMutation(descriptor, toolResult);
+      } else {
+        const executionSessionId = record.executionSessionId;
+        if (executionSessionId === null) {
+          throw new Error("Tool execution session was not prepared.");
+        }
+        const payload: ToolCallPayload = {
+          toolCallId,
+          sessionId: executionSessionId,
+          playerUuid: record.input.playerUuid,
+          module: record.input.module,
+          tool: descriptor.id,
+          arguments: result.arguments,
+          sequence,
+        };
+        toolResult = await this.#awaitToolResult(record, descriptor, payload);
+      }
       if (toolResult.status === "rejected") {
         throw new ToolLoopError("TOOL_REJECTED");
+      }
+      if (descriptor.id === "server.recipe.lookup" || descriptor.id === "server.recipe.uses") {
+        recipeToolAttempted = true;
+        authoritativeRecipe = createAuthoritativeRecipePresentation(descriptor.id, toolResult);
+      }
+      if (descriptor.id === "build.preview.create") {
+        buildToolAttempted = true;
+        buildFallback = authoritativeBuildFallback(toolResult);
       }
       const providerOutput = JSON.stringify({
         status: toolResult.status,
@@ -591,7 +827,11 @@ export class AgentRequestService {
     }
   }
 
-  #complete(record: RequestRecord, fallbackText: string): void {
+  #complete(
+    record: RequestRecord,
+    fallbackText: string,
+    recipeView?: RecipeViewPresentation,
+  ): void {
     if (record.terminalSent || record.suppressResponse) {
       return;
     }
@@ -611,25 +851,42 @@ export class AgentRequestService {
       });
     }
     record.terminalSent = true;
+    const viewId = this.#randomUuid();
+    const structuredViews: AgentStructuredView[] =
+      recipeView === undefined
+        ? [
+            {
+              viewSchemaVersion: "1.0",
+              viewId,
+              requestId: record.input.requestId,
+              viewType: "text",
+              revision: 1,
+              title: "Agent response",
+              fallbackText,
+              pinnable: true,
+              content: { text: fallbackText },
+            },
+          ]
+        : [
+            {
+              viewSchemaVersion: "1.0",
+              viewId,
+              requestId: record.input.requestId,
+              viewType: "recipe",
+              revision: 1,
+              title: recipeView.title,
+              fallbackText,
+              pinnable: true,
+              content: recipeView.content,
+            },
+          ];
     this.#safeRespond(record.respond, {
       type: "agent.complete",
       payload: {
         sessionId: record.preparedSessionId,
         playerUuid: record.input.playerUuid,
         fallbackText,
-        structuredViews: [
-          {
-            viewSchemaVersion: "1.0",
-            viewId: this.#randomUuid(),
-            requestId: record.input.requestId,
-            viewType: "text",
-            revision: 1,
-            title: "Agent response",
-            fallbackText,
-            pinnable: true,
-            content: { text: fallbackText },
-          },
-        ],
+        structuredViews,
       },
     });
   }
@@ -659,6 +916,19 @@ export class AgentRequestService {
     }).finally(() => {
       record.phase = "ACTIVE";
     });
+  }
+
+  #validLocalToolResult(descriptor: CoreToolDescriptor, payload: ToolExecutionResult): boolean {
+    if (payload.status === "succeeded") {
+      return this.#tools.validateResult(descriptor, payload);
+    }
+    return (
+      payload.status === "failed" &&
+      payload.source === descriptor.source &&
+      payload.trust === descriptor.trust &&
+      payload.result === null &&
+      payload.error !== null
+    );
   }
 
   #owner(playerUuid: string): ConversationOwner {

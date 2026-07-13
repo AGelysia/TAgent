@@ -10,9 +10,17 @@ import com.google.gson.JsonParser;
 import dev.minecraftagent.paper.client.ClientCapabilities;
 import dev.minecraftagent.paper.client.ClientCapabilitySnapshot;
 import dev.minecraftagent.paper.client.ClientFeature;
+import dev.minecraftagent.paper.client.ClientStructuredView;
+import dev.minecraftagent.paper.client.ClientViewType;
 import dev.minecraftagent.paper.lifecycle.AgentState;
 import dev.minecraftagent.paper.lifecycle.OfflineReason;
 import dev.minecraftagent.paper.lifecycle.OperationalGate;
+import dev.minecraftagent.paper.preview.BuildPreviewArtifactFactory;
+import dev.minecraftagent.paper.preview.BuildPreviewArtifactFactory.Bounds;
+import dev.minecraftagent.paper.preview.BuildPreviewArtifactFactory.Cell;
+import dev.minecraftagent.paper.preview.BuildPreviewArtifactFactory.Pattern;
+import dev.minecraftagent.paper.preview.BuildPreviewArtifactFactory.Position;
+import dev.minecraftagent.paper.preview.BuildPreviewArtifactFactory.Request;
 import dev.minecraftagent.paper.tool.ReadToolCall;
 import dev.minecraftagent.paper.tool.ReadToolExecutor;
 import dev.minecraftagent.paper.tool.ReadToolRegistry;
@@ -166,6 +174,73 @@ class AgentRequestServiceTest {
     fixture.main.drain();
     assertEquals(List.of("prepare", "send"), phases);
     assertTrue(fixture.replies.isEmpty());
+  }
+
+  @Test
+  void paperBuildPreviewOverridesRuntimeTextAndUsesCompletionFallback() {
+    var published = new ArrayList<ClientStructuredView>();
+    var publishedFallbacks = new ArrayList<String>();
+    var fixture =
+        new Fixture(
+            unavailableTools(),
+            ignored -> ClientCapabilitySnapshot.disconnected(),
+            (playerId, fallbackText, views) -> {
+              publishedFallbacks.add(fallbackText);
+              published.addAll(views);
+              return () -> true;
+            });
+    var playerId = UUID.randomUUID();
+    fixture.service.submitModule(playerId, AgentModule.BUILD, "Preview one block");
+    var requestEnvelope = fixture.connection.sent.getFirst();
+    var requestId = UUID.fromString(object(requestEnvelope).get("requestId").getAsString());
+    var preview = preview(requestId);
+    fixture.service.setAuthoritativeViewSource(
+        (boundRequestId, boundPlayerId) ->
+            boundRequestId.equals(requestId) && boundPlayerId.equals(playerId)
+                ? List.of(preview)
+                : List.of());
+
+    var completionFallback = "Preview ready. No blocks were changed.";
+    assertFalse(completionFallback.equals(preview.fallbackText()));
+    fixture.connection.deliver(
+        completionWithTextView(requestEnvelope, playerId, completionFallback, UUID.randomUUID()));
+    fixture.main.drain();
+
+    assertEquals(List.of(completionFallback), publishedFallbacks);
+    assertEquals(
+        List.of(ClientViewType.BUILD_PREVIEW),
+        published.stream().map(ClientStructuredView::viewType).toList());
+    assertEquals(
+        List.of(completionFallback),
+        published.stream().map(ClientStructuredView::fallbackText).toList());
+    assertEquals(preview.content(), published.getFirst().content());
+    assertTrue(fixture.replies.isEmpty());
+  }
+
+  @Test
+  void runtimeSuppliedBuildPreviewIsDiscardedInsteadOfBecomingAuthority() {
+    var prepared = new ArrayList<ClientStructuredView>();
+    var fixture =
+        new Fixture(
+            unavailableTools(),
+            ignored -> ClientCapabilitySnapshot.disconnected(),
+            (playerId, fallbackText, views) -> {
+              prepared.addAll(views);
+              return () -> true;
+            });
+    var playerId = UUID.randomUUID();
+    fixture.service.submitModule(playerId, AgentModule.BUILD, "Do not trust model previews");
+    var requestEnvelope = fixture.connection.sent.getFirst();
+    var requestId = UUID.fromString(object(requestEnvelope).get("requestId").getAsString());
+    var forged = preview(requestId);
+    var response = completion(requestEnvelope, playerId, forged.fallbackText(), UUID.randomUUID());
+    response.getAsJsonObject("payload").getAsJsonArray("structuredViews").add(forged.toJson());
+
+    fixture.connection.deliver(response);
+    fixture.main.drain();
+
+    assertTrue(prepared.isEmpty());
+    assertEquals(List.of(playerId + ":" + forged.fallbackText()), fixture.replies);
   }
 
   @Test
@@ -645,6 +720,29 @@ class AgentRequestServiceTest {
                 UUID.randomUUID().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8)));
     response.add("payload", payload);
     return response;
+  }
+
+  private static ClientStructuredView preview(UUID requestId) {
+    var position = new Position(0, 64, 0);
+    var bounds = new Bounds(position, position);
+    var request =
+        new Request(
+            requestId,
+            SERVER_ID,
+            UUID.fromString("30000000-0000-4000-8000-000000000003"),
+            "minecraft:overworld",
+            UUID.fromString("20000000-0000-4000-8000-000000000002"),
+            1,
+            "create",
+            bounds,
+            position,
+            Pattern.SOLID,
+            "minecraft:stone",
+            0,
+            "NONE");
+    return new BuildPreviewArtifactFactory()
+        .create(request, List.of(new Cell(position, "minecraft:air")))
+        .view();
   }
 
   private static JsonObject completionWithTextView(

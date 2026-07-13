@@ -23,7 +23,7 @@ public record ClientHandshakeAdvertisement(
     }
     requireFeatureVersion(overlay);
     requireFeatureVersion(itemIcons);
-    requireFeatureVersion(recipeView);
+    requireFeatureVersion(recipeView, 2);
     requireFeatureVersion(litematicaPreview);
     requireFeatureVersion(litematicaMaterialList);
     litematicaVersion = Objects.requireNonNull(litematicaVersion);
@@ -41,7 +41,11 @@ public record ClientHandshakeAdvertisement(
   }
 
   private static void requireFeatureVersion(int version) {
-    if (version < 0 || version > 1) {
+    requireFeatureVersion(version, 1);
+  }
+
+  private static void requireFeatureVersion(int version, int maximum) {
+    if (version < 0 || version > maximum) {
       throw new IllegalArgumentException("Unsupported client feature version");
     }
   }

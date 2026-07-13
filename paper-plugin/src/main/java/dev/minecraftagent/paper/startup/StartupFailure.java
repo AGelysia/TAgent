@@ -23,7 +23,9 @@ public final class StartupFailure extends Exception {
     CORE_TOOL_MISSING,
     CORE_TOOL_DUPLICATE,
     CORE_TOOL_UNSAFE,
-    CORE_TOOL_INITIALIZATION_FAILED
+    CORE_TOOL_INITIALIZATION_FAILED,
+    LANDMARK_CATALOG_INVALID,
+    LANDMARK_CATALOG_UNSAFE
   }
 
   public enum Stage {

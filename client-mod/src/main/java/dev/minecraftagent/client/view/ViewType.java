@@ -4,7 +4,8 @@ public enum ViewType {
   TEXT("text"),
   ITEM_STACK("item_stack"),
   ITEM_LIST("item_list"),
-  RECIPE("recipe");
+  RECIPE("recipe"),
+  BUILD_PREVIEW("build_preview");
 
   private final String wireName;
 

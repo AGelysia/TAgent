@@ -60,7 +60,23 @@ describe("runtime configuration", () => {
     expect(loaded.paths.rootDirectory).toBe(directory);
     expect(loaded.paths.sqlite).toBe(join(directory, "data/runtime.db"));
     expect(loaded.paths.logDirectory).toBe(join(directory, "logs"));
+    expect(loaded.paths.knowledgeRoots).toEqual([]);
     expect(loaded.warnings).toEqual([]);
+  });
+
+  it("resolves optional bounded knowledge roots without changing legacy configuration", async () => {
+    const directory = await fixtureDirectory();
+    const source = validRuntimeConfig().replace(
+      "limits:\n",
+      "knowledge:\n  roots:\n    - directory: ./knowledge/rules\n      kind: server_rules\n    - directory: ./knowledge/docs\n      kind: local_docs\nlimits:\n",
+    );
+    const configPath = await writeRuntimeConfig(directory, source, "knowledge.yml");
+
+    const loaded = await loadRuntimeConfig({ configPath, environment: runtimeEnvironment() });
+    expect(loaded.paths.knowledgeRoots).toEqual([
+      { directory: join(directory, "knowledge/rules"), kind: "server_rules" },
+      { directory: join(directory, "knowledge/docs"), kind: "local_docs" },
+    ]);
   });
 
   it("uses stable secret errors for missing environment values", async () => {

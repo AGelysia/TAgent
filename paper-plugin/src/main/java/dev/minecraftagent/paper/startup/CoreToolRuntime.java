@@ -17,7 +17,9 @@ public final class CoreToolRuntime {
           "server.info.read",
           "server.plugins.list",
           "server.recipe.lookup",
-          "server.recipe.uses");
+          "server.recipe.uses",
+          "landmark.search",
+          "build.preview.create");
 
   private static final Pattern TOOL_ID = Pattern.compile("[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+");
   private final Map<String, CoreToolDescriptor> descriptors;

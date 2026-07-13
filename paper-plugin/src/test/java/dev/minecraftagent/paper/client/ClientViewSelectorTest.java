@@ -6,6 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -70,6 +73,35 @@ class ClientViewSelectorTest {
     assertFalse(schemas.canPublish(connection, ClientViewType.BUILD_PREVIEW, "1.0"));
     assertFalse(schemas.canPublish(connection, ClientViewType.PROPOSAL, "1.0"));
     assertFalse(schemas.canPublish(connection, ClientViewType.SELECTION_LIST, "1.0"));
+  }
+
+  @Test
+  void recipeV2RequiresTheExplicitVersionTwoCapability() throws Exception {
+    var connections = new ClientConnectionRegistry();
+    connections.join(PLAYER);
+    var selector = new ClientViewSelector(connections, ClientViewSchemaRegistry.versionOne());
+    var content =
+        JsonParser.parseString(
+                Files.readString(
+                    Path.of(System.getProperty("minecraftAgent.protocolDir"))
+                        .resolve("fixtures/valid/recipe-view-v2.json")))
+            .getAsJsonObject();
+    var view =
+        new ClientStructuredView(
+            "1.0",
+            UUID.randomUUID(),
+            REQUEST,
+            ClientViewType.RECIPE,
+            1,
+            "Recipes",
+            FALLBACK,
+            true,
+            content);
+
+    connections.replace(PLAYER, ClientConnectionRegistryTest.handshake(1, 1, 0));
+    assertTrue(selector.select(PLAYER, FALLBACK, List.of(view)).usesFallbackOnly());
+    connections.replace(PLAYER, ClientConnectionRegistryTest.handshake(1, 2, 0));
+    assertEquals(List.of(view), selector.select(PLAYER, FALLBACK, List.of(view)).structuredViews());
   }
 
   @Test

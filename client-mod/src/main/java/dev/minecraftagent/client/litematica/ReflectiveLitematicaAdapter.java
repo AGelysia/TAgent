@@ -285,7 +285,7 @@ final class ReflectiveLitematicaAdapter implements LitematicaAdapter {
 
   private Path verifiedManagedFile(LitematicaPreviewRequest request) throws IOException {
     Path candidate = request.managedFile().toAbsolutePath().normalize();
-    if (!candidate.getFileName().toString().equals(request.previewId() + ".litematica")
+    if (!validManagedFileName(request, candidate.getFileName().toString())
         || !Files.isRegularFile(candidate, LinkOption.NOFOLLOW_LINKS)) {
       throw new IOException("managed schematic is not a regular .litematica file");
     }
@@ -302,6 +302,21 @@ final class ReflectiveLitematicaAdapter implements LitematicaAdapter {
       throw new IOException("managed schematic is outside its bounded root");
     }
     return real;
+  }
+
+  private static boolean validManagedFileName(LitematicaPreviewRequest request, String fileName) {
+    String[] components = fileName.split("\\.", -1);
+    if (components.length != 4
+        || !components[0].equals(request.previewId().toString())
+        || !components[1].equals(Integer.toString(request.revision()))
+        || !components[3].equals("litematica")) {
+      return false;
+    }
+    try {
+      return UUID.fromString(components[2]).toString().equals(components[2]);
+    } catch (IllegalArgumentException exception) {
+      return false;
+    }
   }
 
   private boolean validRequest(LitematicaPreviewRequest request) {

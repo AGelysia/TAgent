@@ -21,6 +21,8 @@ export const runtimeStartupErrorCodes = [
   "SQLITE_WRITE_FAILED",
   "SQLITE_INTEGRITY_FAILED",
   "SQLITE_BUSY",
+  "KNOWLEDGE_DIRECTORY_UNAVAILABLE",
+  "KNOWLEDGE_CONTENT_INVALID",
   "PROTOCOL_SCHEMA_UNAVAILABLE",
   "PROVIDER_UNSUPPORTED",
   "PROVIDER_TIMEOUT",
@@ -39,6 +41,7 @@ export type RuntimeStartupStage =
   | "logging"
   | "protocol"
   | "sqlite"
+  | "knowledge"
   | "provider"
   | "listen"
   | "startup";

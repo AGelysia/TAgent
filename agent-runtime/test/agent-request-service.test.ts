@@ -20,6 +20,7 @@ import { SchemaRegistry } from "../src/protocol/schema-registry.js";
 import { SqliteConversationRepository } from "../src/storage/conversation-repository.js";
 import { migrateRuntimeStorage } from "../src/storage/migrations.js";
 import { ToolRegistry } from "../src/tools/tool-registry.js";
+import type { ToolExecutionResult } from "../src/tools/tool-types.js";
 
 const PLAYER_ONE = "11111111-1111-4111-8111-111111111111";
 const PLAYER_TWO = "22222222-2222-4222-8222-222222222222";
@@ -110,6 +111,61 @@ async function flush(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
+}
+
+async function runRecipeRound(options: {
+  readonly providerName: "server_recipe_lookup" | "server_recipe_uses";
+  readonly itemId: string;
+  readonly execution: ToolExecutionResult;
+  readonly modelFallback: string;
+}): Promise<{
+  readonly responses: readonly AgentRuntimeResponse[];
+  readonly generated: readonly ModelGenerationRequest[];
+}> {
+  let generation = 0;
+  const generated: ModelGenerationRequest[] = [];
+  const adapter = provider(async (generationRequest) => {
+    generated.push(generationRequest);
+    generation += 1;
+    if (generation === 1) {
+      return {
+        type: "tool_call",
+        providerCallId: "provider-recipe-call",
+        providerName: options.providerName,
+        arguments: { itemId: options.itemId },
+        continuation: { provider: "openai", items: [] },
+      };
+    }
+    return { type: "final", fallbackText: options.modelFallback };
+  });
+  const service = agentService({ provider: adapter, config: config() });
+  const responses: AgentRuntimeResponse[] = [];
+  service.submit(
+    {
+      ...request(PERSISTENT_REQUEST_ONE),
+      module: "recipe",
+      message: `show recipes for ${options.itemId}`,
+    },
+    (response) => responses.push(response),
+  );
+
+  await vi.waitFor(() => expect(responses[0]?.type).toBe("tool.call"));
+  const call = responses[0];
+  if (call?.type !== "tool.call") {
+    throw new Error("missing recipe Tool call");
+  }
+  expect(
+    service.acceptToolResult(PERSISTENT_REQUEST_ONE, {
+      ...options.execution,
+      toolCallId: call.payload.toolCallId,
+      sessionId: call.payload.sessionId,
+      playerUuid: call.payload.playerUuid,
+      tool: call.payload.tool,
+      sequence: call.payload.sequence,
+    }),
+  ).toBe("accepted");
+  await vi.waitFor(() => expect(service.activeCount).toBe(0));
+  return { responses, generated };
 }
 
 describe("Agent request service", () => {
@@ -359,6 +415,13 @@ describe("Agent request service", () => {
     expect(first?.type).toBe("agent.complete");
     const sessionId = first?.type === "agent.complete" ? first.payload.sessionId : null;
     expect(sessionId).toBe("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    expect(first).toMatchObject({
+      type: "agent.complete",
+      payload: {
+        fallbackText:
+          "No verified server recipe was checked. Ask again with an exact Minecraft item ID.",
+      },
+    });
 
     const secondResponses: AgentTerminalResponse[] = [];
     service.submit(
@@ -371,7 +434,11 @@ describe("Agent request service", () => {
     expect(generated[1]?.instructions).not.toContain("recipe");
     expect(generated[1]?.input).toEqual([
       { role: "user", content: `private prompt ${PERSISTENT_REQUEST_ONE}` },
-      { role: "assistant", content: "answer-1" },
+      {
+        role: "assistant",
+        content:
+          "No verified server recipe was checked. Ask again with an exact Minecraft item ID.",
+      },
       { role: "user", content: `private prompt ${PERSISTENT_REQUEST_TWO}` },
     ]);
     expect(
@@ -557,6 +624,164 @@ describe("Agent request service", () => {
     expect(generated[2]?.toolOutput?.providerCallId).toBe("provider-call-2");
   });
 
+  it("publishes unmerged recipe variants from the trusted Tool snapshot and ignores model spoofing", async () => {
+    const recipes = [shapedRecipe(), smeltingRecipe()];
+    const { responses, generated } = await runRecipeRound({
+      providerName: "server_recipe_lookup",
+      itemId: "minecraft:torch",
+      execution: {
+        status: "succeeded",
+        source: "server_registry",
+        trust: "authoritative",
+        result: recipeToolResult("lookup", "minecraft:torch", recipes),
+        error: null,
+      },
+      modelFallback: '{"schemaVersion":"2.0","recipes":[{"recipeId":"spoof:invented_grid"}]}',
+    });
+
+    const completion = responses.at(-1);
+    if (completion?.type !== "agent.complete") {
+      throw new Error("missing recipe completion");
+    }
+    const view = completion.payload.structuredViews[0];
+    if (view?.viewType !== "recipe") {
+      throw new Error("missing recipe view");
+    }
+    expect(view).toMatchObject({
+      viewSchemaVersion: "1.0",
+      requestId: PERSISTENT_REQUEST_ONE,
+      pinnable: true,
+      content: {
+        schemaVersion: "2.0",
+        query: { mode: "lookup", itemId: "minecraft:torch" },
+        selectedRecipe: 0,
+        totalMatches: 2,
+        truncated: false,
+      },
+    });
+    expect(view.content.recipes).toEqual(recipes);
+    expect(view.content.recipes[1]?.["source"]).toEqual({
+      kind: "plugin_provider",
+      providerId: "test:recipe_provider",
+    });
+    expect(completion.payload.fallbackText).toContain(
+      "authoritative server registry found 2 recipes",
+    );
+    expect(completion.payload.fallbackText).not.toContain("spoof");
+    expect(view.fallbackText).toBe(completion.payload.fallbackText);
+    expect(generated[1]?.toolOutput?.output).toContain('"source":"server_registry"');
+  });
+
+  it("constructs an authoritative uses view without relying on client capability input", async () => {
+    const recipes = [stonecuttingRecipe()];
+    const { responses } = await runRecipeRound({
+      providerName: "server_recipe_uses",
+      itemId: "minecraft:stone",
+      execution: {
+        status: "succeeded",
+        source: "server_registry",
+        trust: "authoritative",
+        result: recipeToolResult("uses", "minecraft:stone", recipes),
+        error: null,
+      },
+      modelFallback: "I think stone makes a fake item.",
+    });
+
+    const completion = responses.at(-1);
+    if (completion?.type !== "agent.complete") {
+      throw new Error("missing recipe completion");
+    }
+    const view = completion.payload.structuredViews[0];
+    expect(view?.viewType).toBe("recipe");
+    if (view?.viewType !== "recipe") {
+      throw new Error("missing recipe view");
+    }
+    expect(view.content.query).toEqual({ mode: "uses", itemId: "minecraft:stone" });
+    expect(view.content.recipes).toEqual(recipes);
+    expect(completion.payload.fallbackText).toContain("recipe that uses minecraft:stone");
+    expect(completion.payload.fallbackText).not.toContain("fake item");
+  });
+
+  it("uses the trusted empty recipe result as a concise text-only answer", async () => {
+    const { responses } = await runRecipeRound({
+      providerName: "server_recipe_lookup",
+      itemId: "minecraft:barrier",
+      execution: {
+        status: "succeeded",
+        source: "server_registry",
+        trust: "authoritative",
+        result: recipeToolResult("lookup", "minecraft:barrier", []),
+        error: null,
+      },
+      modelFallback: "The authoritative recipe is one dirt in a grid.",
+    });
+
+    const completion = responses.at(-1);
+    expect(completion).toMatchObject({
+      type: "agent.complete",
+      payload: {
+        fallbackText:
+          "Text-only recipe summary: the authoritative server registry found no recipes that produce minecraft:barrier.",
+        structuredViews: [{ viewType: "text" }],
+      },
+    });
+  });
+
+  it("does not turn a failed recipe lookup or model completion into an authoritative answer", async () => {
+    const { responses } = await runRecipeRound({
+      providerName: "server_recipe_lookup",
+      itemId: "minecraft:diamond_sword",
+      execution: {
+        status: "failed",
+        source: "server_registry",
+        trust: "authoritative",
+        result: null,
+        error: {
+          code: "REGISTRY_UNAVAILABLE",
+          message: "Recipe registry unavailable",
+          retryable: true,
+        },
+      },
+      modelFallback: "Authoritative result: one diamond makes a sword.",
+    });
+
+    const completion = responses.at(-1);
+    expect(completion).toMatchObject({
+      type: "agent.complete",
+      payload: {
+        fallbackText:
+          "The server recipe registry could not provide a verified result. Try again later.",
+        structuredViews: [{ viewType: "text" }],
+      },
+    });
+    if (completion?.type === "agent.complete") {
+      expect(completion.payload.fallbackText).not.toContain("one diamond");
+    }
+  });
+
+  it("drops model-only recipe facts when no authoritative Tool result was checked", async () => {
+    const adapter = provider(async () => ({
+      fallbackText: "Authoritative server recipe: one stick makes a diamond.",
+    }));
+    const service = agentService({ provider: adapter, config: config() });
+    const responses: AgentTerminalResponse[] = [];
+    service.submit({ ...request(PERSISTENT_REQUEST_ONE), module: "recipe" }, (response) =>
+      responses.push(response),
+    );
+    await vi.waitFor(() => expect(service.activeCount).toBe(0));
+
+    expect(responses).toMatchObject([
+      {
+        type: "agent.complete",
+        payload: {
+          fallbackText:
+            "No verified server recipe was checked. Ask again with an exact Minecraft item ID.",
+          structuredViews: [{ viewType: "text" }],
+        },
+      },
+    ]);
+  });
+
   it("stops at the configured Tool round limit without sending another call to Paper", async () => {
     let generation = 0;
     const adapter = provider(async (generationRequest) => {
@@ -697,5 +922,77 @@ function serverInfoResult(): Readonly<Record<string, unknown>> {
     maxPlayers: 20,
     viewDistance: 10,
     simulationDistance: 10,
+  };
+}
+
+function itemStack(itemId: string, count = 1): Readonly<Record<string, unknown>> {
+  return { itemId, count, components: {} };
+}
+
+function materialChoice(itemId: string): Readonly<Record<string, unknown>> {
+  return {
+    choiceType: "material",
+    alternatives: [itemStack(itemId)],
+  };
+}
+
+function shapedRecipe(): Readonly<Record<string, unknown>> {
+  return {
+    recipeId: "minecraft:torch",
+    recipeType: "shaped",
+    source: { kind: "server_registry", providerId: null },
+    result: itemStack("minecraft:torch", 4),
+    layout: {
+      kind: "grid",
+      width: 1,
+      height: 2,
+      ingredients: [
+        { slot: 0, x: 0, y: 0, ingredient: materialChoice("minecraft:coal") },
+        { slot: 1, x: 0, y: 1, ingredient: materialChoice("minecraft:stick") },
+      ],
+    },
+    remainingItems: [],
+  };
+}
+
+function smeltingRecipe(): Readonly<Record<string, unknown>> {
+  return {
+    recipeId: "test:smelt_torch",
+    recipeType: "smelting",
+    source: { kind: "plugin_provider", providerId: "test:recipe_provider" },
+    result: itemStack("minecraft:torch", 2),
+    layout: {
+      kind: "single_input",
+      ingredient: materialChoice("minecraft:charcoal"),
+    },
+    remainingItems: [],
+    processing: { timeTicks: 100, experience: 0.1 },
+  };
+}
+
+function stonecuttingRecipe(): Readonly<Record<string, unknown>> {
+  return {
+    recipeId: "minecraft:stone_bricks",
+    recipeType: "stonecutting",
+    source: { kind: "server_registry", providerId: null },
+    result: itemStack("minecraft:stone_bricks"),
+    layout: {
+      kind: "single_input",
+      ingredient: materialChoice("minecraft:stone"),
+    },
+    remainingItems: [],
+  };
+}
+
+function recipeToolResult(
+  mode: "lookup" | "uses",
+  itemId: string,
+  recipes: readonly Readonly<Record<string, unknown>>[],
+): Readonly<Record<string, unknown>> {
+  return {
+    query: { mode, itemId },
+    recipes,
+    totalMatches: recipes.length,
+    truncated: false,
   };
 }

@@ -23,6 +23,10 @@ generations, exact structured-view selection, bounded off-render-thread
 reassembly, local overlay and registry item rendering, and a fail-closed
 exact-version Litematica adapter. None of those presentation facts enter Paper
 authorization.
+Phase 11 adds bounded private Markdown retrieval, owner-scoped project revision
+storage, Paper-owned permission-filtered landmarks and build snapshots,
+authoritative recipe v2 presentation, and native local schematic generation.
+These remain read/presentation paths; the production write catalog stays empty.
 
 The governing rule is:
 
@@ -36,6 +40,7 @@ The following inputs are untrusted:
 
 - Player text and any player-selected coordinates.
 - Books, signs, chat, server documents, and retrieved document content.
+- Stored project text and landmark labels/tags.
 - Model output and every Runtime-originated tool call.
 - Fabric client packets, capability claims, acknowledgements, and selections.
 - Litematica state, preview acknowledgements, and material counts.
@@ -65,6 +70,8 @@ preview, or player click cannot replace Paper-side validation.
 10. Offline gating applies at both command dispatch and tool execution.
 11. Capability registry membership is metadata, not invocation authority; a
     reviewed adapter and the complete proposal chain remain mandatory.
+12. Runtime cannot publish a trusted build preview. Paper accepts only its own
+    request/player-bound artifact, and preview publication is operator opt-in.
 
 The effective permission is the intersection of local policy, current player
 permission, module allowlist, tool policy, live request context, and proposal
@@ -242,13 +249,15 @@ The first production write adapter must split audit persistence onto the worker
 and return to the primary thread for the last live checks and mutation; it must
 not block the Paper thread on `force(true)`.
 
-## Core read-tool boundary
+## Read and preview tool boundary
 
-`CoreToolRuntime` validates exactly six required descriptors:
+`CoreToolRuntime` validates eight Paper descriptors:
 `player.context.read`, `player.held_item.read`, `server.info.read`,
-`server.plugins.list`, `server.recipe.lookup`, and `server.recipe.uses`. Every
-descriptor must use read access, declare a closed schema, and set
-`executionCapable=true` in the current Phase 7 registry.
+`server.plugins.list`, `server.recipe.lookup`, `server.recipe.uses`,
+`landmark.search`, and `build.preview.create`. Every descriptor uses read access,
+declares a closed schema, and is executable only after the complete startup
+gate. Runtime separately owns five local descriptors: `server.docs.search` and
+the four `project.*` operations.
 
 These records do not create a generic invocation API. Runtime publishes only
 the current module intersection and validates the full shared argument schema.
@@ -263,6 +272,27 @@ transport thread wait. Recipe scans use bounded per-tick slices and preserve
 typed recipe, layout, `IngredientChoice`, `ItemStack`, processing, and remaining
 item data. Byte and structural-token budgets replace oversized successful
 results with a typed failure.
+
+Landmark permissions are checked against the live player before matching,
+counts, sorting, and truncation. A denied entry is indistinguishable from an
+absent entry in the result. Build preview reads use a two-pass, sliced live-world
+snapshot and reject changed regions, unloaded chunks, out-of-policy bounds,
+noncanonical BlockStates, target states that create block entities, and target
+cells that already contain block entities. They create a deterministic artifact
+but have no Bukkit mutation port.
+
+Paper removes every Runtime build view. When a request/player-bound Paper
+artifact exists, it is the exclusive candidate and is rebound to the final
+completion fallback before selection; a Runtime Text view cannot preempt it.
+Every later build attempt invalidates an earlier artifact before validation, so
+a failed retry cannot publish stale preview content.
+
+Runtime-local execution still applies the active request, module, descriptor,
+closed argument/result schema, sequence, cancellation, and provenance checks.
+Documentation provenance is deliberately `server_docs`/`untrusted`; project
+rows are `runtime_storage`/`verified`, which verifies ownership and storage shape
+but not the truth or safety of their text. Neither local result can establish a
+Paper permission or Minecraft fact.
 
 ## Capability safety
 
@@ -456,7 +486,7 @@ linkage, and the optional reflected adapter is enabled only for the exact
 Minecraft 1.21.11, Fabric Loader 0.19.3, Litematica 0.26.12, and MaLiLib 0.27.16
 tuple whose signatures were reviewed. Missing, different, or broken
 dependencies disable only that adapter. Its controller accepts no server path:
-it derives a managed `<view-uuid>.litematica`, rejects an escape, link,
+it derives a managed `<view-uuid>.<revision>.<artifact-uuid>.litematica`, rejects an escape, link,
 non-regular or oversized file, and tracks only its own loaded placement. It
 reads and hashes at most 16 MiB on the protocol worker; the final metadata
 recheck and every reflected Litematica call run on the Minecraft client thread.
@@ -464,10 +494,26 @@ A later operation failure is reported locally and does not dynamically withdraw
 the already advertised feature version.
 
 The native Material List HUD, local world view, preview ACK, and any material
-count are never used for authorization or server-side size checks. Phase 10
-does not generate a native file from Palette v1 or enable an end-to-end build
-preview; those Phase 11 operations still require Paper-owned region, hash,
-change-set, permission, and proposal checks.
+count are never used for authorization or server-side size checks. Phase 11
+validates the full Palette transfer and generates a managed native Litematica v7
+file, but receipt does not auto-load it and a local load still has no authority.
+
+Paper produces the preview from a live player in the current dimension. Each
+axis is at most 32 blocks, volume is at most 4096 cells, the target must be
+within 128 blocks and inside build height/world border, and every target chunk
+must already be loaded. The two snapshot passes run in bounded primary-thread
+slices; canonicalization and compression run on a worker. Paper derives the
+complete non-air target palette and content plus domain-separated base-region
+and change-set hashes. Runtime-authored build views are removed, and the
+Paper-owned artifact is one-shot, request/player-bound, capped, and short-lived.
+Publication is absent unless the operator sets the exact opt-in environment
+value `MINECRAFT_AGENT_BUILD_PREVIEW_ENABLED=true`.
+
+These checks make preview data deterministic, not a write atomicity protocol.
+No production proposal can reference or apply the artifact. A future apply path
+must re-read live state, enforce the write policy and proposal lifecycle, define
+conflict/partial-failure/rollback behavior, and preserve durable audit before a
+single block can change.
 
 ## Data and privacy
 
@@ -495,9 +541,25 @@ player-command logging if questions are sensitive: the server may log the full
 `/agent say <message>` command before plugin code can selectively redact it.
 Client command history is likewise outside the plugin's control.
 
-Document retrieval is confined to configured roots, rejects traversal and
-symlink escapes, and marks document text as untrusted content in model context.
-Live unrestricted web access is not part of the design.
+Document retrieval is confined to configured relative private roots. Startup
+rejects traversal, root or descendant links, hard-linked files, foreign owners,
+group/world-writable directories/files, invalid UTF-8, unsafe Unicode, concurrent
+changes, and every file/byte/depth/AST/chunk limit violation. Search emits only
+bounded excerpts with stable citations, orders `server_rules` before
+`local_docs`, and marks both as untrusted content in model context. A rule
+document is not executable policy. Live unrestricted web access is not part of
+the design.
+
+Project schema v2 rows and events remain in Runtime's private SQLite database.
+All list/read/create/update predicates include authenticated server ID and actual
+player UUID; owner identity is absent from model arguments. Create/update use
+short `BEGIN IMMEDIATE` transactions, enforce at most 20 active projects per
+owner, normalize names, and require the exact expected revision for an update.
+Foreign, missing, and changed rows use non-disclosing outcomes. Stored project
+text is untrusted user data and never proves world state. Runtime admits project
+mutations only for direct imperative player intent; questions, hypotheticals,
+and negations fail closed. It permits at most one successful project mutation per request. A build preview must follow a
+successful same-request read of the exact owned project UUID and revision.
 
 ## Runtime startup controls
 
@@ -524,26 +586,30 @@ Responses request only for admitted player work.
 
 ## Current enforcement gap
 
-At the Phase 10 boundary, Paper-side startup, authenticated application channel,
+At the Phase 11 boundary, Paper-side startup, authenticated application channel,
 conditional registration, persistent Offline state, epoch gate, private
 conversation, request cancellation, Runtime-owned sessions, owner-filtered
-resume, one-shot modules, bounded context, Runtime provider limits, and six
-typed read-only tools exist. Paper also has a proposal repository, response
-command boundary, dynamic authorizer, Offline/quit invalidation, and private
-persistent audit sink. It now also has a bounded Capability Pack loader,
+resume, one-shot modules, bounded context, Runtime provider limits, eight Paper
+read/preview tools, and five Runtime-local tools exist. Paper also has a proposal
+repository, response command boundary, dynamic authorizer, Offline/quit
+invalidation, and private persistent audit sink. It now also has a bounded
+Capability Pack loader,
 deterministic version and approval checks, immutable registry generations,
 typed command rendering, and parse-only Brigadier preflight. The optional client
 channel now has actual player/generation binding, exact feature selection,
 bounded transfer framing, strict client reassembly/decoding, rich local overlay,
 registry item rendering, local preferences, and an optional exact-version
-Litematica lifecycle adapter.
+Litematica lifecycle adapter. Private Markdown search, project schema v2,
+landmark search, authoritative recipe v2, strict Palette validation, Paper-owned
+preview generation, and native local schematic generation are implemented.
 
 The production proposal catalog is still empty, the synchronous service has no
 production creation path, and no capability record has an executor. Proposal
 WebSocket handlers, write-operation producers, durable usage accounting,
-trusted third-party command adapters, Palette-to-native schematic generation,
-end-to-end build-preview publication, and world mutation remain absent. A
-graphical client with the real supported Litematica/MaLiLib tuple has not been
+trusted third-party command adapters, a world apply/rollback adapter, and world
+mutation remain absent. Build preview publication is disabled by default and is
+read-only when explicitly enabled. A graphical client with the real supported
+Litematica/MaLiLib tuple has not been
 run on this host. Protocol schemas, a client ACK, an effective capability record,
 or a locally loaded preview remain presentation/metadata facts, not evidence
 that execution is reachable.

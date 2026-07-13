@@ -48,7 +48,7 @@ class ClientConnectionRegistryTest {
   static ClientHandshake handshake(int overlay, int recipe, int preview) {
     var versions = new EnumMap<ClientFeature, Integer>(ClientFeature.class);
     versions.put(ClientFeature.OVERLAY, overlay);
-    versions.put(ClientFeature.ITEM_ICONS, recipe);
+    versions.put(ClientFeature.ITEM_ICONS, recipe > 0 ? 1 : 0);
     versions.put(ClientFeature.RECIPE_VIEW, recipe);
     versions.put(ClientFeature.LITEMATICA_PREVIEW, preview);
     versions.put(ClientFeature.LITEMATICA_MATERIAL_LIST, preview);

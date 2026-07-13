@@ -2,11 +2,11 @@
 
 ## Status and scope
 
-This document records the target architecture and decisions through Phase 10.
+This document records the target architecture and decisions through Phase 11.
 The repository contains build scaffolding, protocol contracts, the Runtime
 configuration/readiness boundary, Paper-side authenticated startup and Offline
 recovery, private conversations, Runtime-owned sessions, one-shot module
-routing, a bounded loop for six fixed read-only tools, and Paper-owned proposal
+routing, a bounded loop for closed Paper-remote and Runtime-local tools, and Paper-owned proposal
 authorization with private persistent security auditing. Phase 9 adds a
 fail-closed Capability Pack loader, typed renderer, parse-only Brigadier
 preflight boundary, and immutable generation registry. The production write
@@ -14,8 +14,11 @@ catalog remains empty: no Capability route creates a proposal, dispatches a
 command, or mutates Minecraft state. Phase 10 adds the optional Fabric payload
 channel, exact view negotiation, bounded structured-view transfer, local rich
 overlay, real registry item rendering, and an exact-version optional Litematica
-adapter. Palette-to-native schematic generation and end-to-end build previews
-remain Phase 11 work. The conditional command and Offline recovery paths have
+adapter. Phase 11 adds bounded private Markdown retrieval, player-owned project
+storage, permission-filtered landmarks, authoritative recipe v2 presentation,
+Paper-owned build snapshots, and Palette-to-native schematic generation. The
+preview path remains read-only and the production write catalog remains empty.
+The conditional command and Offline recovery paths have
 been validated on the pinned Paper `1.21.11-132` server artifact.
 
 The implementation has three deployable components:
@@ -75,6 +78,7 @@ Paper owns:
   execution.
 - Capability Pack validation and the effective capability generation.
 - Security audit records and immutable validated build artifacts.
+- The private landmark catalog, visibility filtering, and live-distance ordering.
 - Client capability negotiation, payload limits, and sanitization of views.
 
 Paper must reject a tool call unless it belongs to a live request originally
@@ -95,6 +99,8 @@ dev.minecraftagent.paper
   policy           risk and permission intersection
   proposal         frozen proposals, live reauthorization, and confirmation
   capability       pack loading and effective registry
+  landmark         private catalog loading and visibility-filtered search
+  preview          bounded world snapshots and deterministic preview artifacts
   minecraft        Paper API adapters for context, recipe, and build operations
   client           custom payload gateway and view sanitization
   storage          Paper-owned state, artifacts, and audit repositories
@@ -105,7 +111,8 @@ ports implemented by `minecraft`, `client`, or `storage`. This makes policy and
 proposal logic testable without a running server.
 
 Phase 3 introduced `CoreToolRuntime` as non-executable readiness metadata.
-Phase 7 retains the exact six read-only, closed-schema descriptors, marks them
+Phase 7 introduced six read-only, closed-schema descriptors. Phase 11 retains
+them and adds `landmark.search` plus read-only `build.preview.create`, marks all eight
 executable only after the complete startup gate, and routes calls through the
 separate `tool` domain and Bukkit adapter. It still cannot invoke a descriptor
 generically. Phase 9 adds a separate Capability loader and registry whose
@@ -129,7 +136,7 @@ intersection; and the transfer manager owns pending byte and timeout state.
 
 ### Agent Runtime
 
-The Runtime will own:
+The Runtime owns:
 
 - Provider adapters and the bounded model/tool loop.
 - Session and message persistence, resume behavior, and context reduction.
@@ -153,11 +160,10 @@ src
   modules          module manifests and routing
   tools            effective catalog proxy and Runtime pre-policy
   sessions         conversations and context management
-  storage          Runtime-owned repositories and migrations
+  storage          sessions, projects, revision events, and migrations
   usage            token, cost, quota, and budget accounting
-  rag              controlled document indexing and retrieval
+  knowledge        controlled Markdown indexing and retrieval
   views            trusted view-model builders
-  projects         project metadata and planner inputs
 ```
 
 Runtime policy is defense in depth. It does not replace Paper's final policy.
@@ -193,6 +199,18 @@ stays within 64 KiB. Otherwise the encoder removes the structured view and
 retains the fallback. Paper remains responsible for validating and selecting a
 retained view for the actual connected player.
 
+Phase 11 executes `server.docs.search` and the four `project.*` tools locally,
+without turning them into Paper calls. Knowledge loading is a startup gate over
+configured private roots and produces a bounded in-memory Markdown index with
+stable citations and `server_rules` priority. SQLite migration v2 adds projects
+and revision events scoped by `(server_id, player_uuid)`; mutations are short
+transactions and update uses optimistic revision matching. Recipe v2
+presentation is snapshotted only from a successful authoritative server-registry
+tool result, so the model cannot supply its recipe facts or fallback summary.
+Project mutations additionally require direct imperative mutation intent,
+reject questions, hypotheticals, and negations, and stop after one successful mutation in a request. A build preview call requires a successful
+same-request `project.read` for its exact owned project UUID and revision.
+
 ### Fabric client
 
 The optional client owns:
@@ -204,12 +222,14 @@ The optional client owns:
 - One bounded 256-entry protocol worker queue and at most 128 pending
   client-thread action reservations.
 - A closed decoder and renderers for version `1.0` Text, ItemStack, ItemList, and
-  RecipeGrid views.
+  RecipeGrid views plus the negotiated recipe v2 layouts.
 - Local overlay scroll, drag, resize, pin/unpin, close, clear, input, and atomic
   player preferences.
 - Registry-backed item icons, counts, vanilla tooltips, and explicit missing
   states for unknown IDs.
 - An exact-version Litematica adapter behind a small internal interface.
+- Strict Palette v1 validation, Registry BlockState resolution, and deterministic
+  connection-scoped native Litematica v7 generation.
 
 Implemented packages separate `network`, `transfer`, `view`, `ui`, and
 `litematica`. No base-client class eagerly links a Litematica class. The adapter
@@ -221,7 +241,7 @@ only Litematica unavailable.
 ## Storage authority
 
 Paper and Runtime must never write the same SQLite file. A shared SQLite file
-would blur the security boundary and introduces two-process migration and lock
+would blur the security boundary and introduce two-process migration and lock
 contention.
 
 The authority split is:
@@ -229,11 +249,12 @@ The authority split is:
 | Paper-owned store                         | Runtime-owned store                |
 | ----------------------------------------- | ---------------------------------- |
 | Desired enabled state                     | Sessions and messages              |
-| Proposals and execution status            | Requests and provider usage events |
-| Security audit events                     | Daily usage projections            |
-| Capability approvals and effective hashes | Project metadata and membership    |
-| Validated build artifact references       | Landmarks and their ACL metadata   |
-| Tool execution idempotency records        | Document index metadata            |
+| Proposals and execution status            | Project metadata and revision events |
+| Security audit events                     | Requests and provider usage events |
+| Capability approvals and effective hashes | Daily usage projections            |
+| Private landmark catalog and ACL metadata | Configured Markdown source roots   |
+| Validated one-shot build artifacts        | Bounded in-memory document index   |
+| Tool execution idempotency records        | Local request/correlation state    |
 
 Paper may send audit or usage events to Runtime for display, but such a copy is
 not authoritative. The two processes exchange IDs and hashes only through the
@@ -245,6 +266,9 @@ Phase 8 keeps active proposal state in a bounded in-memory repository and writes
 authoritative, redacted JSONL security events below Paper's private state
 directory. Restart therefore cannot revive a proposal, while the audit history
 survives it.
+Phase 11 migration v2 persists projects in Runtime's existing private SQLite
+file. Paper stores its landmark YAML and short-lived request/player-bound preview
+artifacts separately; the Fabric client stores only managed local schematics.
 
 ## State and health
 
@@ -638,12 +662,48 @@ feature version already advertised for that connection.
 
 The minimal controller supports `litematica.preview.load`,
 `litematica.preview.remove`, and `litematica.material_list.open`. It derives only
-a managed `<view-uuid>.litematica` file below its local root, bounds and hashes
+a managed `<view-uuid>.<revision>.<artifact-uuid>.litematica` file below its local root, bounds and hashes
 that regular file, tracks adapter-owned placements, and delegates material
 calculation and display to Litematica's native Material List HUD. Preparation
 reads and hashes at most 16 MiB on the protocol worker. The final file metadata
 recheck plus load, remove, and Material List reflection calls run on the
-Minecraft client thread and reject the wrong thread. Phase 10 does not yet
-generate that native file from `minecraft-agent.palette-v1` or publish an
-end-to-end build preview; those deterministic Phase 11 steps remain separate
-from the proven optional adapter lifecycle.
+Minecraft client thread and reject the wrong thread.
+
+## Phase 11 authoritative knowledge and preview
+
+[ADR 0009](adr/0009-phase11-authoritative-knowledge-and-preview.md) keeps each
+new data source in its owning trust domain. Runtime Markdown is private,
+bounded, citation-bearing, and untrusted. Runtime projects are isolated by
+authenticated server/player ownership and optimistic revisions. Paper's private
+landmark catalog filters permissions before counts and distance ordering.
+Recipe v2 and its text fallback are derived from one successful authoritative
+server-registry result rather than model prose.
+
+`build.preview.create` is a Paper-remote read tool available only to the build
+module. Paper validates the closed plan, current player/dimension, 32-block axis
+and 4096-cell limits, 128-block proximity, world height/border, loaded chunks,
+canonical BlockStates, target states that create block entities, and target
+cells that already contain block entities. It snapshots
+at most 128 cells or about 2 ms per primary-thread slice, performs a second pass
+to reject a changed region, and moves canonicalization/compression to its
+worker. Palette v1 describes the complete non-air target in deterministic
+`y,z,x` order; Paper derives RFC 8785 content and palette hashes plus domain-
+separated base-region and change-set hashes.
+
+Paper strips every Runtime-supplied `build_preview` and may append only the
+short-lived one-shot artifact bound to the same request and player. Its view
+registry omits build preview by default; the exact environment value
+`MINECRAFT_AGENT_BUILD_PREVIEW_ENABLED=true` opts in. Vanilla and incompatible
+clients retain private text fallback.
+
+An available Paper artifact is the exclusive view candidate and is rebound to
+the completion fallback before selection, preventing a Runtime Text view from
+winning capability order. A later build attempt discards any earlier artifact
+before validation.
+
+Fabric repeats the strict transfer, gzip, JSON, palette, geometry, count, hash,
+and local Registry checks. It generates a native Litematica v7 artifact in a
+connection-scoped managed store using atomic publication, but does not load it
+until an explicit client action. The placement and native Material List are
+presentation state only. The production proposal catalog remains empty, and no
+world apply or rollback operation is reachable.

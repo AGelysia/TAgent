@@ -3,6 +3,7 @@ package dev.minecraftagent.paper.tool;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import dev.minecraftagent.paper.request.AgentModule;
+import java.text.Normalizer;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -19,7 +20,9 @@ public final class ReadToolRegistry {
           "server.info.read",
           "server.plugins.list",
           "server.recipe.lookup",
-          "server.recipe.uses");
+          "server.recipe.uses",
+          "landmark.search",
+          "build.preview.create");
 
   private static final Pattern ITEM_ID = Pattern.compile("[a-z0-9_.-]+:[a-z0-9_./-]{1,240}");
   private final Map<String, Descriptor> descriptors;
@@ -72,6 +75,18 @@ public final class ReadToolRegistry {
         ArgumentKind.ITEM_ID,
         ReadToolResult.Source.SERVER_REGISTRY,
         Set.of(AgentModule.GENERAL, AgentModule.RECIPE, AgentModule.GUIDE));
+    register(
+        entries,
+        "landmark.search",
+        ArgumentKind.QUERY,
+        ReadToolResult.Source.PAPER_API,
+        Set.of(AgentModule.LOCATE, AgentModule.BUILD));
+    register(
+        entries,
+        "build.preview.create",
+        ArgumentKind.BUILD_PLAN,
+        ReadToolResult.Source.PAPER_API,
+        Set.of(AgentModule.BUILD));
     if (!entries.keySet().equals(REQUIRED_TOOL_IDS)) {
       throw new IllegalStateException("Core read tool registry is incomplete");
     }
@@ -120,15 +135,158 @@ public final class ReadToolRegistry {
     if (kind == ArgumentKind.NONE) {
       return arguments.isEmpty();
     }
-    if (!arguments.keySet().equals(Set.of("itemId"))) {
+    if (kind == ArgumentKind.BUILD_PLAN) {
+      return validBuildPlan(arguments);
+    }
+    var key = kind == ArgumentKind.ITEM_ID ? "itemId" : "query";
+    if (!arguments.keySet().equals(Set.of(key))) {
       return false;
     }
-    JsonElement value = arguments.get("itemId");
+    JsonElement value = arguments.get(key);
     if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) {
       return false;
     }
-    var itemId = value.getAsString();
-    return itemId.length() <= 256 && ITEM_ID.matcher(itemId).matches();
+    var text = value.getAsString();
+    if (kind == ArgumentKind.ITEM_ID) {
+      return text.length() <= 256 && ITEM_ID.matcher(text).matches();
+    }
+    return text.length() <= 128
+        && !text.isBlank()
+        && Normalizer.normalize(text, Normalizer.Form.NFKC).equals(text)
+        && text.codePoints().noneMatch(ReadToolRegistry::unsafeQueryCodePoint);
+  }
+
+  private static boolean validBuildPlan(JsonObject arguments) {
+    if (!arguments
+        .keySet()
+        .equals(
+            Set.of(
+                "projectId",
+                "revision",
+                "operation",
+                "dimension",
+                "bounds",
+                "origin",
+                "pattern",
+                "blockState",
+                "rotation",
+                "mirror"))) {
+      return false;
+    }
+    var projectId = stringValue(arguments.get("projectId"));
+    var dimension = stringValue(arguments.get("dimension"));
+    var operation = stringValue(arguments.get("operation"));
+    var pattern = stringValue(arguments.get("pattern"));
+    var mirror = stringValue(arguments.get("mirror"));
+    var revision = exactInteger(arguments.get("revision"));
+    var rotation = exactInteger(arguments.get("rotation"));
+    if (projectId == null
+        || !canonicalUuid(projectId)
+        || dimension == null
+        || !ITEM_ID.matcher(dimension).matches()
+        || !Set.of("create", "modify").contains(operation)
+        || !Set.of("solid", "hollow", "walls", "floor", "clear").contains(pattern)
+        || !Set.of("NONE", "LEFT_RIGHT", "FRONT_BACK").contains(mirror)
+        || revision == null
+        || revision < 1
+        || !Set.of(0, 90, 180, 270).contains(rotation)) {
+      return false;
+    }
+    var state = arguments.get("blockState");
+    if (state == null
+        || (!state.isJsonNull()
+            && (stringValue(state) == null || stringValue(state).length() > 512))
+        || ("clear".equals(pattern) != state.isJsonNull())) {
+      return false;
+    }
+    var bounds = objectValue(arguments.get("bounds"));
+    var origin = position(arguments.get("origin"));
+    if (bounds == null || !bounds.keySet().equals(Set.of("min", "max")) || origin == null) {
+      return false;
+    }
+    var minimum = position(bounds.get("min"));
+    var maximum = position(bounds.get("max"));
+    if (minimum == null
+        || maximum == null
+        || minimum[0] > maximum[0]
+        || minimum[1] > maximum[1]
+        || minimum[2] > maximum[2]) {
+      return false;
+    }
+    var x = (long) maximum[0] - minimum[0] + 1;
+    var y = (long) maximum[1] - minimum[1] + 1;
+    var z = (long) maximum[2] - minimum[2] + 1;
+    return x <= 32
+        && y <= 32
+        && z <= 32
+        && x * y * z <= 4096
+        && origin[0] >= minimum[0]
+        && origin[0] <= maximum[0]
+        && origin[1] >= minimum[1]
+        && origin[1] <= maximum[1]
+        && origin[2] >= minimum[2]
+        && origin[2] <= maximum[2];
+  }
+
+  private static int[] position(JsonElement value) {
+    var object = objectValue(value);
+    if (object == null || !object.keySet().equals(Set.of("x", "y", "z"))) {
+      return null;
+    }
+    var x = exactInteger(object.get("x"));
+    var y = exactInteger(object.get("y"));
+    var z = exactInteger(object.get("z"));
+    if (x == null
+        || y == null
+        || z == null
+        || x < -30_000_000
+        || x > 30_000_000
+        || y < -2048
+        || y > 2048
+        || z < -30_000_000
+        || z > 30_000_000) {
+      return null;
+    }
+    return new int[] {x, y, z};
+  }
+
+  private static JsonObject objectValue(JsonElement value) {
+    return value != null && value.isJsonObject() ? value.getAsJsonObject() : null;
+  }
+
+  private static String stringValue(JsonElement value) {
+    return value != null && value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()
+        ? value.getAsString()
+        : null;
+  }
+
+  private static Integer exactInteger(JsonElement value) {
+    if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) {
+      return null;
+    }
+    try {
+      return value.getAsBigDecimal().intValueExact();
+    } catch (ArithmeticException | NumberFormatException error) {
+      return null;
+    }
+  }
+
+  private static boolean canonicalUuid(String value) {
+    try {
+      return java.util.UUID.fromString(value).toString().equals(value);
+    } catch (IllegalArgumentException error) {
+      return false;
+    }
+  }
+
+  private static boolean unsafeQueryCodePoint(int codePoint) {
+    return codePoint <= 0x1f
+        || (codePoint >= 0x7f && codePoint <= 0x9f)
+        || codePoint == 0x061c
+        || codePoint == 0x200e
+        || codePoint == 0x200f
+        || (codePoint >= 0x202a && codePoint <= 0x202e)
+        || (codePoint >= 0x2066 && codePoint <= 0x2069);
   }
 
   private static void register(
@@ -145,7 +303,9 @@ public final class ReadToolRegistry {
 
   public enum ArgumentKind {
     NONE,
-    ITEM_ID
+    ITEM_ID,
+    QUERY,
+    BUILD_PLAN
   }
 
   public record Descriptor(

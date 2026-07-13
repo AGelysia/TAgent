@@ -116,13 +116,20 @@ class ClientPayloadCodecTest {
   void emitsOnlyClosedPresentationFactsFromTheClient() {
     var advertisement =
         new ClientHandshakeAdvertisement(
-            "0.1.0", 1, 1, 1, 0, 0, Optional.empty(), Optional.empty());
+            "0.1.0", 1, 1, 2, 0, 0, Optional.empty(), Optional.empty());
     var hello =
         JsonParser.parseString(text(codec.encodeHello(MESSAGE_ID, advertisement)))
             .getAsJsonObject();
     assertEquals("client.hello", hello.get("type").getAsString());
     assertEquals(
         "1.0", hello.getAsJsonObject("payload").get("clientProtocolVersion").getAsString());
+    assertEquals(
+        2,
+        hello
+            .getAsJsonObject("payload")
+            .getAsJsonObject("capabilities")
+            .get("recipeView")
+            .getAsInt());
     assertTrue(
         hello
             .getAsJsonObject("payload")
@@ -144,6 +151,12 @@ class ClientPayloadCodecTest {
             .getAsJsonObject();
     assertTrue(error.getAsJsonObject("payload").get("transferId").isJsonNull());
     assertEquals(3, error.getAsJsonObject("payload").size());
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new ClientHandshakeAdvertisement(
+                "0.1.0", 1, 1, 3, 0, 0, Optional.empty(), Optional.empty()));
   }
 
   @Test

@@ -919,6 +919,67 @@
       }
     },
     {
+      "id": "recipe-view-v2.valid",
+      "category": "valid",
+      "file": "valid/recipe-view-v2.json",
+      "validations": [
+        {
+          "schema": "recipe-view-v2.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "recipe-view-v2",
+        "expectedValid": true
+      }
+    },
+    {
+      "id": "structured-recipe-v2.valid",
+      "category": "valid",
+      "file": "valid/structured-recipe-v2.json",
+      "validations": [
+        {
+          "schema": "structured-view.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "client-handshake.recipe-v2-valid",
+      "category": "valid",
+      "file": "valid/client-handshake-recipe-v2.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "view-negotiation.recipe-v2-valid",
+      "category": "valid",
+      "file": "valid/view-negotiation-recipe-v2.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "/client",
+          "expectedValid": true
+        },
+        {
+          "schema": "structured-view.schema.json",
+          "documentPointer": "/view",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "view-negotiation-v1",
+        "expectedValid": true
+      }
+    },
+    {
       "id": "build-preview.valid",
       "category": "valid",
       "file": "valid/build-preview.json",
@@ -1191,6 +1252,147 @@
         "validator": "recipe-view-v1",
         "expectedValid": false,
         "errorCode": "RECIPE_SLOT_COORDINATE_MISMATCH"
+      }
+    },
+    {
+      "id": "recipe-view-v2.source-provider-invalid",
+      "category": "semantic_error",
+      "file": "invalid/recipe-v2-source-provider-invalid.json",
+      "validations": [
+        {
+          "schema": "recipe-view-v2.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "recipe-view-v2",
+        "expectedValid": false,
+        "errorCode": "RECIPE_SOURCE_INVALID"
+      }
+    },
+    {
+      "id": "recipe-view-v2.plugin-provider-missing",
+      "category": "semantic_error",
+      "file": "invalid/recipe-v2-plugin-provider-missing.json",
+      "validations": [
+        {
+          "schema": "recipe-view-v2.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "recipe-view-v2",
+        "expectedValid": false,
+        "errorCode": "RECIPE_SOURCE_INVALID"
+      }
+    },
+    {
+      "id": "recipe-view-v2.processing-invalid",
+      "category": "semantic_error",
+      "file": "invalid/recipe-v2-processing-invalid.json",
+      "validations": [
+        {
+          "schema": "recipe-view-v2.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ],
+      "semanticValidation": {
+        "validator": "recipe-view-v2",
+        "expectedValid": false,
+        "errorCode": "RECIPE_PROCESSING_INVALID"
+      }
+    },
+    {
+      "id": "recipe-view-v2.remaining-slot-invalid",
+      "category": "semantic_error",
+      "file": "invalid/recipe-v2-remaining-slot-invalid.json",
+      "validations": [
+        {
+          "schema": "recipe-view-v2.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "recipe-view-v2",
+        "expectedValid": false,
+        "errorCode": "RECIPE_REMAINING_ITEM_INVALID"
+      }
+    },
+    {
+      "id": "recipe-view-v2.component-damage-invalid",
+      "category": "semantic_error",
+      "file": "invalid/recipe-v2-component-damage-invalid.json",
+      "validations": [
+        {
+          "schema": "recipe-view-v2.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "recipe-view-v2",
+        "expectedValid": false,
+        "errorCode": "RECIPE_COMPONENT_INVALID"
+      }
+    },
+    {
+      "id": "recipe-view-v2.component-text-invalid",
+      "category": "semantic_error",
+      "file": "invalid/recipe-v2-component-text-invalid.json",
+      "validations": [
+        {
+          "schema": "recipe-view-v2.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "recipe-view-v2",
+        "expectedValid": false,
+        "errorCode": "RECIPE_COMPONENT_INVALID"
+      }
+    },
+    {
+      "id": "recipe-view-v2.summary-invalid",
+      "category": "semantic_error",
+      "file": "invalid/recipe-v2-summary-invalid.json",
+      "validations": [
+        {
+          "schema": "recipe-view-v2.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "recipe-view-v2",
+        "expectedValid": false,
+        "errorCode": "RECIPE_RESULT_SUMMARY_INVALID"
+      }
+    },
+    {
+      "id": "view-negotiation.recipe-v2-capability-invalid",
+      "category": "semantic_error",
+      "file": "invalid/view-negotiation-recipe-v2-capability-invalid.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "/client",
+          "expectedValid": true
+        },
+        {
+          "schema": "structured-view.schema.json",
+          "documentPointer": "/view",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "view-negotiation-v1",
+        "expectedValid": false,
+        "errorCode": "VIEW_CAPABILITY_UNDECLARED"
       }
     },
     {
@@ -1467,6 +1669,251 @@
           "expectedValid": false
         }
       ]
+    },
+    {
+      "id": "runtime-local-tools.valid",
+      "category": "valid",
+      "file": "valid/runtime-local-tool-contracts.json",
+      "validations": [
+        {
+          "schema": "tools/server-docs-search-arguments.schema.json",
+          "documentPointer": "/docsSearch/arguments",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/server-docs-search-result.schema.json",
+          "documentPointer": "/docsSearch/result",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/project-list-arguments.schema.json",
+          "documentPointer": "/projectList/arguments",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/project-list-result.schema.json",
+          "documentPointer": "/projectList/result",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/project-read-arguments.schema.json",
+          "documentPointer": "/projectRead/arguments",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/project-read-result.schema.json",
+          "documentPointer": "/projectRead/result",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/project-create-arguments.schema.json",
+          "documentPointer": "/projectCreate/arguments",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/project-create-result.schema.json",
+          "documentPointer": "/projectCreate/result",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/project-update-arguments.schema.json",
+          "documentPointer": "/projectUpdate/arguments",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/project-update-result.schema.json",
+          "documentPointer": "/projectUpdate/result",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "server-docs-search.control-character",
+      "category": "invalid_control_character",
+      "file": "invalid/server-docs-search-control-character.json",
+      "validations": [
+        {
+          "schema": "tools/server-docs-search-arguments.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "project-create.owner-injection",
+      "category": "privilege_escalation",
+      "file": "invalid/project-create-owner-injection.json",
+      "validations": [
+        {
+          "schema": "tools/project-create-arguments.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "project-update.revision-zero",
+      "category": "invalid_range",
+      "file": "invalid/project-update-revision-zero.json",
+      "validations": [
+        {
+          "schema": "tools/project-update-arguments.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "landmark-search.valid",
+      "category": "valid",
+      "file": "valid/landmark-search.json",
+      "validations": [
+        {
+          "schema": "tools/landmark-search-arguments.schema.json",
+          "documentPointer": "/arguments",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/landmark-search-result.schema.json",
+          "documentPointer": "/result",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "build-preview-create-tool.valid",
+      "category": "valid",
+      "file": "valid/build-preview-create-tool.json",
+      "validations": [
+        {
+          "schema": "tools/build-preview-create-arguments.schema.json",
+          "documentPointer": "/arguments",
+          "expectedValid": true
+        },
+        {
+          "schema": "tools/build-preview-create-result.schema.json",
+          "documentPointer": "/result",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "build-preview.empty-target-valid",
+      "category": "valid",
+      "file": "valid/build-preview-empty-target.json",
+      "validations": [
+        {
+          "schema": "build-preview.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "build-preview-transfer-v1",
+        "expectedValid": true
+      }
+    },
+    {
+      "id": "build-preview.palette-hash",
+      "category": "semantic_error",
+      "file": "invalid/build-preview-palette-hash.json",
+      "validations": [
+        {
+          "schema": "build-preview.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "build-preview-transfer-v1",
+        "expectedValid": false,
+        "errorCode": "PALETTE_HASH_MISMATCH"
+      }
+    },
+    {
+      "id": "build-preview.content-noncanonical",
+      "category": "semantic_error",
+      "file": "invalid/build-preview-content-noncanonical.json",
+      "validations": [
+        {
+          "schema": "build-preview.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "build-preview-transfer-v1",
+        "expectedValid": false,
+        "errorCode": "CONTENT_CANONICAL_MISMATCH"
+      }
+    },
+    {
+      "id": "build-preview.content-duplicate-key",
+      "category": "semantic_error",
+      "file": "invalid/build-preview-content-duplicate-key.json",
+      "validations": [
+        {
+          "schema": "build-preview.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "build-preview-transfer-v1",
+        "expectedValid": false,
+        "errorCode": "CONTENT_JSON_INVALID"
+      }
+    },
+    {
+      "id": "build-preview.concatenated-gzip",
+      "category": "semantic_error",
+      "file": "invalid/build-preview-concatenated-gzip.json",
+      "validations": [
+        {
+          "schema": "build-preview.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "build-preview-transfer-v1",
+        "expectedValid": false,
+        "errorCode": "CONTENT_DECOMPRESSION_FAILED"
+      }
+    },
+    {
+      "id": "build-preview.origin-outside",
+      "category": "semantic_error",
+      "file": "invalid/build-preview-origin-outside.json",
+      "validations": [
+        {
+          "schema": "build-preview.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "build-preview-transfer-v1",
+        "expectedValid": false,
+        "errorCode": "BLOCK_GEOMETRY_INVALID"
+      }
+    },
+    {
+      "id": "build-preview.axis-over-limit",
+      "category": "semantic_error",
+      "file": "invalid/build-preview-axis-over-limit.json",
+      "validations": [
+        {
+          "schema": "build-preview.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "build-preview-transfer-v1",
+        "expectedValid": false,
+        "errorCode": "BLOCK_GEOMETRY_INVALID"
+      }
     }
   ]
 }

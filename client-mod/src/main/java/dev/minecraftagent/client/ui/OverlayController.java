@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /** Client-owned overlay state. Server view updates cannot pin, move, resize, or clear it. */
@@ -92,6 +93,11 @@ public final class OverlayController {
     }
     return Optional.of(
         new OverlaySnapshot(entry.view, entry.pinned, entry.scroll, entry.maximumScroll));
+  }
+
+  /** Returns the connection-scoped view identities that are still displayed in the HUD. */
+  public synchronized Set<UUID> openViewIds() {
+    return Set.copyOf(entries.keySet());
   }
 
   public synchronized boolean pin() {

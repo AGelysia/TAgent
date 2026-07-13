@@ -16,7 +16,7 @@ public final class ClientCapabilities {
     var copy = new EnumMap<ClientFeature, Integer>(ClientFeature.class);
     for (var feature : ClientFeature.values()) {
       var version = versions.get(feature);
-      if (version == null || version < 0 || version > 1) {
+      if (version == null || version < 0 || version > feature.maximumVersion()) {
         throw new ClientProtocolException("CLIENT_CAPABILITY_VERSION_INVALID");
       }
       copy.put(feature, version);
@@ -29,7 +29,7 @@ public final class ClientCapabilities {
   }
 
   public boolean supports(ClientFeature feature, int version) {
-    return version > 0 && version(feature) == version;
+    return version > 0 && version(feature) >= version;
   }
 
   public Map<ClientFeature, Integer> versions() {

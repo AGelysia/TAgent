@@ -51,7 +51,7 @@
           "properties": {
             "overlay": { "type": "integer", "minimum": 0, "maximum": 1 },
             "itemIcons": { "type": "integer", "minimum": 0, "maximum": 1 },
-            "recipeView": { "type": "integer", "minimum": 0, "maximum": 1 },
+            "recipeView": { "type": "integer", "minimum": 0, "maximum": 2 },
             "litematicaPreview": {
               "type": "integer",
               "minimum": 0,

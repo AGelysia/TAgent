@@ -61,9 +61,9 @@ reject client-to-Paper frames above 16 KiB and Paper-to-client frames above
 
 The Phase 10 direction registry is:
 
-| Direction       | Client payload `type`                                                     |
-| --------------- | ------------------------------------------------------------------------- |
-| Client to Paper | `client.hello`, `client.ack`, `client.error`                              |
+| Direction       | Client payload `type`                                                  |
+| --------------- | ---------------------------------------------------------------------- |
+| Client to Paper | `client.hello`, `client.ack`, `client.error`                           |
 | Paper to client | `server.hello`, `view.begin`, `view.chunk`, `view.clear`, `ui.control` |
 
 `client.hello` selects `client-handshake.schema.json`. The other payload shapes
@@ -71,7 +71,8 @@ are closed definitions in `client-payload.schema.json`. A structured view is the
 verified, reassembled content described by a `view.begin` and its
 `view.chunk` messages; the view body then validates against
 `structured-view.schema.json`. A Litematica build preview additionally uses
-`build-preview.schema.json`, but Phase 10 does not yet publish that view type.
+`build-preview.schema.json`. Phase 11 publishes that view type only from a
+Paper-owned artifact when the operator explicitly enables it.
 
 `structured-view.schema.json` has its own type-discriminated content. Recipe,
 build preview, proposal, and ItemStack references resolve to the corresponding
@@ -79,12 +80,14 @@ local schemas. The client only accepts a view type and version it advertised.
 
 Phase 1 makes that last rule executable as `view-negotiation-v1`. Text,
 selection, and proposal views require `overlay: 1`; item views also require
-`itemIcons: 1`; recipe views additionally require `recipeView: 1`; and build
-previews require `litematicaPreview: 1`. The shared fixtures prove that a view
-is rejected when one required version was not declared. Phase 10 calls this
-rule before actual Custom Payload publication. Its client renderer accepts only
-version `1.0` Text, ItemStack, ItemList, and RecipeGrid views; other shared view
-variants remain contracts for later business phases.
+`itemIcons: 1`; legacy recipe content requires `recipeView: 1`, while
+`recipe-view-v2` requires `recipeView: 2`; and build previews require
+`litematicaPreview: 1`. The outer structured-view version remains `1.0` for both
+recipe content versions. The shared fixtures prove that a v2 recipe is rejected
+when the client declared only v1. Paper calls this rule before actual Custom
+Payload publication. The Phase 11 client accepts the legacy version `1.0` Text,
+ItemStack, ItemList, and RecipeGrid views and recipe v2's expanded layouts only
+after negotiating `recipeView: 2`.
 
 ### Client transfer semantics
 
@@ -101,13 +104,13 @@ length, chunk SHA-256, and canonical standard-base64 data.
 
 The common production view limits are:
 
-| Limit                              | Value      |
-| ---------------------------------- | ---------- |
-| Decoded chunk                      | 24 KiB     |
-| Compressed view                    | 1 MiB      |
-| Uncompressed view                  | 1 MiB      |
-| Chunks per view                    | 64         |
-| Incomplete transfer lifetime       | 15 seconds |
+| Limit                        | Value      |
+| ---------------------------- | ---------- |
+| Decoded chunk                | 24 KiB     |
+| Compressed view              | 1 MiB      |
+| Uncompressed view            | 1 MiB      |
+| Chunks per view              | 64         |
+| Incomplete transfer lifetime | 15 seconds |
 
 Paper admits at most eight pending transfers and charges their uncompressed view
 bytes against a 2 MiB per-connection budget. It serializes, optionally
@@ -137,12 +140,16 @@ a proposal, or authorize a world change.
 `litematicaPreview: 1` and `litematicaMaterialList: 1` are advertised only by
 the exact Minecraft 1.21.11 / Fabric Loader 0.19.3 / Litematica 0.26.12 /
 MaLiLib 0.27.16 adapter. The closed controls carry only a local operation name
-and nullable view UUID. The client derives a managed `<view-uuid>.litematica`;
+and nullable view UUID. The client derives a managed
+`<view-uuid>.<revision>.<artifact-uuid>.litematica`;
 no server-provided path, file content, permission, or execution result is part
 of `ui.control`. Load preparation reads and hashes at most 16 MiB on the
 protocol worker. The final metadata recheck and every reflected load, remove,
 and Material List call run on the Minecraft client thread. A runtime operation
 failure does not dynamically withdraw the feature version advertised at hello.
+Phase 11 generates the managed native file from a completely validated Palette
+v1 view but never loads it automatically. A separate explicit client action is
+required before the adapter creates a placement or opens its Material List HUD.
 
 ## Envelope and authentication semantics
 
@@ -210,7 +217,7 @@ for a protocol maximum of eight rounds. Phase 7 permits one active Tool Call per
 request and round. A Runtime supporting parallel calls later must add an
 explicit ordering contract rather than overloading `sequence`.
 
-The Phase 7 core read tools use these closed schemas:
+The registered Phase 11 tools use these closed schemas:
 
 | Tool                    | Arguments schema                                    | Result schema                                    | Source / trust                      |
 | ----------------------- | --------------------------------------------------- | ------------------------------------------------ | ----------------------------------- |
@@ -220,6 +227,13 @@ The Phase 7 core read tools use these closed schemas:
 | `server.plugins.list`   | `tools/server-plugins-list-arguments.schema.json`   | `tools/server-plugins-list-result.schema.json`   | `paper_api` / `authoritative`       |
 | `server.recipe.lookup`  | `tools/server-recipe-lookup-arguments.schema.json`  | `tools/server-recipe-lookup-result.schema.json`  | `server_registry` / `authoritative` |
 | `server.recipe.uses`    | `tools/server-recipe-uses-arguments.schema.json`    | `tools/server-recipe-uses-result.schema.json`    | `server_registry` / `authoritative` |
+| `landmark.search`       | `tools/landmark-search-arguments.schema.json`       | `tools/landmark-search-result.schema.json`       | `paper_api` / `authoritative`       |
+| `build.preview.create`  | `tools/build-preview-create-arguments.schema.json`  | `tools/build-preview-create-result.schema.json`  | `paper_api` / `authoritative`       |
+| `server.docs.search`    | `tools/server-docs-search-arguments.schema.json`    | `tools/server-docs-search-result.schema.json`    | `server_docs` / `untrusted`         |
+| `project.list`          | `tools/project-list-arguments.schema.json`          | `tools/project-list-result.schema.json`          | `runtime_storage` / `verified`      |
+| `project.read`          | `tools/project-read-arguments.schema.json`          | `tools/project-read-result.schema.json`          | `runtime_storage` / `verified`      |
+| `project.create`        | `tools/project-create-arguments.schema.json`        | `tools/project-create-result.schema.json`        | `runtime_storage` / `verified`      |
+| `project.update`        | `tools/project-update-arguments.schema.json`        | `tools/project-update-result.schema.json`        | `runtime_storage` / `verified`      |
 
 The player tools take an empty object: their target is always the player bound
 to the active request. Recipe results use the shared typed values in
@@ -229,6 +243,15 @@ Unsupported custom layouts use the explicit `unsupported` representation and
 are never converted to invented grids or plain text. Result construction must
 also stay within the 64 KiB application-envelope limit; truncate only between
 complete recipes and set `truncated`, never truncate one IngredientChoice.
+
+Runtime executes documentation and project tools locally, but their wire-shaped
+results use the same schema and bounded model continuation path. Documentation
+matches retain a stable citation and remain untrusted even when their kind is
+`server_rules`; that kind sorts before `local_docs`, not above Paper policy.
+Project operations derive owner fields from the authenticated request rather
+than arguments. Create starts at revision 1, update requires an exact positive
+`expectedRevision`, and absent, foreign, or changed projects share a closed
+non-disclosing outcome.
 
 ## Build preview transfer semantics
 
@@ -245,9 +268,10 @@ cross-field geometry, so every consumer must also implement
 3. Concatenate decoded chunks by index. The total must equal `compressedBytes`
    and remain within the configured compressed limit.
 4. For `gzip+base64`, decompress one gzip member with a streaming output limit;
-   reject trailing data, extra members, CRC errors, or expansion beyond
-   `uncompressedBytes` and the configured limit. `identity+base64` skips this
-   step. The resulting byte length must equal `uncompressedBytes`.
+   reject the optional `FHCRC` header flag, trailing data, extra members, CRC
+   errors, or expansion beyond `uncompressedBytes` and the configured limit.
+   `identity+base64` skips this step. The resulting byte length must equal
+   `uncompressedBytes`.
 5. SHA-256 of the uncompressed bytes must equal `contentHash`. Parse them as
    strict UTF-8 JSON, reject duplicate keys, canonicalize with RFC 8785, and
    require the canonical bytes to equal the transferred bytes.
@@ -269,10 +293,10 @@ cross-field geometry, so every consumer must also implement
    unique and contiguous from zero. Bounds have `min <= max`; all blocks and the
    origin are in the declared dimension and bounds; the bounds volume and block
    count are within the server policy.
-8. A `modify` preview requires a non-null server-produced `baseRegionHash`; a
-   `create` preview requires null. Added, replaced, and removed totals are
-   checked against the server's change limit. Block entity data is absent from
-   this format and must not be attached out of band.
+8. Every preview carries server-produced `baseRegionHash` and `changeSetHash`
+   values. Added, replaced, and removed totals must not exceed the bounded
+   region. Block entity data is absent from this format and must not be attached
+   out of band.
 
 `build-preview-transfer-v1` returns the first applicable stable error code in
 this order:
@@ -289,52 +313,54 @@ this order:
 | `CONTENT_UNCOMPRESSED_LENGTH_MISMATCH` | Decoded content differs from `uncompressedBytes`.                                                  |
 | `CONTENT_HASH_MISMATCH`                | Uncompressed content does not match `contentHash`.                                                 |
 | `CONTENT_JSON_INVALID`                 | Content is not strict UTF-8 JSON or has duplicate keys.                                            |
-| `CONTENT_NOT_CANONICAL`                | Content bytes are not their RFC 8785 representation.                                               |
-| `CONTENT_SHAPE_INVALID`                | Palette-v1 root or block records have missing, extra, or mistyped fields.                          |
+| `CONTENT_CANONICAL_MISMATCH`           | Content bytes are not their RFC 8785 representation.                                               |
 | `PALETTE_HASH_MISMATCH`                | The canonical palette does not match `paletteHash`.                                                |
-| `PALETTE_INVALID`                      | Palette IDs or BlockState properties are non-contiguous, duplicated, or invalid.                   |
-| `BOUNDS_INVALID`                       | Bounds, origin, volume, dimension, or coordinate order is invalid.                                 |
-| `BLOCK_CONTENT_INVALID`                | Blocks are unsorted, duplicated, out of bounds, use an unknown state, or differ from `blockCount`. |
-| `BASE_REGION_HASH_INVALID`             | `operation` and `baseRegionHash` do not form the required create/modify pair.                      |
-| `CHANGE_LIMIT_EXCEEDED`                | Difference totals exceed the active server limit.                                                  |
+| `PALETTE_ID_INVALID`                   | Palette IDs are missing or are not contiguous array indexes.                                       |
+| `PALETTE_STATE_INVALID`                | A palette BlockState is malformed or explicitly names air.                                         |
+| `PALETTE_STATE_DUPLICATE`              | More than one palette entry describes the same canonical BlockState.                               |
+| `PALETTE_ORDER_INVALID`                | Canonical BlockStates are not sorted.                                                               |
+| `BLOCK_GEOMETRY_INVALID`               | Bounds or a block position/palette reference is invalid.                                           |
+| `BLOCK_COUNT_MISMATCH`                 | `blockCount` does not equal the complete non-air target list.                                      |
+| `BLOCK_ORDER_INVALID`                  | Blocks are duplicated or are not sorted by `y`, then `z`, then `x`.                               |
+| `DIFFERENCE_COUNT_INVALID`             | Difference counts are malformed or exceed the bounded region.                                      |
 
 Schema-limit failures occur before this validator and therefore use the schema
 validation error surface, not one of these semantic codes.
 
-### Phase 1 implementation boundary
+### Phase 11 implementation boundary
 
-The cross-language Phase 1 harness implements duplicate/completeness checks,
-canonical base64, per-chunk length and hash, incremental enforcement of the
-16 MiB compressed limit, bounded gzip expansion to the declared size and
-64 MiB hard limit, uncompressed length, and whole-content hash. It intentionally
-does not claim the remaining production preview semantics in steps 4-8:
-single-member/trailing-byte gzip framing, strict duplicate-key JSON parsing,
-RFC 8785 canonicalization, Palette hash and continuity, content shape, geometry,
-block count, base-region hash, or change-policy validation.
+The Java and TypeScript shared validators implement the complete transfer and
+logical validation sequence above, including out-of-order reassembly, strict
+single-member gzip, duplicate-free strict JSON, RFC 8785 bytes, palette hashes,
+geometry, target block count, and difference bounds. The Fabric decoder repeats
+those checks, verifies every BlockState against its local Registry, and
+deterministically converts the accepted target into a managed native Litematica
+v7 file. Receiving a valid view registers that file but does not load it; the
+player must explicitly request the load.
 
-Those remaining rules and their reserved error codes are mandatory Phase 11
-gates before a build-preview publisher is enabled. Phase 10's generic client
-payload handler does not accept a `build_preview` body merely because its outer
-framing and hash pass. A Phase 1 helper returning success is evidence only that
-preview framing and hashing passed; it is not permission to render a preview or
-modify a world.
+Paper is the only preview producer trusted for publication. Its bounded two-pass
+world snapshot derives `baseRegionHash` with the
+`minecraft-agent/region-state/v1` domain and `changeSetHash` with the
+`minecraft-agent/change-set/v1` domain over RFC 8785 content. Runtime-originated
+`build_preview` entries are removed before Paper appends the request/player-bound
+one-shot artifact. Publication remains disabled unless the server process has
+the exact value `MINECRAFT_AGENT_BUILD_PREVIEW_ENABLED=true`.
 
-A Phase 11 client must additionally check every `blockId` and property against
-its local Registry, deterministically convert the accepted Palette to a managed
-native `.litematica`, and bind it to the preview ID and hash before loading it.
-Client ACKs and material counts remain display signals only; Paper rechecks
-permissions, region and change-set hashes before a world write.
+This is still read-only preview behavior. Client ACKs, a local placement, and
+material counts remain display signals only. The production write proposal
+catalog is empty, so no world apply or rollback path exists.
 
 ## Recipe semantics
 
-The Phase 1 shared semantic validator checks the selected index, distinct recipe
+The legacy `recipe-view-v1` validator checks the selected index, distinct recipe
 IDs, ingredient bounds, duplicate slots/coordinates, and row-major slot
-mapping. The Schema independently enforces the closed structural fields,
-bounded collections, display-component allowlist, tag presence, and the
-presence of processing data for cooking recipes.
+mapping. `recipe-view-v2.schema.json` instead reuses the exact Recipe definition
+from `tools/common.schema.json`. It therefore preserves grid, single-input,
+smithing, transmute, and explicitly unsupported layouts; material, exact,
+item-type, tag, and explicitly unsupported choices; nullable dynamic results;
+and zero-tick cooking metadata without maintaining a second Recipe model.
 
-Before the Phase 11 recipe adapter publishes server data, the full validator
-must additionally check that:
+The `recipe-view-v2` semantic validator additionally checks that:
 
 - `selectedRecipe` is a valid index and recipe IDs remain distinct variants;
 - ingredient slots and `(x,y)` coordinates are unique, inside the declared
@@ -352,11 +378,13 @@ commands, texture paths, and model-produced component trees are not part of the
 schema. A client that cannot resolve an otherwise valid namespaced item ID shows
 the original ID with a missing-item placeholder.
 
-`recipe-view-v1` returns its first error in this order:
+`recipe-view-v2` returns only its first error in this stable order:
 
 | Error code                           | Rule                                                                             |
 | ------------------------------------ | -------------------------------------------------------------------------------- |
+| `RECIPE_VIEW_STRUCTURE_INVALID`      | The v2 root or recipe collection is structurally unavailable.                    |
 | `RECIPE_SELECTED_INDEX_OUT_OF_RANGE` | `selectedRecipe` is not an index in `recipes`.                                   |
+| `RECIPE_RESULT_SUMMARY_INVALID`      | `totalMatches` or `truncated` contradicts the published recipe count.            |
 | `RECIPE_ID_DUPLICATE`                | More than one variant has the same `recipeId`.                                   |
 | `RECIPE_LAYOUT_INVALID`              | Width, height, ingredient count, or recipe-type-specific layout is inconsistent. |
 | `RECIPE_INGREDIENT_OUT_OF_BOUNDS`    | An ingredient coordinate is outside the declared layout.                         |
@@ -368,15 +396,22 @@ the original ID with a missing-item placeholder.
 | `RECIPE_REMAINING_ITEM_INVALID`      | A remaining item references no ingredient slot or repeats a slot.                |
 | `RECIPE_COMPONENT_INVALID`           | Safe display components violate a cross-field Minecraft invariant.               |
 
-Phase 1 executes the codes through `RECIPE_SLOT_COORDINATE_MISMATCH`; later
-codes are reserved until the server recipe adapter supplies the required
-registry and provider context.
+Both shared implementations execute the complete v2 sequence. Manifest cases
+assert the expected code is the first returned code, so Java and TypeScript
+cannot silently choose different error precedence.
 
-For slot numbering, `slot = y * width + x`. Shapeless inputs use a compact
-row-major layout. Cooking and stonecutting use `1x1`; smithing uses `3x1` in
-template/base/addition order. A provider ID is required for `plugin_provider`
-and null for `server_registry`; other source adapters define a stable provider
-ID rather than embedding a URL.
+For grid slot numbering, `slot = y * width + x`. Shapeless inputs use a compact
+row-major layout. Single-input layouts expose logical slot `0`; smithing exposes
+template/base/addition as slots `0..2`; and transmute exposes input/material as
+slots `0..1`. A provider ID is required for `plugin_provider` and null for
+`server_registry`.
+
+Runtime may create this view only from a successful recipe tool result whose
+registered provenance is exactly `server_registry` / `authoritative`. It copies
+the already validated result and derives the text fallback from that same
+snapshot. A failed, rejected, differently sourced, or absent recipe result
+produces a fixed neutral text fallback; model output cannot supply, merge, or
+amend recipe IDs, layouts, choices, results, or source metadata.
 
 ## Proposal and capability semantics
 

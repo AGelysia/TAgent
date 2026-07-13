@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -14,6 +15,11 @@ import com.networknt.schema.SchemaValidatorsConfig;
 import com.networknt.schema.SpecVersion;
 import com.networknt.schema.resource.AllowSchemaLoader;
 import com.networknt.schema.resource.UriSchemaLoader;
+import dev.minecraftagent.paper.client.ClientStructuredView;
+import dev.minecraftagent.paper.client.ClientViewType;
+import dev.minecraftagent.paper.landmark.Landmark;
+import dev.minecraftagent.paper.landmark.LandmarkCatalog;
+import dev.minecraftagent.paper.preview.PaperBuildPreviewService;
 import dev.minecraftagent.paper.request.AgentModule;
 import io.papermc.paper.plugin.configuration.PluginMeta;
 import java.lang.reflect.Proxy;
@@ -23,6 +29,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import net.kyori.adventure.text.Component;
 import org.bukkit.GameMode;
 import org.bukkit.Keyed;
 import org.bukkit.Location;
@@ -45,6 +52,7 @@ import org.bukkit.inventory.SmithingTrimRecipe;
 import org.bukkit.inventory.SmokingRecipe;
 import org.bukkit.inventory.StonecuttingRecipe;
 import org.bukkit.inventory.TransmuteRecipe;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.PluginManager;
 import org.junit.jupiter.api.Test;
@@ -80,6 +88,80 @@ class BukkitReadToolExecutorTest {
     tasks.remove().run();
     assertEquals(ReadToolResult.Status.REJECTED, result.join().status());
     assertEquals(ReadToolResult.Source.PAPER_POLICY, result.join().source());
+  }
+
+  @Test
+  void buildAttemptDiscardsAnEarlierArtifactBeforeArgumentRejection() {
+    var tasks = new ArrayDeque<Runnable>();
+    var previews = mock(PaperBuildPreviewService.class);
+    var executor =
+        new BukkitReadToolExecutor(
+            mock(Server.class),
+            new ReadToolRegistry(),
+            tasks::add,
+            LandmarkCatalog::empty,
+            previews);
+    var requestId = UUID.randomUUID();
+    var call =
+        new ReadToolCall(
+            UUID.randomUUID(),
+            requestId,
+            UUID.randomUUID(),
+            UUID.randomUUID(),
+            AgentModule.BUILD,
+            "build.preview.create",
+            new JsonObject(),
+            1);
+
+    var result = executor.execute(call).toCompletableFuture();
+    tasks.remove().run();
+
+    assertEquals(ReadToolResult.Status.REJECTED, result.join().status());
+    verify(previews).discard(requestId);
+  }
+
+  @Test
+  void landmarkSnapshotUsesLivePermissionAndSatisfiesSharedSchema() throws Exception {
+    var world = mock(World.class);
+    when(world.getKey()).thenReturn(NamespacedKey.minecraft("overworld"));
+    var player = mock(Player.class);
+    when(player.getWorld()).thenReturn(world);
+    when(player.getLocation()).thenReturn(new Location(world, 0, 64, 0));
+    when(player.hasPermission("minecraftagent.landmark.private")).thenReturn(false);
+    var catalog =
+        new LandmarkCatalog(
+            List.of(
+                new Landmark(
+                    "public-market",
+                    "Public Market",
+                    List.of("shops"),
+                    List.of("trade"),
+                    "minecraft:overworld",
+                    3,
+                    64,
+                    4,
+                    null),
+                new Landmark(
+                    "private-market",
+                    "Private Market",
+                    List.of(),
+                    List.of("trade"),
+                    "minecraft:overworld",
+                    1,
+                    64,
+                    1,
+                    "minecraftagent.landmark.private")));
+    var arguments = new JsonObject();
+    arguments.addProperty("query", "market");
+
+    var result = BukkitReadToolExecutor.landmarkSnapshot(player, arguments, catalog);
+
+    assertEquals(1, result.get("totalMatches").getAsInt());
+    assertEquals(
+        5.0,
+        result.getAsJsonArray("landmarks").get(0).getAsJsonObject().get("distance").getAsDouble());
+    assertFalse(result.toString().contains("private"));
+    assertSchema("landmark-search-result.schema.json", result);
   }
 
   @Test
@@ -199,6 +281,81 @@ class BukkitReadToolExecutorTest {
     assertEquals(1, uses.get("totalMatches").getAsInt());
     assertEquals(1, uses.getAsJsonArray("recipes").size());
     assertTrue(uses.get("truncated").getAsBoolean());
+  }
+
+  @Test
+  void unknownRecipeChoicesMakeUsesResultsExplicitlyIncomplete() throws Exception {
+    var uncertain = recipe(ShapelessRecipe.class, "uncertain", Material.CRAFTING_TABLE);
+    when(uncertain.getChoiceList()).thenReturn(List.of(mock(RecipeChoice.class)));
+
+    var uses =
+        BukkitReadToolExecutor.recipeQuerySnapshot(
+            "minecraft:stone", true, Material.STONE, List.of(uncertain));
+
+    assertSchema("server-recipe-uses-result.schema.json", uses);
+    assertEquals(0, uses.get("totalMatches").getAsInt());
+    assertEquals(0, uses.getAsJsonArray("recipes").size());
+    assertTrue(uses.get("truncated").getAsBoolean());
+  }
+
+  @Test
+  void sanitizesRecipeMetadataBeforeAuthoritativePresentationAndClientValidation()
+      throws Exception {
+    var recipe = recipe(ShapelessRecipe.class, "safe-metadata", Material.CRAFTING_TABLE);
+    var stone = materialChoice(Material.STONE);
+    when(recipe.getChoiceList()).thenReturn(List.of(stone));
+    var item = item(Material.CRAFTING_TABLE, 1);
+    var meta = mock(ItemMeta.class);
+    when(meta.hasCustomName()).thenReturn(true);
+    when(meta.customName()).thenReturn(Component.text("A\u0000\u0085\u202eB"));
+    when(meta.hasLore()).thenReturn(true);
+    when(meta.lore()).thenReturn(List.of(Component.text("C\t\u2066D")));
+    when(item.hasItemMeta()).thenReturn(true);
+    when(item.getItemMeta()).thenReturn(meta);
+    when(recipe.getResult()).thenReturn(item);
+
+    var snapshot = BukkitReadToolExecutor.recipeSnapshot(recipe);
+    var components = snapshot.getAsJsonObject("result").getAsJsonObject("components");
+    assertEquals("AB", components.get("customName").getAsString());
+    assertEquals("CD", components.getAsJsonArray("lore").get(0).getAsString());
+
+    var toolResult =
+        BukkitReadToolExecutor.recipeResultSnapshot(
+            "minecraft:crafting_table", false, List.of(snapshot), 1, false);
+    assertSchema("server-recipe-lookup-result.schema.json", toolResult);
+    var viewContent = toolResult.deepCopy();
+    viewContent.addProperty("schemaVersion", "2.0");
+    viewContent.addProperty("selectedRecipe", 0);
+
+    var view =
+        new ClientStructuredView(
+            "1.0",
+            UUID.randomUUID(),
+            UUID.randomUUID(),
+            ClientViewType.RECIPE,
+            1,
+            "Recipe",
+            "fallback",
+            true,
+            viewContent);
+
+    assertEquals(
+        "AB",
+        view.content()
+            .getAsJsonArray("recipes")
+            .get(0)
+            .getAsJsonObject()
+            .getAsJsonObject("result")
+            .getAsJsonObject("components")
+            .get("customName")
+            .getAsString());
+  }
+
+  @Test
+  void safeVisibleTextDropsUnpairedSurrogatesAndBoundsUnicodeCodePoints() {
+    assertEquals(
+        "A\ud83d\ude00B",
+        BukkitReadToolExecutor.safeVisibleText("A\ud800\ud83d\ude00\udc00B-extra", 3));
   }
 
   private static void assertCooking(org.bukkit.inventory.CookingRecipe<?> recipe, String type)

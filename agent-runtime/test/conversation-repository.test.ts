@@ -66,15 +66,20 @@ describe("conversation storage", () => {
     try {
       migrateRuntimeStorage(database, NOW);
       migrateRuntimeStorage(database, LATER);
-      expect(database.prepare("SELECT version, name FROM runtime_schema_migrations").all()).toEqual(
-        [{ version: 1, name: "sessions-and-messages" }],
-      );
+      expect(
+        database
+          .prepare("SELECT version, name FROM runtime_schema_migrations ORDER BY version")
+          .all(),
+      ).toEqual([
+        { version: 1, name: "sessions-and-messages" },
+        { version: 2, name: "projects-and-events" },
+      ]);
 
       database
         .prepare(
           "INSERT INTO runtime_schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
         )
-        .run(2, "future", NOW);
+        .run(3, "future", NOW);
       expect(() => migrateRuntimeStorage(database, LATER)).toThrow(/unsupported/u);
       expect(database.isTransaction).toBe(false);
     } finally {

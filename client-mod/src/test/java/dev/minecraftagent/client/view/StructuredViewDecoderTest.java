@@ -33,16 +33,10 @@ final class StructuredViewDecoderTest {
     StructuredView recipe = decoder.decode(envelope("recipe", recipeContent()));
     RecipeView decodedRecipe = assertInstanceOf(RecipeView.class, recipe.content());
     assertEquals(1, decodedRecipe.recipes().size());
+    RecipeView.GridLayout grid =
+        assertInstanceOf(RecipeView.GridLayout.class, decodedRecipe.recipes().getFirst().layout());
     assertEquals(
-        RecipeView.ChoiceType.TAG,
-        decodedRecipe
-            .recipes()
-            .getFirst()
-            .layout()
-            .ingredients()
-            .getFirst()
-            .ingredient()
-            .choiceType());
+        RecipeView.ChoiceType.TAG, grid.ingredients().getFirst().ingredient().choiceType());
   }
 
   @Test
@@ -182,15 +176,17 @@ final class StructuredViewDecoderTest {
   private static String recipeContent() {
     return """
     {
-      "schemaVersion":"1.0",
+      "schemaVersion":"2.0",
       "query":{"mode":"lookup","itemId":"minecraft:torch"},
       "selectedRecipe":0,
+      "totalMatches":1,
+      "truncated":false,
       "recipes":[{
         "recipeId":"minecraft:torch",
         "recipeType":"shaped",
-        "source":{"kind":"server_registry","providerId":"minecraft:vanilla"},
+        "source":{"kind":"server_registry","providerId":null},
         "result":{"itemId":"minecraft:torch","count":4,"components":{}},
-        "layout":{"width":1,"height":1,"ingredients":[{
+        "layout":{"kind":"grid","width":1,"height":1,"ingredients":[{
           "slot":0,"x":0,"y":0,
           "ingredient":{"choiceType":"tag","tagId":"minecraft:coals","alternatives":[
             {"itemId":"minecraft:coal","count":1,"components":{}}

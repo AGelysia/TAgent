@@ -4,8 +4,12 @@ Last updated: 2026-07-13
 
 ## Current status
 
-Phase 0 through Phase 10 are complete. Phase 11 business modules and
-end-to-end recipe/build behavior are next.
+Phase 0 through Phase 10 are complete. Phase 11's read/preview delivery is
+complete: knowledge, project, landmark, authoritative recipe, deterministic
+build-preview, and native client schematic scope is implemented and verified.
+The plan's world apply/rollback acceptance is deliberately not claimed: the
+production write catalog remains empty pending the existing typed asynchronous
+proposal and real-player safety gate.
 
 ## Locked decisions
 
@@ -103,6 +107,20 @@ end-to-end recipe/build behavior are next.
 - The only supported Litematica tuple is Minecraft 1.21.11, Fabric Loader
   0.19.3, Litematica 0.26.12, and MaLiLib 0.27.16. Missing or different versions
   disable only the optional adapter; the base overlay still loads.
+- Phase 11 Markdown roots are private and bounded. `server_rules` rank before
+  `local_docs`, but every excerpt remains untrusted data and keeps a citation.
+- Projects use Runtime SQLite schema v2, authenticated server/player ownership,
+  optimistic revisions, and a 20-active-project limit per owner.
+- Landmarks are Paper-owned and permission-filtered before matching, counts,
+  sorting, and truncation. Same-dimension results use live-player distance.
+- Recipe v2 presentation and its text fallback come only from a successful
+  `server_registry`/`authoritative` result; model text cannot supply recipe facts.
+- Paper is the only build-preview producer trusted for publication. Runtime
+  build views are removed, and Paper's request/player-bound view registry is
+  disabled unless `MINECRAFT_AGENT_BUILD_PREVIEW_ENABLED=true` is set exactly.
+- A valid preview and native `.litematica` are presentation artifacts. Receipt
+  does not auto-load a placement, and load/Material List/ACK state is never
+  proposal or world-write authority.
 
 ## Phase 0: repository scaffold
 
@@ -456,14 +474,114 @@ Completed:
       and [MaLiLib 0.27.16](https://modrinth.com/mod/malilib/version/oaU4Ys3J),
       then links the reviewed signatures behind an isolated reflection adapter.
       Missing, mismatched, or broken dependencies leave the base overlay usable.
-- [x] The managed controller bounds and hashes `<view-uuid>.litematica`, tracks
+- [x] The managed controller bounds and hashes
+      `<view-uuid>.<revision>.<artifact-uuid>.litematica`, tracks
       adapter-owned preview load/remove, and opens Litematica's native Material
       List HUD. It reads and hashes at most 16 MiB on the protocol worker, then
       performs final metadata checks and reflected calls on the client thread.
-      A runtime adapter failure fails only that operation. Palette-to-native file
-      generation and an end-to-end build preview deliberately remain Phase 11.
+      A runtime adapter failure fails only that operation.
+
+## Phase 11: foundational business modules
+
+Implemented read/preview scope:
+
+- [x] Runtime loads Markdown only from configured relative private roots with
+      owner/mode/link/UTF-8/change checks and fixed root/depth/file/byte/AST/chunk
+      budgets. Search keeps stable citations, returns bounded excerpts, orders
+      `server_rules` first, and treats every document as untrusted data.
+- [x] Runtime SQLite migration v2 adds project rows and revision events. The four
+      project tools derive ownership from authenticated server/player context,
+      cap each owner at 20 active projects, and use exact optimistic revisions.
+      Mutations require direct imperative player intent, reject questions,
+      hypotheticals, and negations, and are limited to one successful mutation
+      per request; build preview requires an exact same-request project read.
+- [x] Paper loads a closed private `0600` `landmarks.yml`, rejects unsafe YAML
+      and filesystem state, filters live permissions before all observable result
+      metadata, and sorts same-dimension matches by live-player distance.
+- [x] Recipe view v2 preserves every supported layout, ingredient-choice kind,
+      dynamic result, processing value, source/provider, and remaining item.
+      Runtime builds the view and same-source text fallback only from the
+      successful authoritative server-registry tool result.
+- [x] The negotiated client accepts recipe v2 only with `recipeView: 2` and
+      supports variant paging, choice cycling, registry icons, and tooltips while
+      retaining text fallback for vanilla or incompatible clients.
+- [x] `build.preview.create` validates a closed plan and live player, limits each
+      axis to 32 and volume to 4096 cells, requires a near/current/loaded target,
+      rejects target states and existing cells with block entities, and never
+      calls a Bukkit mutation API.
+- [x] Paper snapshots at most 128 cells or about 2 ms per primary-thread slice,
+      repeats the read to reject a race, then builds deterministic complete-target
+      Palette v1 content and domain-separated base-region/change-set hashes on a
+      worker.
+- [x] Shared Java/TypeScript and Fabric validation covers out-of-order chunks,
+      strict single-member gzip, strict UTF-8 and duplicate-free JSON, RFC 8785,
+      palette integrity, BlockState resolution, geometry, order, counts, and
+      hashes.
+- [x] Paper strips Runtime-supplied build views and appends only its short-lived
+      request/player-bound artifact. Build-preview publication is an exact
+      environment opt-in and remains private-text fallback otherwise. A Paper
+      artifact is the exclusive candidate, uses the completion fallback, and is
+      invalidated before any later build attempt.
+- [x] Fabric deterministically generates and atomically registers a managed
+      native Litematica v7 file, waits for an explicit load operation, uses the
+      preview origin, and delegates material display to Litematica's native HUD.
+      Disconnect removes connection-scoped managed artifacts. Paper exposes
+      explicit `/agent ui preview <view-id>` and
+      `/agent ui materials <view-id>` presentation commands.
+
+Deliberately deferred safety scope:
+
+- [ ] Freeze a build artifact into a production write proposal, re-read and
+      compare the live region at confirmation, apply through a fixed bounded
+      typed adapter, persist durable audit/rollback references off-thread, and
+      define conflict and partial-failure behavior. The production write catalog
+      remains empty until this complete gate and a real-player integration test
+      pass.
 
 ## Verification
+
+Phase 11 verification recorded in the final serial completion lane:
+
+```bash
+cd agent-runtime
+npm run check
+
+cd ..
+./gradlew --no-daemon --max-workers=1 :paper-plugin:test
+./gradlew --no-daemon --max-workers=1 :client-mod:test :client-mod:spotlessCheck
+./scripts/paper-smoke.sh
+./scripts/package.sh
+```
+
+- Runtime full check passed with 18 Vitest files and 142 tests, plus TypeScript,
+  ESLint, and Prettier. New coverage includes private Markdown loading/search,
+  server-rule priority/citations/injection handling, project ownership/revisions,
+  local execution, recipe-authority selection, and complete Palette semantics.
+- Fabric's full test suite passed with 198 tests and Spotless. It includes the
+  shared manifest plus recipe v2 decoding/state, strict build-preview decoding,
+  native Litematica writing, managed atomic publication, explicit load, and
+  cleanup tests.
+- The shared protocol manifest contains 115 cases; its JVM contract class passed
+  116 tests (including a direct gzip-header case), and the full Paper lane
+  passed 407 tests. Paper and Fabric Spotless checks also passed. Focused
+  TypeScript build-preview semantic coverage also passed. New fixtures
+  include recipe v2, local tools, landmarks, empty targets, out-of-order chunks,
+  concatenated gzip, duplicate JSON keys, noncanonical content, and bad palette
+  hashes.
+- Focused Paper landmark, build snapshot/artifact, authoritative-view filtering,
+  recipe-v2 validation/selection, command, and registry tests passed. The pinned
+  Paper `1.21.11-132` smoke verified SHA-256
+  `5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba` and
+  passed `offline-lifecycle`, `unavailable`, `wrong-token`, and `incompatible`.
+- `scripts/package.sh` reran the serial Runtime, Paper, and Fabric lanes and
+  produced `dist/MinecraftAgent-Paper.jar` (664,596 bytes, SHA-256
+  `3ffefb24510de417de6f04ed22fbe244168320e0c2e6aac50e6a22e3a352bc76`) and
+  `dist/MinecraftAgent-Client-Fabric.jar` (321,726 bytes, SHA-256
+  `1b0542120ed1a01cc83bb8eb06629f1d124c2cb7dcb731ead30b9ecb6994a6e9`).
+- No graphical Fabric client or real Litematica/MaLiLib UI ran on this headless
+  host, so this phase makes no graphical rendering or interaction claim.
+
+### Phase 10 baseline
 
 Phase 10 was verified serially on 2026-07-13 with:
 
@@ -569,21 +687,19 @@ not suppressed.
 - Online Capability Pack reload or any capability command execution. Phase 9
   loads and atomically publishes startup/recovery metadata only; no executor,
   Bukkit dispatch, proposal-creation route, or Runtime capability handler exists.
-- Phase 11 business routes for publishing recipe views, locate, guide, project,
-  or build behavior. The Phase 10 RecipeGrid renderer exists, but the current
-  Runtime completion builder only attempts its trusted text view when the final
-  envelope has room; recipe tools still expose server data only to the model.
-- Palette-v1 to native `.litematica` generation, end-to-end build-preview
-  publication, project/revision integration, or any world mutation. Phase 10
-  supplies only the optional managed-file preview lifecycle and native Material
-  List HUD adapter.
-- Full build-preview logical validation: strict single-member gzip framing,
-  RFC 8785 content/Palette canonicalization, geometry, block count,
-  base-region hash, and change-policy checks. These remain mandatory Phase 11
-  gates before a build-preview publisher can be enabled.
+- A production build write proposal, confirmation-time region re-read, bounded
+  world apply, partial-failure/rollback policy, or durable rollback reference.
+  Phase 11 deliberately stops at a reproducible Paper-owned preview and keeps
+  the production write catalog empty.
+- Automatic preview placement, Easy Place, printer behavior, or a client result
+  that can authorize server behavior. Native schematic load and Material List
+  remain explicit local presentation operations.
+- Live knowledge, landmark, or Capability reload. Their validated snapshots are
+  installed only through startup/recovery paths; do not edit the trees while
+  their owning process is running.
 - A graphical Fabric client, real server/player handshake, or the exact
   Litematica/MaLiLib tuple has not been launched on this constrained headless
-  host. Phase 10 behavior is covered by focused protocol/domain/client tests.
+  host. Phase 10/11 behavior is covered by focused protocol/domain/client tests.
 
 The presence of a schema or proposal domain object does not mark a write tool
 implemented.
@@ -619,11 +735,12 @@ test gap.
 
 ### Litematica compatibility
 
-Litematica and MaLiLib internals are exact-version sensitive. Phase 10 locks one
+Litematica and MaLiLib internals are exact-version sensitive. Phase 10/11 lock one
 tuple and isolates reflected calls behind `litematica-reflection-1`; every other
 tuple fails closed while the overlay stays available. Focused tests prove
-optional class loading, signature selection, managed preview lifecycle, and
-native Material List HUD calls through test bindings. A graphical client with
+optional class loading, signature selection, strict Palette decoding, native
+schematic generation, managed preview lifecycle, and native Material List HUD
+calls through test bindings. A graphical client with
 the released 0.26.12/0.27.16 artifacts has not run on this host, and no
 compatibility is implied for newer releases. Each additional tuple requires a
 new reviewed matrix entry and real-mod integration lane.
@@ -672,18 +789,22 @@ redaction; a real-player click remains a later integration lane.
 
 ## Next gates
 
-1. Implement Phase 11 recipe, locate, guide, project, and build routes on top of
-   the exact Phase 10 view contracts. The build route must add deterministic
-   Palette validation, native `.litematica` generation, and end-to-end preview
-   lifecycle without treating client results as authority.
+1. Proceed to the Phase 12 management surface: complete `status`, `doctor`,
+   atomic `reload`, `capabilities`, `costs`, and client-capability diagnostics
+   without weakening the universal Offline response rule.
 2. Keep the production write catalog empty until the first fixed typed adapter
    has operation-specific validation, limits, rollback/partial-failure policy,
-   and a real-player proposal integration test.
-3. Add durable usage/cost accounting before treating daily/monthly limits as
+   confirmation-time region revalidation, off-thread durable audit/rollback
+   persistence, and a real-player proposal integration test.
+3. Run a real graphical Fabric/Litematica lane for recipe v2 paging/choices,
+   Registry icons/tooltips, preview non-auto-load, explicit placement/remove,
+   origin, and native Material List before enabling preview publication in
+   production.
+4. Add durable usage/cost accounting before treating daily/monthly limits as
    restart-stable budgets.
-4. Add a real online-player integration lane for private `/agent say` delivery,
+5. Add a real online-player integration lane for private `/agent say` delivery,
    proposal confirmation, and late dynamic command-tree refresh without
    increasing routine weak-host resource usage.
-5. Add Gradle dependency-verification metadata before calling a release
+6. Add Gradle dependency-verification metadata before calling a release
    byte-for-byte reproducible; Paper 1.21.11 is available only through an
    upstream mutable snapshot coordinate.

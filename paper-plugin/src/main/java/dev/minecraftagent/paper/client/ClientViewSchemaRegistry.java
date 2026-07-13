@@ -27,6 +27,10 @@ public final class ClientViewSchemaRegistry {
   }
 
   public static ClientViewSchemaRegistry versionOne() {
+    return versionOne(false);
+  }
+
+  public static ClientViewSchemaRegistry versionOne(boolean buildPreviewEnabled) {
     var versions = new EnumMap<ClientViewType, Set<String>>(ClientViewType.class);
     for (var type :
         Set.of(
@@ -35,6 +39,9 @@ public final class ClientViewSchemaRegistry {
             ClientViewType.ITEM_LIST,
             ClientViewType.RECIPE)) {
       versions.put(type, Set.of(VIEW_SCHEMA_V1));
+    }
+    if (buildPreviewEnabled) {
+      versions.put(ClientViewType.BUILD_PREVIEW, Set.of(VIEW_SCHEMA_V1));
     }
     return new ClientViewSchemaRegistry(versions);
   }

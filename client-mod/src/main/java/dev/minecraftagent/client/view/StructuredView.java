@@ -33,6 +33,7 @@ public record StructuredView(
       case ITEM_STACK -> content instanceof ItemStackView;
       case ITEM_LIST -> content instanceof ItemListView;
       case RECIPE -> content instanceof RecipeView;
+      case BUILD_PREVIEW -> content instanceof BuildPreviewView;
     };
   }
 }

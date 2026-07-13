@@ -130,7 +130,7 @@ and replies with the current positive connection generation.
 
 ## Payload contracts
 
-Phase 1 includes or targets these closed contracts:
+Protocol 1.0 includes these closed contracts:
 
 | Contract             | Purpose                                                               |
 | -------------------- | --------------------------------------------------------------------- |
@@ -166,10 +166,13 @@ within 64 KiB. Otherwise the encoder removes `structuredViews` and preserves the
 fallback. Resume uses the authenticated server ID and player UUID for both exact
 and latest lookup, and all unavailable exact IDs share `SESSION_NOT_FOUND`.
 
-During a live query, Runtime may send one serial `tool.call` at a time and Paper
-returns one correlated `tool.result`. The result repeats session, player, tool,
-and sequence in addition to the envelope request ID and unique call ID. Runtime
-and Paper both apply the six-tool contract and module allowlist. Sequence is
+During a live query, Runtime may send one serial Paper-remote `tool.call` at a
+time and Paper returns one correlated `tool.result`. The result repeats session,
+player, tool, and sequence in addition to the envelope request ID and unique call
+ID. Runtime-local documentation and project tools do not cross the WebSocket;
+they use the same descriptor/schema/provenance checks before their bounded result
+returns to the model loop. Runtime and Paper both apply the registered-tool
+contract and module allowlist. Sequence is
 zero-based and protocol 1.0 permits `0..7`; an eighth completed call exhausts
 the loop and no ninth call is emitted. Failed/rejected results require
 `result: null`, while a successful result requires typed object data and fixed
@@ -221,8 +224,9 @@ Paper assigns a positive per-player generation on the actual connection. Every
 post-handshake message repeats it, and reconnect, disconnect, world transition,
 Offline cleanup, or plugin disable invalidates pending state from older
 generations. `client.hello` advertises protocol `1.0`, the client mod version,
-independent feature versions `0` or `1`, and nullable detected dependency
-versions. `server.hello` selects only server-known view schema `1.0`; it cannot
+independent bounded feature versions (`recipeView` may be `2`), and nullable
+detected dependency versions. `server.hello` selects only server-known view
+schema `1.0`; it cannot
 be expanded by a client claim.
 
 `agent.complete.structuredViews` is an ordered alternatives list. Paper
@@ -267,13 +271,22 @@ only when the connected client declared support for the exact view version.
 Paper validates and sanitizes a fixed view model before publishing it. The model
 cannot supply arbitrary widgets, texture paths, NBT, or click commands.
 
-Phase 10 renders version `1.0` Text, ItemStack, ItemList, and RecipeGrid views.
+The client renders version `1.0` Text, ItemStack, ItemList, and RecipeGrid views.
 Text requires `overlay: 1`; item views additionally require `itemIcons: 1`; and
-recipe views also require `recipeView: 1`. Item IDs resolve through the local
+legacy recipe views require `recipeView: 1`. Phase 11 recipe v2 requires
+`recipeView: 2` and preserves grid, single-input, smithing, transmute, and
+explicitly unsupported layouts, complete ingredient choices, dynamic results,
+processing metadata, and remaining items from the authoritative recipe tool.
+Item IDs resolve through the local
 Minecraft registry to real item icons, counts, and vanilla tooltips. An unknown
 ID stays visible as an explicit missing-item state. Unsupported view types or
 older/incompatible feature versions are not partially decoded; Paper uses the
 private fallback instead.
+
+Runtime builds recipe v2 and its text fallback only from a successful result
+with `server_registry` / `authoritative` provenance. Failed, rejected, absent,
+or differently sourced results use fixed neutral fallback text. The model cannot
+supply or amend any recipe presentation field.
 
 The overlay bounds scroll, drag, resize, pin/unpin, close, clear, and open-view
 count. Client-local position, size, and pin preference persist independently of
@@ -284,14 +297,17 @@ The Litematica feature versions are `1` only when the optional resolver matches
 Minecraft 1.21.11, Fabric Loader 0.19.3, Litematica 0.26.12, and MaLiLib 0.27.16.
 Its closed controls are `litematica.preview.load`,
 `litematica.preview.remove`, and `litematica.material_list.open`. A load derives
-the managed `<view-uuid>.litematica` name locally; no client filesystem path is
+the managed `<view-uuid>.<revision>.<artifact-uuid>.litematica` name locally; no
+client filesystem path is
 on the wire. Preparation reads and hashes at most 16 MiB on the protocol worker;
 the final file metadata recheck and reflected load, remove, and Material List
 operations run on the Minecraft client thread. An operation failure does not
 dynamically withdraw the feature version already advertised for that connection.
-Phase 10 does not generate that native file from Palette v1.
+Phase 11 validates Palette v1 and local Registry BlockStates, generates and
+atomically registers a native Litematica v7 file, and waits for an explicit load
+action. Receipt of a view never triggers placement automatically.
 
-Phase 10 defines no client proposal action. Proposal and selection view actions
+The client defines no proposal action. Proposal and selection view actions
 remain later contracts and cannot be inferred from the closed `ui.control` enum.
 
 ## Build preview transfer framing
@@ -299,9 +315,10 @@ remain later contracts and cannot be inferred from the closed `ui.control` enum.
 The Phase 1 `build-preview` contract contains both preview metadata and a
 bounded array of transfer chunks. Semantic validation treats the chunk array as
 a transport layer even though protocol 1.0 carries it in the same JSON object.
-This is distinct from the Phase 10 outer view framing above: Phase 10 can
-transport verified structured view JSON, but does not yet publish or decode a
-`build_preview` view. The content hash is calculated from the complete
+This is distinct from the outer view framing above. Phase 11 first verifies the
+structured-view transfer, then applies the nested build-preview transfer and
+semantic validation before registering a local schematic. The content hash is
+calculated from the complete
 uncompressed preview content, so it remains stable when only chunk boundaries
 change.
 
@@ -310,7 +327,7 @@ The top-level object includes:
 ```text
 schemaVersion, previewId, projectId, and revision
 operation, dimension, bounds, origin, and transform
-baseRegionHash, contentHash, and paletteHash
+baseRegionHash, changeSetHash, contentHash, and paletteHash
 contentFormat and encoding
 chunkCount
 compressedBytes and uncompressedBytes
@@ -322,14 +339,24 @@ and canonical standard-base64 `data`. Semantic validation rejects negative or
 duplicate indices, gaps, count mismatches, non-canonical base64, length
 mismatches, chunk hash mismatches, whole-content hash mismatches, unsupported
 encoding, and configured compressed/decompressed limits. Decompression happens
-only after the compressed budget is accepted and remains subject to an output
-limit.
+only after the compressed budget is accepted, accepts exactly one gzip member,
+rejects the optional `FHCRC` header flag, and remains subject to an output
+limit. The uncompressed bytes must be strict
+UTF-8, duplicate-free JSON already in RFC 8785 form. Palette IDs/states/hash,
+complete target geometry, block ordering/counts, and difference bounds are then
+checked before use.
 
-For `operation = create`, `baseRegionHash` is null. For `operation = modify`, it
-is required. An ACK correlates to preview ID and content hash but conveys no
-server-side trust. The complete Palette, geometry, base-region, change-policy,
-native `.litematica` generation, and end-to-end publication path remain Phase 11
-work; the Phase 10 generic transfer limits do not make this preview executable.
+Every operation carries Paper-produced `baseRegionHash` and `changeSetHash`.
+Paper derives them from its bounded two-pass live-world snapshot using the
+`minecraft-agent/region-state/v1` and `minecraft-agent/change-set/v1` domains.
+Runtime-originated build views are removed; only the one-shot artifact bound to
+the same Paper request and player can be appended for publication. The server
+must also opt in with the exact environment value
+`MINECRAFT_AGENT_BUILD_PREVIEW_ENABLED=true`.
+
+An ACK correlates presentation but conveys no server-side trust. The native
+`.litematica` and Material List remain client-local. The production proposal
+catalog is empty, so protocol 1.0 has no world apply or rollback path.
 
 ## Build preview canonical form
 

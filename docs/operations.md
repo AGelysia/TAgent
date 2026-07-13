@@ -1,6 +1,6 @@
 # Operations
 
-## Phase 0-10 purpose
+## Phase 0-11 purpose
 
 The repository remains a development implementation, not a deployable Minecraft
 Agent service. Its useful operations are build, format, contract, readiness,
@@ -9,8 +9,9 @@ filesystem/SQLite/Schema checks, an injectable provider-health port, and a
 loopback `/health` route. Paper Phase 3 adds strict startup inputs and a
 Paper-initiated authenticated Runtime hello; the current implementation includes
 conditional `/agent` registration, persistent emergency Offline controls,
-private model requests, Runtime-owned sessions, resume, explicit modules, and
-six fixed typed read tools. Phase 8 adds a Paper-owned proposal authorization
+private model requests, Runtime-owned sessions, resume, explicit modules, eight
+fixed Paper read/preview tools, and five bounded Runtime-local knowledge/project
+tools. Phase 8 adds a Paper-owned proposal authorization
 domain, confirmation command boundary, and private persistent audit sink. Its
 production write catalog is empty and no production route creates a proposal or
 mutates Minecraft state. Phase 9 adds bounded Capability Pack discovery,
@@ -20,10 +21,13 @@ generic command dispatch or Capability proposal-creation route. The Fabric
 artifact now provides the optional raw-JSON payload channel, exact client
 capability negotiation, bounded structured-view transfer, local rich overlay,
 registry item rendering, persistent preferences, and a fail-closed optional
-Litematica adapter. It remains presentation-only.
+Litematica adapter. Phase 11 adds private Markdown retrieval, player-owned
+projects, permission-filtered landmarks, authoritative recipe v2 presentation,
+Paper-owned build snapshots, and native Litematica generation. It remains
+presentation-only; the production write catalog is still empty.
 
 No real API key, production server token, model account, or Litematica
-installation is required for automated Phase 0-10 checks. Tests use temporary
+installation is required for automated Phase 0-11 checks. Tests use temporary
 secrets, private temporary directories, ephemeral loopback ports, fake provider
 adapters, and a fake incompatible Runtime. The exact Paper `1.21.11-132` server
 is used by the Phase 3 decision smoke; successful and token-mismatch cases use
@@ -72,7 +76,7 @@ org.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m
 
 Run one build at a time. Do not run Gradle and npm checks concurrently. Avoid
 Docker, Testcontainers, a local Paper server, or a graphical Fabric client for
-routine Phase 0-10 validation. The pinned Paper smoke is a short, explicit
+routine Phase 0-11 validation. The pinned Paper smoke is a short, explicit
 exception and must not be left running on this host.
 
 If memory pressure appears, keep the one-worker policy and run each subproject
@@ -172,6 +176,7 @@ config + secrets
   -> Capability Schema load
   -> SQLite read/integrity/rollback-write probe
   -> Runtime schema migration and bounded retention cleanup
+  -> configured private Markdown knowledge load/index
   -> configured provider model lookup with timeout
   -> Fastify ready
   -> final listen on 127.0.0.1
@@ -187,6 +192,56 @@ Startup failures emit one JSON diagnostic with a stable code, stage, and known
 field path. They never include received configuration values, provider response
 bodies, API keys, server tokens, or unknown YAML key text.
 
+### Phase 11 knowledge and projects
+
+Knowledge roots are optional and relative to the canonical Runtime configuration
+directory. Keep the default `roots: []` when no local documentation is needed.
+For an enabled setup, create the directories before starting Runtime and keep
+them private:
+
+```bash
+mkdir -p data/knowledge/server-rules data/knowledge/local-docs
+chmod 0700 data data/knowledge data/knowledge/server-rules data/knowledge/local-docs
+find data/knowledge -type f -name '*.md' -exec chmod 0600 {} +
+```
+
+```yaml
+knowledge:
+  roots:
+    - directory: ./data/knowledge/server-rules
+      kind: server_rules
+    - directory: ./data/knowledge/local-docs
+      kind: local_docs
+```
+
+Paths cannot be absolute, escape the configuration directory, duplicate another
+root, or resolve through a link. Runtime requires matching process ownership,
+rejects group/world-writable directories and Markdown files, links, hard-linked
+files, unsafe Unicode, invalid UTF-8, and content that changes while read. The
+startup budget is eight roots, eight directory levels, 256 `.md` files, 64 KiB
+per file, 2 MiB total source, 8192 Markdown nodes per file, 2048 total chunks,
+and 2048 characters per chunk. HTML nodes are not indexed.
+
+`server.docs.search` accepts at most 256 characters and 32 distinct terms and
+returns at most eight 1024-character excerpts. Matches have stable citations;
+`server_rules` sort before `local_docs`, but both are untrusted quoted data and
+cannot grant permission, alter module policy, or instruct the model to call a
+tool. Update a knowledge tree only while Runtime is stopped, then restart to
+build a new immutable in-memory index.
+
+SQLite migration v2 creates the project and project-event tables in the existing
+private Runtime database. `project.list`, `project.read`, `project.create`, and
+`project.update` always derive `(serverId, playerUuid)` from the authenticated
+request. Create begins at revision 1; update uses an exact positive
+`expectedRevision` and increments it atomically. An owner may retain at most 20
+active projects, and names are unique per owner after normalization. Project
+text is untrusted planning data and is not evidence that a structure was
+previewed, approved, or built. Runtime accepts `project.create` or
+`project.update` only when the original player request directly and imperatively
+asks to create/update a project; questions, hypotheticals, and negations fail
+closed. It permits at most one successful project mutation per request. Before a remote build preview call, the same request must have
+successfully read the exact owned project UUID and revision used by the plan.
+
 ## Paper Phase 3 startup boundary
 
 Paper configuration is strict and closed. The Runtime endpoint must be
@@ -201,7 +256,7 @@ The current startup order extends the Phase 3 boundary as follows:
 ```text
 platform + strict config + security policy
   -> private state directory probe
-  -> six core descriptor readiness checks
+  -> eight Paper descriptor and private landmark-catalog readiness checks
   -> optional capability directory inspection
   -> desired-state load and private proposal-audit path open
   -> bounded capability pack load and second-fingerprint verification
@@ -269,7 +324,7 @@ Runtime, then use `/agent on`; Phase 4 deliberately has no automatic reconnect.
 If `/agent` was never registered because initial startup failed, fix the cause
 and restart Paper instead.
 
-The six core read tools are:
+The eight Paper read/preview tools are:
 
 ```text
 player.context.read
@@ -278,9 +333,11 @@ server.info.read
 server.plugins.list
 server.recipe.lookup
 server.recipe.uses
+landmark.search
+build.preview.create
 ```
 
-All six are read-only and closed-schema. Phase 7 enables only their fixed Paper
+All eight are read-only and closed-schema. Paper enables only their fixed
 adapters; there is no command, reflection, arbitrary plugin, file, shell, or
 generic Bukkit tool. Runtime exposes the current module allowlist to the model,
 and Paper repeats that allowlist plus live request, player, permission, session,
@@ -291,8 +348,85 @@ and model loops remain asynchronous. Recipe lookup/usage scans at most 128
 registry entries or 2 ms per scheduled slice, returns at most 16 matches, and
 applies both the 64 KiB frame limit and Runtime's structural-token budget.
 Cancellation, quit, Offline, timeout, and Runtime disconnect invalidate pending
-work. Phase 9 pack entries do not join this six-tool Runtime loop and do not add
+work. Phase 9 pack entries do not join this tool loop and do not add
 a command executor or a proposal creation route.
+
+## Paper Phase 11 landmarks and build previews
+
+Paper creates `plugins/MinecraftAgent/landmarks.yml` as a private `0600` file on
+first startup. Stop Paper before editing it, retain the plugin data directory's
+private ownership/mode, and use the closed version 1 shape:
+
+```yaml
+version: 1
+landmarks:
+  - id: spawn
+    name: Server Spawn
+    aliases: [spawn]
+    tags: [public, travel]
+    dimension: minecraft:overworld
+    x: 0
+    y: 64
+    z: 0
+    permission: minecraftagent.landmark.spawn
+```
+
+`permission` is optional. A catalog is limited to 128 entries and 64 KiB;
+unknown keys, duplicate IDs/aliases, YAML anchors/aliases/duplicate keys,
+non-normalized or unsafe text, invalid coordinates/dimensions/permissions,
+links, hard links, non-regular files, owner mismatch, or any mode other than
+`0600` fails core startup closed. Declare any custom permission nodes in the
+owning permissions plugin or grant them explicitly.
+
+`landmark.search` is available only to the locate and build modules. It checks the actual
+live player's permissions before matching, counting, sorting, or truncating, so
+an empty or truncated result cannot reveal a hidden entry. It returns at most 16
+visible matches, orders the current dimension first by 3D distance from the live
+player, and reports `distance: null` for other dimensions.
+
+`build.preview.create` is available only to the build module and never writes a
+block. Its closed plan requires a project UUID/revision, create/modify operation,
+current dimension, inclusive bounds and origin, one of
+`solid|hollow|walls|floor|clear`, canonical full BlockState (null only for
+`clear`), rotation, and mirror. Paper independently limits every axis to 32,
+volume to 4096 cells, and target distance to 128 blocks; checks current build
+height, world border, loaded chunks, live permission, and dimension; and rejects
+every target BlockState that creates a block entity and every target cell that
+already contains one.
+
+The primary thread reads at most 128 cells or about 2 ms per slice, then repeats
+the snapshot and rejects a changed region. Worker-side code builds the complete
+non-air target in `y,z,x` order, canonical Palette v1, difference counts, and
+RFC 8785 SHA-256 values for content and palette. Base-region and change-set
+hashes use the `minecraft-agent/region-state/v1` and
+`minecraft-agent/change-set/v1` domains. The short-lived artifact is bound to
+the originating request and player; Paper discards every Runtime-supplied build
+view before considering it. If a Paper artifact exists, it becomes the only
+candidate view and its fallback is rebound to the final completion fallback, so
+a Runtime Text view cannot preempt it. A later build attempt invalidates any
+earlier artifact before argument validation.
+
+Production view publication is disabled by default. To exercise the Phase 11
+client preview manually, pass this exact environment value to the Paper server
+process and restart it:
+
+```bash
+MINECRAFT_AGENT_BUILD_PREVIEW_ENABLED=true ./start.sh
+```
+
+Receiving a preview only registers its managed file. Use the UUID from that
+view for the explicit client actions:
+
+```text
+/agent ui preview <view-id>
+/agent ui materials <view-id>
+```
+
+The flag does not enable a write tool. It only permits Paper's view registry to
+publish the authoritative preview to a client that negotiated
+`litematicaPreview: 1`. Leave it unset in production until the exact client
+tuple and workflow have been tested. The production proposal catalog remains
+empty, and no apply or rollback operation exists.
 
 ## Paper Phase 8 proposal controls
 
@@ -355,7 +489,7 @@ or truncate it while the plugin is running because the pinned file identity is
 part of the audit safety check.
 
 There is no normal operation that can create or execute a write proposal in the
-Phase 9 package. The production proposal tool catalog is empty, the synchronous
+Phase 11 package. The production proposal tool catalog is empty, the synchronous
 domain service has no production `create` caller, and proposal Runtime-Paper
 transport handlers remain unsupported. The commands and audit path exist so a
 later reviewed typed adapter cannot bypass this boundary.
@@ -560,7 +694,7 @@ still record the complete `/agent say` command before the plugin runs. Review
 and disable that server-level facility when player questions are sensitive;
 the plugin cannot reliably redact only one command from an upstream log.
 
-## Paper/Fabric Phase 10 client presentation
+## Paper/Fabric Phase 10-11 client presentation
 
 The Fabric client is optional. A player without the mod sends no
 `minecraftagent:client` handshake and continues to receive the literal private
@@ -603,7 +737,10 @@ These outcomes are presentation bookkeeping, never evidence of permission or
 proposal confirmation.
 
 The overlay renders Text, ItemStack, ItemList, and RecipeGrid version `1.0`
-views. Item icons and tooltips come from the local Minecraft registry; unknown
+views. Phase 11 additionally negotiates `recipeView: 2` and renders grid,
+single-input, smithing, transmute, and explicit unsupported layouts while
+preserving ingredient choices, result variants, processing, and remaining
+items. Item icons and tooltips come from the local Minecraft registry; unknown
 IDs remain visible as missing values. Its interaction surface supports scrolling,
 dragging, bounded resizing, pin/unpin, close, and clear. At most eight views are
 open; configured width is 180-420 pixels and height is 96-320 pixels, then
@@ -633,20 +770,38 @@ Litematica features unavailable while normal views keep working. A later
 runtime adapter error fails that operation; it does not dynamically withdraw an
 already advertised feature version.
 
-The minimal local operations are `litematica.preview.load`,
+The closed local operations are `litematica.preview.load`,
 `litematica.preview.remove`, and `litematica.material_list.open`. The controller
-derives `<view-uuid>.litematica` under its managed preview root, requires a
+derives `<view-uuid>.<revision>.<artifact-uuid>.litematica` under its managed preview root, requires a
 regular non-link file of at most 16 MiB within that root, hashes it on the
 protocol worker, and tracks only its own placement. The Minecraft client thread
 performs the final metadata recheck and every reflected load, remove, and native
 Material List HUD call. There is no server-supplied client path, Easy Place,
 printer, automatic placement, or authorization result.
 
-Phase 10 does not generate the managed native file from
-`minecraft-agent.palette-v1` and does not run an end-to-end build preview. Those
-are Phase 11 gates. A `client.ack`, successful local placement, selection, or
-material result must never be interpreted as a proposal confirmation,
-permission check, region hash, size check, or execution approval.
+Phase 11 first validates the nested preview's single-member gzip, strict UTF-8,
+duplicate-free RFC 8785 JSON, Palette hash/IDs/order/states, bounds, complete
+non-air target, ordering, counts, and hashes. Every canonical BlockState must
+resolve through the local Registry. The client then writes a native Litematica
+v7 schematic to a connection-scoped managed store with `0600` temporary files,
+atomic replacement, directory sync, final identity/hash verification, and an
+eight-artifact limit. Receiving the view registers the file but does not load
+it. Only the explicit load operation creates the adapter-owned placement at the
+Paper-provided origin; Material List opens Litematica's native HUD for that
+placement. Disconnect clears registered managed artifacts.
+
+Paper exposes those two explicit actions as `/agent ui preview <view-id>` and
+`/agent ui materials <view-id>`. The commands carry only the validated view UUID
+and remain presentation controls; neither command authorizes or applies blocks.
+
+A `client.ack`, successful local placement, selection, or material result must
+never be interpreted as a proposal confirmation, permission check, region hash,
+size check, or execution approval. This headless server did not launch a
+graphical Fabric client or the real Litematica/MaLiLib UI. Manual validation must
+use the exact tuple in the Toolchain section, enable the Paper preview flag,
+confirm vanilla fallback separately, verify that receipt does not auto-load a
+placement, exercise explicit load/remove and Material List, and inspect recipe
+v2 paging/choice/tooltip behavior without raising any server limit.
 
 ## Protocol contracts
 
@@ -669,7 +824,9 @@ treat a passing fixture as an enabled network route. Phase 9 capability
 fixtures additionally lock status deny markers, required-only arguments,
 numeric plugin ranges, policy consistency, and pack-level reversal semantics.
 Phase 10 adds the closed `client-payload` direction and framing fixtures,
-including rejection of an ACK authority field. Passing those contracts
+including rejection of an ACK authority field. Phase 11 adds recipe v2,
+knowledge/project/landmark/build tool schemas and complete Palette v1 semantic
+fixtures. Passing those contracts
 establishes valid data, not a command, permission, proposal confirmation, or
 world-write route.
 
@@ -685,8 +842,9 @@ When adding a contract:
 ## Generated and local files
 
 Build outputs, Gradle caches, Node modules, Runtime data, logs, environment
-files, Paper state/audit data, and local server directories must remain ignored.
-Secrets are never stored in fixtures or committed configuration.
+files, configured knowledge content, Paper state/audit/landmark data, managed
+client schematics, and local server directories must remain ignored. Secrets
+are never stored in fixtures or committed configuration.
 
 `.env.example` and `agent-runtime/config.example.yml` contain placeholder names
 only. The Runtime does not load `.env` files. Production credentials should be
@@ -695,7 +853,7 @@ warning for plan compatibility and should not be used. A group/world-writable
 configuration is always rejected. Inline secrets additionally require a private
 configuration file; inline secrets and broad read permissions may not be combined.
 
-## Phase 3-10 Paper and client validation
+## Phase 3-11 Paper and client validation
 
 [ADR 0001](adr/0001-phase3-conditional-command-registration.md) records the
 selected public `Server#getCommandMap` late-registration design. API-level unit
@@ -746,7 +904,7 @@ The exact commands, artifact hash, and outcomes are recorded in
 `docs/progress.md`. An initial core failure has no command recovery path; fix it
 externally and restart.
 
-## Troubleshooting Phase 0-10
+## Troubleshooting Phase 0-11
 
 ### Dependency resolution fails
 
@@ -790,7 +948,7 @@ or raw peer message. Check the strict Paper configuration, state permissions,
 fake or local Runtime availability, token match, and protocol version, then
 restart. There is no initial `/agent on` path.
 
-After registration, Phase 10 supports private questions, resume, explicit
+After registration, Phase 11 supports private questions, resume, explicit
 one-shot modules, the fixed read-tool loop, proposal response commands, private
 proposal auditing, and fail-closed Capability Pack validation/registry
 publication. The write catalog is empty, so no production Capability proposal,
@@ -810,7 +968,10 @@ Do not delete or loosen permissions on the state file as a recovery shortcut.
 Fallback is expected when the mod is absent, the server channel is unavailable,
 protocol `1.0` was not accepted, or the required feature/view versions do not
 intersect exactly. Confirm the Paper plugin and matching client JAR are both
-Phase 10 builds and inspect only stable `CLIENT_*` codes. Do not loosen the
+matching builds and inspect only stable `CLIENT_*` codes. For recipe v2, confirm
+the client advertised `recipeView: 2`; for build preview, confirm Paper has the
+exact opt-in environment value and the client advertised `litematicaPreview: 1`.
+Do not loosen the
 decoder, raise transfer limits, or manually edit a capability claim to force a
 view. A rejected client channel must not take the Runtime-Paper service Offline.
 
@@ -819,9 +980,21 @@ view. A rejected client channel must not take the Runtime-Paper service Offline.
 Normal overlays must continue to work. Confirm the exact Minecraft 1.21.11,
 Fabric Loader 0.19.3, Litematica 0.26.12, and MaLiLib 0.27.16 tuple. A missing
 dependency, any other version, or a signature/linkage failure deliberately
-selects no adapter. Also confirm the managed `<view-uuid>.litematica` file is a
-bounded regular non-link file below the managed root. Phase 10 does not create
-that native file from Palette v1; end-to-end generation remains Phase 11.
+selects no adapter. Also confirm the generated
+`<view-uuid>.<revision>.<artifact-uuid>.litematica` file is a
+bounded regular non-link file below the managed root and that the received
+Palette BlockStates exist in the local Registry. Receipt alone does not load the
+placement; invoke the explicit load path before opening Material List.
+
+### Runtime exits while loading knowledge
+
+Use `KNOWLEDGE_DIRECTORY_UNAVAILABLE` or `KNOWLEDGE_CONTENT_INVALID` and the
+fixed `/knowledge/roots` field; Runtime deliberately does not log the rejected
+path or document text. Stop Runtime, verify the configured path is relative to
+the configuration directory, restore process ownership, set directories to
+`0700` and Markdown files to `0600`, remove links/hard links, and check the
+documented file/byte/depth limits. Restart only after the tree is stable. Do not
+loosen the loader or paste document content into logs to diagnose prompt injection.
 
 ### Runtime exits during provider health
 

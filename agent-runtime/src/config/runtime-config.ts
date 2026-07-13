@@ -103,6 +103,34 @@ const runtimeConfigSchema = z
         level: z.enum(["debug", "info", "warn", "error"]),
       })
       .strict(),
+    knowledge: z
+      .object({
+        roots: z
+          .array(
+            z
+              .object({
+                directory: privateDirectoryPathSchema,
+                kind: z.enum(["server_rules", "local_docs"]),
+              })
+              .strict(),
+          )
+          .max(8),
+      })
+      .strict()
+      .superRefine((knowledge, context) => {
+        const directories = new Set<string>();
+        knowledge.roots.forEach((root, index) => {
+          if (directories.has(root.directory)) {
+            context.addIssue({
+              code: "custom",
+              path: ["roots", index, "directory"],
+              message: "must not duplicate another knowledge root",
+            });
+          }
+          directories.add(root.directory);
+        });
+      })
+      .optional(),
     limits: z
       .object({
         maxConcurrentRequests: z.number().int().min(1).max(64),
@@ -136,6 +164,7 @@ const runtimeConfigSchema = z
   });
 
 export type RuntimeConfig = z.infer<typeof runtimeConfigSchema>;
+export type KnowledgeRootKind = "server_rules" | "local_docs";
 
 export const runtimeConfigWarningCodes = [
   "CONFIG_INLINE_SECRET",
@@ -155,6 +184,12 @@ export interface RuntimeConfigPaths {
   readonly rootDirectory: string;
   readonly sqlite: string;
   readonly logDirectory: string;
+  readonly knowledgeRoots: readonly RuntimeKnowledgeRootPath[];
+}
+
+export interface RuntimeKnowledgeRootPath {
+  readonly directory: string;
+  readonly kind: KnowledgeRootKind;
 }
 
 export interface LoadedRuntimeConfig {
@@ -577,6 +612,14 @@ export async function loadRuntimeConfig(
         result.data.logging.directory,
         "/logging/directory",
       ),
+      knowledgeRoots: (result.data.knowledge?.roots ?? []).map((root, index) => ({
+        directory: resolveContainedPath(
+          rootDirectory,
+          root.directory,
+          `/knowledge/roots/${String(index)}/directory`,
+        ),
+        kind: root.kind,
+      })),
     },
     warnings,
   };

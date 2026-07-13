@@ -46,6 +46,11 @@ public final class ClientStructuredView {
       throw new ClientProtocolException("CLIENT_VIEW_TOO_LARGE");
     }
     ClientStructuredViewValidator.validate(viewType, this.content);
+    if (viewType == ClientViewType.BUILD_PREVIEW
+        && (!viewId.toString().equals(this.content.get("previewId").getAsString())
+            || revision != this.content.get("revision").getAsInt())) {
+      throw new ClientProtocolException("CLIENT_VIEW_CONTENT_INVALID");
+    }
   }
 
   public String viewSchemaVersion() {

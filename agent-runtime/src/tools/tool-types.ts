@@ -5,6 +5,13 @@ export const coreToolIds = [
   "server.plugins.list",
   "server.recipe.lookup",
   "server.recipe.uses",
+  "landmark.search",
+  "build.preview.create",
+  "server.docs.search",
+  "project.list",
+  "project.read",
+  "project.create",
+  "project.update",
 ] as const;
 
 export type CoreToolId = (typeof coreToolIds)[number];
@@ -18,7 +25,8 @@ export type ToolResultSource =
   | "server_docs"
   | "web_documentation"
   | "model_knowledge"
-  | "capability";
+  | "capability"
+  | "runtime_storage";
 export type ToolResultTrust = "authoritative" | "verified" | "untrusted";
 
 export interface ToolResultError {
@@ -27,17 +35,20 @@ export interface ToolResultError {
   readonly retryable: boolean;
 }
 
-export interface ToolResultPayload {
-  readonly toolCallId: string;
-  readonly sessionId: string;
-  readonly playerUuid: string;
-  readonly tool: string;
-  readonly sequence: number;
+export interface ToolExecutionResult {
   readonly status: ToolResultStatus;
   readonly source: ToolResultSource;
   readonly trust: ToolResultTrust;
   readonly result: Readonly<Record<string, unknown>> | null;
   readonly error: ToolResultError | null;
+}
+
+export interface ToolResultPayload extends ToolExecutionResult {
+  readonly toolCallId: string;
+  readonly sessionId: string;
+  readonly playerUuid: string;
+  readonly tool: string;
+  readonly sequence: number;
 }
 
 export interface ToolCallPayload {

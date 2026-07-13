@@ -4,8 +4,14 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
+/** Closed client model for authoritative recipe-view-v2 content. */
 public record RecipeView(
-    String schemaVersion, Query query, int selectedRecipe, List<Recipe> recipes)
+    String schemaVersion,
+    Query query,
+    int selectedRecipe,
+    int totalMatches,
+    boolean truncated,
+    List<Recipe> recipes)
     implements ViewContent {
 
   public RecipeView {
@@ -30,7 +36,7 @@ public record RecipeView(
       String recipeId,
       RecipeType recipeType,
       Source source,
-      ItemStackView result,
+      Optional<ItemStackView> result,
       Layout layout,
       List<RemainingItem> remainingItems,
       Optional<Processing> processing) {
@@ -39,7 +45,7 @@ public record RecipeView(
       Objects.requireNonNull(recipeId, "recipeId");
       Objects.requireNonNull(recipeType, "recipeType");
       Objects.requireNonNull(source, "source");
-      Objects.requireNonNull(result, "result");
+      result = Objects.requireNonNull(result, "result");
       Objects.requireNonNull(layout, "layout");
       remainingItems = List.copyOf(Objects.requireNonNull(remainingItems, "remainingItems"));
       processing = Objects.requireNonNull(processing, "processing");
@@ -56,6 +62,8 @@ public record RecipeView(
     STONECUTTING,
     SMITHING_TRANSFORM,
     SMITHING_TRIM,
+    TRANSMUTE,
+    COMPLEX,
     CUSTOM
   }
 
@@ -68,16 +76,51 @@ public record RecipeView(
 
   public enum SourceKind {
     SERVER_REGISTRY,
-    PLUGIN_PROVIDER,
-    SERVER_DOCS,
-    WEB_DOCUMENTATION,
-    MODEL_KNOWLEDGE
+    PLUGIN_PROVIDER
   }
 
-  public record Layout(int width, int height, List<IngredientSlot> ingredients) {
-    public Layout {
+  public sealed interface Layout
+      permits GridLayout, SingleInputLayout, SmithingLayout, TransmuteLayout, UnsupportedLayout {}
+
+  public record GridLayout(int width, int height, List<IngredientSlot> ingredients)
+      implements Layout {
+    public GridLayout {
       ingredients = List.copyOf(Objects.requireNonNull(ingredients, "ingredients"));
     }
+  }
+
+  public record SingleInputLayout(IngredientChoice ingredient) implements Layout {
+    public SingleInputLayout {
+      Objects.requireNonNull(ingredient, "ingredient");
+    }
+  }
+
+  public record SmithingLayout(
+      IngredientChoice template, IngredientChoice base, IngredientChoice addition)
+      implements Layout {
+    public SmithingLayout {
+      Objects.requireNonNull(template, "template");
+      Objects.requireNonNull(base, "base");
+      Objects.requireNonNull(addition, "addition");
+    }
+  }
+
+  public record TransmuteLayout(IngredientChoice input, IngredientChoice material)
+      implements Layout {
+    public TransmuteLayout {
+      Objects.requireNonNull(input, "input");
+      Objects.requireNonNull(material, "material");
+    }
+  }
+
+  public record UnsupportedLayout(UnsupportedLayoutReason reason) implements Layout {
+    public UnsupportedLayout {
+      Objects.requireNonNull(reason, "reason");
+    }
+  }
+
+  public enum UnsupportedLayoutReason {
+    UNSUPPORTED_RECIPE_LAYOUT
   }
 
   public record IngredientSlot(int slot, int x, int y, IngredientChoice ingredient) {
@@ -87,10 +130,14 @@ public record RecipeView(
   }
 
   public record IngredientChoice(
-      ChoiceType choiceType, Optional<String> tagId, List<ItemStackView> alternatives) {
+      ChoiceType choiceType,
+      Optional<String> tagId,
+      Optional<UnsupportedChoiceReason> reason,
+      List<ItemStackView> alternatives) {
     public IngredientChoice {
       Objects.requireNonNull(choiceType, "choiceType");
       tagId = Objects.requireNonNull(tagId, "tagId");
+      reason = Objects.requireNonNull(reason, "reason");
       alternatives = List.copyOf(Objects.requireNonNull(alternatives, "alternatives"));
     }
   }
@@ -98,7 +145,13 @@ public record RecipeView(
   public enum ChoiceType {
     MATERIAL,
     EXACT,
-    TAG
+    ITEM_TYPE,
+    TAG,
+    UNSUPPORTED
+  }
+
+  public enum UnsupportedChoiceReason {
+    UNSUPPORTED_INGREDIENT_CHOICE
   }
 
   public record RemainingItem(int slot, ItemStackView item) {

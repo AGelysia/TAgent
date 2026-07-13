@@ -9,6 +9,7 @@ import java.util.UUID;
 /** A local, already verified schematic artifact; network payloads must never provide its path. */
 public record LitematicaPreviewRequest(
     UUID previewId,
+    int revision,
     Path managedFile,
     long managedFileBytes,
     FileTime lastModifiedTime,
@@ -20,6 +21,9 @@ public record LitematicaPreviewRequest(
     int originZ) {
   public LitematicaPreviewRequest {
     Objects.requireNonNull(previewId, "previewId");
+    if (revision < 1) {
+      throw new IllegalArgumentException("revision must be positive");
+    }
     Objects.requireNonNull(managedFile, "managedFile");
     if (managedFileBytes < 1) {
       throw new IllegalArgumentException("managedFileBytes must be positive");
@@ -28,19 +32,5 @@ public record LitematicaPreviewRequest(
     Objects.requireNonNull(fileKey, "fileKey");
     Objects.requireNonNull(contentSha256, "contentSha256");
     Objects.requireNonNull(displayName, "displayName");
-  }
-
-  LitematicaPreviewRequest atOrigin(int x, int y, int z) {
-    return new LitematicaPreviewRequest(
-        previewId,
-        managedFile,
-        managedFileBytes,
-        lastModifiedTime,
-        fileKey,
-        contentSha256,
-        displayName,
-        x,
-        y,
-        z);
   }
 }

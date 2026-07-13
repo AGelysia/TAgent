@@ -25,6 +25,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 class LitematicaAdapterTest {
   private static final UUID PREVIEW_ID = UUID.fromString("20000000-0000-4000-8000-000000000001");
+  private static final UUID ARTIFACT_ID = UUID.fromString("20000000-0000-4000-8000-000000000002");
 
   @TempDir Path temporaryDirectory;
 
@@ -40,7 +41,7 @@ class LitematicaAdapterTest {
   @Test
   void exactReflectionAdapterLoadsRemovesAndOpensNativeMaterialHud() throws Exception {
     var root = Files.createDirectory(temporaryDirectory.resolve("managed"));
-    var file = Files.writeString(root.resolve(PREVIEW_ID + ".litematica"), "verified schematic");
+    var file = Files.writeString(managedFile(root), "verified schematic");
     var adapter = fakeAdapter(root, () -> true);
     var request = request(file, sha256(file));
 
@@ -71,7 +72,7 @@ class LitematicaAdapterTest {
   @Test
   void rejectsWrongThreadOutsideRootChangedFilesAndDuplicateIds() throws Exception {
     var root = Files.createDirectory(temporaryDirectory.resolve("managed"));
-    var file = Files.writeString(root.resolve(PREVIEW_ID + ".litematica"), "verified schematic");
+    var file = Files.writeString(managedFile(root), "verified schematic");
     var wrongThread = fakeAdapter(root, () -> false);
     assertEquals(
         LitematicaDisplayReport.Failure.WRONG_THREAD,
@@ -82,6 +83,10 @@ class LitematicaAdapterTest {
     assertEquals(
         LitematicaDisplayReport.Failure.MANAGED_FILE_UNAVAILABLE,
         adapter.loadPreview(request(outside, sha256(outside))).failure().orElseThrow());
+    var legacyName = Files.writeString(root.resolve(PREVIEW_ID + ".litematica"), "legacy name");
+    assertEquals(
+        LitematicaDisplayReport.Failure.MANAGED_FILE_UNAVAILABLE,
+        adapter.loadPreview(request(legacyName, sha256(legacyName))).failure().orElseThrow());
     var changed = request(file, sha256(file));
     Files.writeString(file, "changed after background verification");
     assertEquals(
@@ -94,6 +99,24 @@ class LitematicaAdapterTest {
     assertEquals(
         LitematicaDisplayReport.Failure.PREVIEW_ALREADY_LOADED,
         adapter.loadPreview(valid).failure().orElseThrow());
+  }
+
+  @Test
+  void controllerGeneratedVersionedArtifactLoadsThroughExactReflectionAdapter() throws Exception {
+    var root = Files.createDirectory(temporaryDirectory.resolve("managed"));
+    var adapter = fakeAdapter(root, () -> true);
+    var controller =
+        new LitematicaClientController(
+            Optional.of(adapter), root, 1024 * 1024, new NativeLitematicaWriter(4321));
+    var preview = NativeLitematicaWriterTest.preview();
+
+    assertTrue(controller.stagePreview(preview));
+    assertTrue(controller.commitPreview(preview, java.util.Set.of(preview.previewId())));
+    var report = controller.load(controller.prepareLoad(preview.previewId(), "Agent preview"));
+
+    assertEquals(LitematicaDisplayReport.State.LOADED, report.state());
+    assertEquals(1, adapter.loadedPreviewCount());
+    controller.close();
   }
 
   @Test
@@ -183,6 +206,7 @@ class LitematicaAdapterTest {
         Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
     return new LitematicaPreviewRequest(
         PREVIEW_ID,
+        1,
         file,
         attributes.size(),
         attributes.lastModifiedTime(),
@@ -192,6 +216,10 @@ class LitematicaAdapterTest {
         1,
         64,
         2);
+  }
+
+  private static Path managedFile(Path root) {
+    return root.resolve(PREVIEW_ID + ".1." + ARTIFACT_ID + ".litematica");
   }
 
   private static ModInventory versions(Map<String, String> versions) {

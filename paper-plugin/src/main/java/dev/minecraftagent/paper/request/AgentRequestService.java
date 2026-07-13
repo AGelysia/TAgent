@@ -59,6 +59,11 @@ public final class AgentRequestService
   }
 
   @FunctionalInterface
+  public interface AuthoritativeViewSource {
+    List<ClientStructuredView> consume(UUID requestId, UUID playerId);
+  }
+
+  @FunctionalInterface
   public interface PreparedStructuredReply {
     boolean send();
 
@@ -93,6 +98,8 @@ public final class AgentRequestService
   private final Executor callbacks;
   private final ClientCapabilitySource clientCapabilities;
   private final StructuredReplySink structuredReplies;
+  private final AtomicReference<AuthoritativeViewSource> authoritativeViews =
+      new AtomicReference<>((requestId, playerId) -> List.of());
   private final AtomicReference<ConnectionBinding> connection = new AtomicReference<>();
   private final AtomicBoolean closed = new AtomicBoolean();
   private final Map<UUID, LiveRequest> requestsById = new HashMap<>();
@@ -315,6 +322,10 @@ public final class AgentRequestService
   @Override
   public Submission submit(UUID playerId, String message) {
     return submitModule(playerId, AgentModule.GENERAL, message);
+  }
+
+  public void setAuthoritativeViewSource(AuthoritativeViewSource source) {
+    authoritativeViews.set(Objects.requireNonNull(source));
   }
 
   @Override
@@ -725,7 +736,7 @@ public final class AgentRequestService
 
   private void dispatchBoundReply(
       LiveRequest request, String message, AgentProtocolCodec.Completion completion) {
-    if (completion != null && !completion.structuredViews().isEmpty()) {
+    if (completion != null) {
       try {
         callbacks.execute(() -> prepareStructuredReply(request, message, completion));
       } catch (RuntimeException error) {
@@ -744,14 +755,49 @@ public final class AgentRequestService
     }
     PreparedStructuredReply prepared = null;
     try {
+      var views = new ArrayList<ClientStructuredView>();
+      var authoritative = authoritativeViews.get().consume(request.requestId(), request.playerId());
+      if (!authoritative.isEmpty()) {
+        authoritative.stream()
+            .map(view -> authoritativeBuildView(request, completion, view))
+            .forEach(views::add);
+      } else {
+        completion.structuredViews().stream()
+            .filter(
+                view ->
+                    view.viewType() != dev.minecraftagent.paper.client.ClientViewType.BUILD_PREVIEW)
+            .forEach(views::add);
+      }
+      if (views.isEmpty()) {
+        dispatchPreparedReply(request, message, null);
+        return;
+      }
       prepared =
           Objects.requireNonNull(
               structuredReplies.prepare(
-                  request.playerId(), completion.fallbackText(), completion.structuredViews()));
+                  request.playerId(), completion.fallbackText(), List.copyOf(views)));
     } catch (RuntimeException error) {
       events.event("CLIENT_STRUCTURED_REPLY_FAILED");
     }
     dispatchPreparedReply(request, message, prepared);
+  }
+
+  private static ClientStructuredView authoritativeBuildView(
+      LiveRequest request, AgentProtocolCodec.Completion completion, ClientStructuredView view) {
+    if (view.viewType() != dev.minecraftagent.paper.client.ClientViewType.BUILD_PREVIEW
+        || !request.requestId().equals(view.requestId())) {
+      throw new IllegalArgumentException("Authoritative build preview binding mismatch");
+    }
+    return new ClientStructuredView(
+        view.viewSchemaVersion(),
+        view.viewId(),
+        view.requestId(),
+        view.viewType(),
+        view.revision(),
+        view.title(),
+        completion.fallbackText(),
+        view.pinnable(),
+        view.content());
   }
 
   private void dispatchPreparedReply(

@@ -15,6 +15,7 @@
     "origin",
     "transform",
     "baseRegionHash",
+    "changeSetHash",
     "contentHash",
     "paletteHash",
     "contentFormat",
@@ -76,7 +77,10 @@
       }
     },
     "baseRegionHash": {
-      "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }]
+      "$ref": "#/$defs/sha256"
+    },
+    "changeSetHash": {
+      "$ref": "#/$defs/sha256"
     },
     "contentHash": {
       "$ref": "#/$defs/sha256"
@@ -102,7 +106,7 @@
     },
     "blockCount": {
       "type": "integer",
-      "minimum": 1,
+      "minimum": 0,
       "maximum": 250000
     },
     "difference": {
@@ -117,7 +121,7 @@
     },
     "palette": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 0,
       "maxItems": 4096,
       "items": {
         "$ref": "#/$defs/paletteEntry"
@@ -137,20 +141,6 @@
       }
     }
   },
-  "allOf": [
-    {
-      "if": {
-        "properties": { "operation": { "const": "create" } },
-        "required": ["operation"]
-      },
-      "then": {
-        "properties": { "baseRegionHash": { "type": "null" } }
-      },
-      "else": {
-        "properties": { "baseRegionHash": { "$ref": "#/$defs/sha256" } }
-      }
-    }
-  ],
   "$defs": {
     "sha256": {
       "type": "string",

@@ -4,20 +4,26 @@ import java.util.Arrays;
 
 /** Closed client feature names from the version 1.0 handshake. */
 public enum ClientFeature {
-  OVERLAY("overlay"),
-  ITEM_ICONS("itemIcons"),
-  RECIPE_VIEW("recipeView"),
-  LITEMATICA_PREVIEW("litematicaPreview"),
-  LITEMATICA_MATERIAL_LIST("litematicaMaterialList");
+  OVERLAY("overlay", 1),
+  ITEM_ICONS("itemIcons", 1),
+  RECIPE_VIEW("recipeView", 2),
+  LITEMATICA_PREVIEW("litematicaPreview", 1),
+  LITEMATICA_MATERIAL_LIST("litematicaMaterialList", 1);
 
   private final String wireName;
+  private final int maximumVersion;
 
-  ClientFeature(String wireName) {
+  ClientFeature(String wireName, int maximumVersion) {
     this.wireName = wireName;
+    this.maximumVersion = maximumVersion;
   }
 
   public String wireName() {
     return wireName;
+  }
+
+  public int maximumVersion() {
+    return maximumVersion;
   }
 
   public static ClientFeature fromWireName(String wireName) {

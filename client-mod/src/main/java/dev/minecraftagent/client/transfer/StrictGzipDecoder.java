@@ -7,7 +7,7 @@ import java.util.zip.DataFormatException;
 import java.util.zip.Inflater;
 
 /** Decodes exactly one RFC 1952 member and rejects trailing or concatenated members. */
-final class StrictGzipDecoder {
+public final class StrictGzipDecoder {
   private static final int FLAG_HEADER_CRC = 0x02;
   private static final int FLAG_EXTRA = 0x04;
   private static final int FLAG_NAME = 0x08;
@@ -16,7 +16,7 @@ final class StrictGzipDecoder {
 
   private StrictGzipDecoder() {}
 
-  static byte[] decode(byte[] input, int expectedBytes) throws IOException {
+  public static byte[] decode(byte[] input, int expectedBytes) throws IOException {
     if (input.length < 18 || expectedBytes < 1) {
       throw new IOException("invalid gzip length");
     }
@@ -27,6 +27,9 @@ final class StrictGzipDecoder {
     int flags = input[3] & 0xff;
     if ((flags & RESERVED_FLAGS) != 0) {
       throw new IOException("reserved gzip flags are set");
+    }
+    if ((flags & FLAG_HEADER_CRC) != 0) {
+      throw new IOException("gzip header checksum flag is unsupported");
     }
 
     int offset = 10;
@@ -43,17 +46,6 @@ final class StrictGzipDecoder {
     if ((flags & FLAG_COMMENT) != 0) {
       offset = skipZeroTerminated(input, offset);
     }
-    if ((flags & FLAG_HEADER_CRC) != 0) {
-      requireAvailable(input, offset, 2);
-      var headerCrc = new CRC32();
-      headerCrc.update(input, 0, offset);
-      int supplied = (input[offset] & 0xff) | ((input[offset + 1] & 0xff) << 8);
-      if ((((int) headerCrc.getValue()) & 0xffff) != supplied) {
-        throw new IOException("gzip header checksum mismatch");
-      }
-      offset += 2;
-    }
-
     if (input.length - offset < 9) {
       throw new IOException("gzip member is truncated");
     }

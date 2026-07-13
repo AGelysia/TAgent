@@ -21,6 +21,15 @@ logging:
   directory: ./logs
   level: info
 
+knowledge:
+  # Configure only existing, private directories relative to this file. Example:
+  # roots:
+  #   - directory: ./data/knowledge/server-rules
+  #     kind: server_rules
+  #   - directory: ./data/knowledge/local-docs
+  #     kind: local_docs
+  roots: []
+
 limits:
   maxConcurrentRequests: 4
   maxQueuedRequests: 32

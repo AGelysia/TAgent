@@ -2,15 +2,18 @@
 
 Minecraft Agent is a security-first Minecraft assistant composed of a Paper plugin, a local
 TypeScript runtime, and an optional Fabric client mod. This repository currently implements the
-Phase 0-10 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
+Phase 0-11 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
 loopback Runtime-Paper channel, conditional `/agent` registration, persistent emergency Offline
 controls, private model replies, Runtime-owned sessions, resume, explicit one-shot modules, a
-bounded six-tool read-only model loop, and Paper-owned proposal authorization and audit
+bounded closed-tool model loop, and Paper-owned proposal authorization and audit
 infrastructure. It also includes bounded Capability Pack loading, typed validation, and immutable
 catalog publication. Phase 10 adds an optional raw-JSON Fabric channel, exact structured-view
 negotiation, bounded transfer, a local rich overlay with registry item rendering, and a fail-closed
-exact-version Litematica adapter. The production write catalog is empty: there is no production
-proposal creator, generic execution surface, or Minecraft state mutation.
+exact-version Litematica adapter. Phase 11 adds private Markdown knowledge, player-owned projects,
+permission-filtered landmarks, authoritative recipe v2 views, and bounded Paper-owned build
+previews that the client can convert to native Litematica schematics. The production write catalog
+is still empty: there is no production proposal creator, generic execution surface, or Minecraft
+state mutation.
 
 The product and delivery baseline is recorded in
 [`minecraft_agent_vibe_coding_plan.md`](minecraft_agent_vibe_coding_plan.md). Implementation status
@@ -80,7 +83,7 @@ cd ..
 The Fabric build downloads Minecraft artifacts and is deliberately last. Do not run both Gradle
 builds concurrently on a low-memory host.
 
-## Phase 2-10 Runtime
+## Phase 2-11 Runtime
 
 ```bash
 cd agent-runtime
@@ -97,8 +100,9 @@ mode `0600`, inject secrets from the shell or service manager, and start with:
 npm start -- --config config.local.yml
 ```
 
-Startup checks the configuration, private log directory, shared Capability Schema, Runtime-owned
-SQLite file, and the configured OpenAI model before binding `127.0.0.1`. `/health`
+Startup checks the configuration, private log and configured knowledge directories, shared
+Capability Schema, Runtime-owned SQLite file, and the configured OpenAI model before binding
+`127.0.0.1`. `/health`
 returns a cached minimal readiness view and does not repeat provider or database work.
 
 The Runtime uses the OpenAI Responses API for bounded, non-streaming answers and serial function
@@ -111,9 +115,10 @@ prompt or answer rows and makes resume unavailable.
 
 After the authenticated hello, the same bounded WebSocket accepts agent request/cancel,
 session-resume, and correlated tool-result traffic. A fixed six-entry Module Manifest supplies
-trusted per-request instructions and a fixed read-tool allowlist. Runtime publishes only those
-registered functions to the model, validates every call and typed result locally, and permits at
-most eight serial calls. Phase 8 adds shared proposal contracts, but proposal, standalone
+trusted per-request instructions and a fixed tool allowlist. Runtime publishes only that module's
+intersection of 13 registered Paper-remote and Runtime-local functions, validates every call and
+typed result locally, and permits at most eight serial calls. Phase 8 adds shared proposal contracts,
+but proposal, standalone
 `view.publish`, and heartbeat transport handlers remain unsupported; schema acceptance alone cannot
 create or execute a proposal.
 Phase 10 accepts Paper-derived connected-client capabilities as presentation metadata and, when the
@@ -122,7 +127,19 @@ unconditional fallback. If duplicating the answer into that view would exceed th
 Runtime removes the structured view and keeps the fallback. It never treats a client claim as model,
 tool, permission, or proposal authority.
 
-## Phase 3-10 Paper
+Phase 11 loads bounded Markdown from configured private `server_rules` and `local_docs` roots.
+`server.docs.search` returns explicit citations, ranks server rules first, and exposes excerpts as
+untrusted quoted data rather than instructions. SQLite migration v2 adds projects scoped by the
+authenticated server ID and player UUID. Create/read/list/update operations preserve an optimistic
+revision and limit each owner to 20 active projects; they store planning text only and never inspect
+or change a world. Runtime admits create/update only for a direct imperative mutation request,
+rejects questions, hypotheticals, and negations, and permits at most one successful mutation per
+request. A remote build preview also requires a successful same-request
+`project.read` for the exact project UUID and revision. Recipe presentation is generated only from a successful
+`server_registry`/`authoritative` recipe result, including its text fallback, so model output cannot
+supply recipe facts.
+
+## Phase 3-11 Paper
 
 On first Paper startup, the plugin installs a strict `plugins/MinecraftAgent/config.yml`. Keep its
 Runtime token as the complete `${MINECRAFT_AGENT_SERVER_TOKEN}` environment reference. The endpoint
@@ -143,7 +160,7 @@ Paper performs configuration, state, policy, descriptor, and Runtime authenticat
 from the server thread. Only a successful result returns to the primary thread and registers
 `agent` plus `minecraftagent:agent` through Paper's public command map. A core failure leaves both
 labels absent; fix the external cause and restart the server. `/agent doctor` reports stable health
-and optional warning codes. The six core entries now back executable read-only adapters; they are
+and optional warning codes. Eight Paper entries now back executable read-only adapters; they are
 still closed descriptors and cannot dispatch arbitrary Bukkit, plugin, or command operations.
 
 After initial registration, `/agent off` closes admission before it cancels transient work and
@@ -168,7 +185,8 @@ Players with `minecraftagent.module` may list modules or run
 
 During a live question, Paper may execute only `player.context.read`,
 `player.held_item.read`, `server.info.read`, `server.plugins.list`,
-`server.recipe.lookup`, or `server.recipe.uses`. It repeats module, argument, player,
+`server.recipe.lookup`, `server.recipe.uses`, `landmark.search`, or
+`build.preview.create`. It repeats module, argument, player,
 permission, connection, session, sequence, and Online-epoch checks. Bukkit snapshots run on the
 server thread without blocking the WebSocket thread; recipe scans are split into bounded slices.
 Results carry fixed source/trust labels, and recipe results retain typed layouts, ingredient
@@ -236,12 +254,37 @@ The base client loads without Litematica. Optional integration is enabled only f
 Fabric Loader 0.19.3,
 [Litematica 0.26.12](https://modrinth.com/mod/litematica/version/b3dJnV8d), and
 [MaLiLib 0.27.16](https://modrinth.com/mod/malilib/version/oaU4Ys3J). It isolates the reviewed
-reflection adapter, derives only managed `<view-uuid>.litematica` files, supports local preview
+reflection adapter, derives only managed `<view-uuid>.<revision>.<artifact-uuid>.litematica` files, supports local preview
 load/remove and the native Material List HUD, and leaves the base overlay available on a tuple or
 linkage mismatch. Load preparation reads and hashes at most 16 MiB on the protocol worker; the final
 metadata recheck and all Litematica calls run on the Minecraft client thread. A runtime adapter call
 fails only that operation and does not dynamically withdraw the already advertised feature version.
-Palette-to-native `.litematica` generation and end-to-end build preview publication remain Phase 11.
+Phase 11 adds strict recipe view v2 decoding and the complete Palette v1 preview path. Paper loads a
+private `0600` `plugins/MinecraftAgent/landmarks.yml`; `landmark.search` filters permissions before
+counts and truncation, then orders visible same-dimension results by live-player distance. The build
+tool accepts only a closed 32-by-32-by-32, 4096-cell maximum plan near the player, checks world
+height/border and already-loaded chunks, rejects every target state that creates a block entity and
+every target cell that already contains one, and takes two bounded server-thread snapshot passes
+before worker-side canonicalization. Paper derives the target palette,
+base-region, change-set, palette, and content hashes and never writes the world. Runtime-supplied
+build views are discarded; only the Paper-owned one-shot artifact for the same request/player may be
+published. When that artifact exists, it is the only candidate view, its fallback is rebound to the
+final completion fallback, and a later build attempt first invalidates any earlier artifact.
+
+Build preview publication is disabled by default. Set the exact server-process environment value
+`MINECRAFT_AGENT_BUILD_PREVIEW_ENABLED=true` to advertise and publish the Paper-owned preview to a
+compatible client. Fabric revalidates gzip, strict UTF-8, duplicate-free RFC 8785 JSON, palette,
+registry BlockStates, geometry, counts, and hashes, then atomically creates a connection-scoped
+native `.litematica`. Loading remains an explicit local action; removal and the native Material List
+HUD stay presentation-only. No Easy Place, printer, automatic placement, world apply, or rollback is
+enabled.
+
+After receiving a build-preview view, use its UUID for the explicit presentation actions:
+
+```text
+/agent ui preview <view-id>
+/agent ui materials <view-id>
+```
 
 The opt-in exact-server smoke pins Paper `1.21.11-132`, verifies its SHA-256, limits the heap to 512
 MiB, and runs every case serially:
@@ -255,7 +298,8 @@ server. It cleans up all temporary worlds, logs, credentials, and child processe
 The smoke includes an Offline/restart/on/Runtime-loss/on lifecycle and checks clean dynamic command
 unregistration in addition to the three initial transport-failure cases. It does not connect a real
 player, graphical Fabric client, or Litematica installation, and does not click a proposal; focused
-tests cover those Phase 8/10 domain and protocol boundaries.
+tests cover the Phase 8/10/11 domain and protocol boundaries. Graphical Phase 11 verification is a
+separate manual-client lane.
 
 ## Package
 
@@ -267,10 +311,12 @@ Artifacts are placed under `dist/`. The package contains the implemented persist
 resume, explicit module path, shared tool/proposal schemas, Runtime loop, Paper read adapters, and
 Paper proposal authorization and audit infrastructure. It also contains the bounded Capability Pack
 loader, exact approval and immutable catalog/diff model, required-only typed renderer, and parse-only
-Brigadier preflight. It also contains the optional Fabric channel, structured-view transfer and
-rendering, local overlay/preferences, and exact-version Litematica adapter. The production proposal
-tool catalog remains empty; Capability proposal creation, generic execution, Phase 11 build-preview
-generation, and world changes remain unavailable.
+Brigadier preflight. It also contains private Markdown knowledge search, player-owned project
+storage, Paper landmark/search and authoritative build-preview services, recipe v2 presentation,
+the optional Fabric channel, structured-view transfer/rendering, local overlay/preferences, and
+native Litematica generation. The production proposal tool catalog remains empty; Capability
+proposal creation, generic execution, world apply/rollback, and every Minecraft mutation remain
+unavailable.
 
 The packaged Runtime preserves its compiled layout and includes the shared protocol schemas and
 configuration template. Install production dependencies before startup:
@@ -310,3 +356,7 @@ Phase 10 binds optional-client traffic to actual player/generation state, exact 
 transfer budgets, and closed presentation models. ACKs, UI controls, selections, preview state, and
 material results never grant permission or confirm a proposal. The only reflection is an isolated,
 exact-version, presentation-only Litematica adapter; it is not a model or server execution surface.
+Phase 11 treats local documents and stored plans as data, keeps landmarks and build snapshots under
+Paper authority, derives recipe presentation only from authoritative registry results, and rejects
+Runtime-authored build views. Its hashes and local schematic are preview evidence only; the empty
+production write catalog remains the final barrier against world mutation.

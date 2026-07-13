@@ -21,6 +21,8 @@ export {
   type LoadedRuntimeConfig,
   type LoadRuntimeConfigOptions,
   type RuntimeConfig,
+  type KnowledgeRootKind,
+  type RuntimeKnowledgeRootPath,
   type RuntimeConfigWarning,
   type RuntimeConfigWarningCode,
 } from "./config/runtime-config.js";
@@ -84,17 +86,50 @@ export {
   type SqliteConversationRepositoryOptions,
 } from "./storage/conversation-repository.js";
 export { CURRENT_RUNTIME_SCHEMA_VERSION, migrateRuntimeStorage } from "./storage/migrations.js";
-export { ToolRegistry, type CoreToolDescriptor } from "./tools/tool-registry.js";
+export {
+  SqliteProjectRepository,
+  type CreateProject,
+  type CreateProjectResult,
+  type ProjectListResult,
+  type ProjectOwner,
+  type ProjectPlan,
+  type ProjectRepository,
+  type ProjectSummary,
+  type SqliteProjectRepositoryOptions,
+  type StoredProject,
+  type UpdateProject,
+  type UpdateProjectResult,
+} from "./storage/project-repository.js";
+export {
+  ToolRegistry,
+  type CoreToolDescriptor,
+  type ToolExecutionTarget,
+} from "./tools/tool-registry.js";
+export {
+  LocalToolExecutor,
+  UnavailableLocalToolExecutor,
+  type LocalToolCall,
+  type LocalToolExecution,
+} from "./tools/local-tool-executor.js";
 export {
   coreToolIds,
   type CoreToolId,
   type ToolCallPayload,
+  type ToolExecutionResult,
   type ToolResultError,
   type ToolResultPayload,
   type ToolResultSource,
   type ToolResultStatus,
   type ToolResultTrust,
 } from "./tools/tool-types.js";
+export {
+  MarkdownKnowledgeIndex,
+  type KnowledgeChunk,
+  type KnowledgeDocumentKind,
+  type KnowledgeSearchMatch,
+  type KnowledgeSearchResult,
+} from "./knowledge/markdown-index.js";
+export { loadMarkdownKnowledge } from "./knowledge/markdown-loader.js";
 export { buildContextWindow, type ContextWindowLimits } from "./sessions/context-window.js";
 export {
   RequestAdmissionController,

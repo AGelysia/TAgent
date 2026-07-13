@@ -40,11 +40,22 @@ public final class ClientViewSelector {
             .filter(
                 view ->
                     schemas.canPublish(
-                        connection.orElseThrow(), view.viewType(), view.viewSchemaVersion()))
+                            connection.orElseThrow(), view.viewType(), view.viewSchemaVersion())
+                        && supportsContentVersion(connection.orElseThrow(), view))
             .findFirst()
             .stream()
             .toList();
     return new Selection(fallbackText, selected, connection.orElseThrow().generation());
+  }
+
+  private static boolean supportsContentVersion(
+      ClientConnectionRegistry.ClientConnection connection, ClientStructuredView view) {
+    if (view.viewType() != ClientViewType.RECIPE) {
+      return true;
+    }
+    var schemaVersion = view.content().get("schemaVersion").getAsString();
+    var required = "2.0".equals(schemaVersion) ? 2 : 1;
+    return connection.handshake().capabilities().supports(ClientFeature.RECIPE_VIEW, required);
   }
 
   private static void requireFallback(String fallbackText) {

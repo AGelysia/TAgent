@@ -4,12 +4,15 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import dev.minecraftagent.paper.landmark.LandmarkCatalog;
+import dev.minecraftagent.paper.preview.PaperBuildPreviewService;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.function.Supplier;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
@@ -52,12 +55,33 @@ public final class BukkitReadToolExecutor implements ReadToolExecutor {
   private final Server server;
   private final ReadToolRegistry registry;
   private final MainThreadScheduler mainThread;
+  private final Supplier<LandmarkCatalog> landmarkCatalog;
+  private final PaperBuildPreviewService buildPreviews;
 
   public BukkitReadToolExecutor(
       Server server, ReadToolRegistry registry, MainThreadScheduler mainThread) {
+    this(server, registry, mainThread, LandmarkCatalog::empty, null);
+  }
+
+  public BukkitReadToolExecutor(
+      Server server,
+      ReadToolRegistry registry,
+      MainThreadScheduler mainThread,
+      Supplier<LandmarkCatalog> landmarkCatalog) {
+    this(server, registry, mainThread, landmarkCatalog, null);
+  }
+
+  public BukkitReadToolExecutor(
+      Server server,
+      ReadToolRegistry registry,
+      MainThreadScheduler mainThread,
+      Supplier<LandmarkCatalog> landmarkCatalog,
+      PaperBuildPreviewService buildPreviews) {
     this.server = Objects.requireNonNull(server);
     this.registry = Objects.requireNonNull(registry);
     this.mainThread = Objects.requireNonNull(mainThread);
+    this.landmarkCatalog = Objects.requireNonNull(landmarkCatalog);
+    this.buildPreviews = buildPreviews;
   }
 
   @Override
@@ -67,6 +91,10 @@ public final class BukkitReadToolExecutor implements ReadToolExecutor {
     try {
       mainThread.execute(
           () -> {
+            if (call.tool().equals("build.preview.create")) {
+              beginBuildPreview(call, future);
+              return;
+            }
             if (call.tool().equals("server.recipe.lookup")
                 || call.tool().equals("server.recipe.uses")) {
               beginRecipeScan(call, future);
@@ -101,6 +129,50 @@ public final class BukkitReadToolExecutor implements ReadToolExecutor {
     return future;
   }
 
+  private void beginBuildPreview(ReadToolCall call, CompletableFuture<ReadToolResult> future) {
+    if (buildPreviews != null) {
+      buildPreviews.discard(call.requestId());
+    }
+    var validation = registry.validate(call.tool(), call.module(), call.arguments());
+    if (!validation.accepted()) {
+      future.complete(validation.rejection());
+      return;
+    }
+    if (buildPreviews == null) {
+      future.complete(
+          ReadToolResult.failed(
+              ReadToolResult.Source.PAPER_API,
+              "BUILD_PREVIEW_UNAVAILABLE",
+              "Build preview generation is not available.",
+              false));
+      return;
+    }
+    try {
+      buildPreviews
+          .execute(call)
+          .whenComplete(
+              (result, error) -> {
+                if (error == null && result != null) {
+                  future.complete(result);
+                } else {
+                  future.complete(
+                      ReadToolResult.failed(
+                          ReadToolResult.Source.PAPER_API,
+                          "BUILD_PREVIEW_FAILED",
+                          "The server could not create this preview.",
+                          false));
+                }
+              });
+    } catch (RuntimeException error) {
+      future.complete(
+          ReadToolResult.failed(
+              ReadToolResult.Source.PAPER_API,
+              "BUILD_PREVIEW_FAILED",
+              "The server could not create this preview.",
+              false));
+    }
+  }
+
   private ReadToolResult snapshot(ReadToolCall call) {
     var validation = registry.validate(call.tool(), call.module(), call.arguments());
     if (!validation.accepted()) {
@@ -119,9 +191,23 @@ public final class BukkitReadToolExecutor implements ReadToolExecutor {
           case "player.held_item.read" -> heldItemsSnapshot(player);
           case "server.info.read" -> serverInfoSnapshot(server);
           case "server.plugins.list" -> pluginsSnapshot(server);
+          case "landmark.search" ->
+              landmarkSnapshot(player, call.arguments(), landmarkCatalog.get());
           default -> throw new IllegalStateException("Validated read tool has no executor");
         };
     return ReadToolResult.succeeded(validation.descriptor().source(), result);
+  }
+
+  static JsonObject landmarkSnapshot(
+      Player player, JsonObject arguments, LandmarkCatalog landmarkCatalog) {
+    var location = player.getLocation();
+    return landmarkCatalog.search(
+        arguments.get("query").getAsString(),
+        player.getWorld().getKey().toString(),
+        location.getX(),
+        location.getY(),
+        location.getZ(),
+        player::hasPermission);
   }
 
   private ReadToolResult rejected(String code, String message) {
@@ -315,8 +401,14 @@ public final class BukkitReadToolExecutor implements ReadToolExecutor {
         scan.skipped = true;
         return;
       }
-      if (scan.uses && !row.uses(scan.material)) {
-        return;
+      if (scan.uses) {
+        if (!row.inputsKnown()) {
+          scan.skipped = true;
+          return;
+        }
+        if (!row.uses(scan.material)) {
+          return;
+        }
       }
       if (scan.uses) {
         scan.totalMatches++;
@@ -513,7 +605,10 @@ public final class BukkitReadToolExecutor implements ReadToolExecutor {
     }
     var resultMaterial =
         recipeResult == null || isAir(recipeResult.getType()) ? null : recipeResult.getType();
-    return new RecipeRow(keyed.getKey().toString(), resultMaterial, ingredients, json);
+    var inputsKnown =
+        !"unsupported".equals(layout.get("kind").getAsString())
+            && ingredients.stream().allMatch(Ingredient::choiceKnown);
+    return new RecipeRow(keyed.getKey().toString(), resultMaterial, ingredients, inputsKnown, json);
   }
 
   static JsonObject recipeSnapshot(Recipe recipe) {
@@ -681,14 +776,14 @@ public final class BukkitReadToolExecutor implements ReadToolExecutor {
     }
     ItemMeta meta = item.getItemMeta();
     if (meta.hasCustomName() && meta.customName() != null) {
-      result.addProperty("customName", bounded(PLAIN.serialize(meta.customName()), 512));
+      result.addProperty("customName", safeVisibleText(PLAIN.serialize(meta.customName()), 512));
     }
     if (meta.hasLore() && meta.lore() != null) {
       var lore = new JsonArray();
       meta.lore().stream()
           .limit(32)
           .map(PLAIN::serialize)
-          .map(line -> bounded(line, 512))
+          .map(line -> safeVisibleText(line, 512))
           .forEach(lore::add);
       result.add("lore", lore);
     }
@@ -708,11 +803,51 @@ public final class BukkitReadToolExecutor implements ReadToolExecutor {
     return result;
   }
 
+  static String safeVisibleText(String value, int limit) {
+    Objects.requireNonNull(value);
+    if (limit < 0) {
+      throw new IllegalArgumentException("limit must not be negative");
+    }
+    var result = new StringBuilder(Math.min(value.length(), limit));
+    var index = 0;
+    var accepted = 0;
+    while (index < value.length() && accepted < limit) {
+      var character = value.charAt(index++);
+      final int codePoint;
+      if (Character.isHighSurrogate(character)) {
+        if (index >= value.length() || !Character.isLowSurrogate(value.charAt(index))) {
+          continue;
+        }
+        codePoint = Character.toCodePoint(character, value.charAt(index++));
+      } else if (Character.isLowSurrogate(character)) {
+        continue;
+      } else {
+        codePoint = character;
+      }
+      if (unsafeVisibleCodePoint(codePoint)) {
+        continue;
+      }
+      result.appendCodePoint(codePoint);
+      accepted++;
+    }
+    return result.toString();
+  }
+
   private static String bounded(String value, int limit) {
     Objects.requireNonNull(value);
     return value.codePointCount(0, value.length()) <= limit
         ? value
         : value.substring(0, value.offsetByCodePoints(0, limit));
+  }
+
+  private static boolean unsafeVisibleCodePoint(int value) {
+    return value <= 0x1f
+        || value >= 0x7f && value <= 0x9f
+        || value == 0x061c
+        || value == 0x200e
+        || value == 0x200f
+        || value >= 0x202a && value <= 0x202e
+        || value >= 0x2066 && value <= 0x2069;
   }
 
   private record Ingredient(int slot, int x, int y, JsonObject choice) {
@@ -737,10 +872,18 @@ public final class BukkitReadToolExecutor implements ReadToolExecutor {
       }
       return false;
     }
+
+    boolean choiceKnown() {
+      return !"unsupported".equals(choice.get("choiceType").getAsString());
+    }
   }
 
   private record RecipeRow(
-      String id, Material result, List<Ingredient> ingredients, JsonObject json) {
+      String id,
+      Material result,
+      List<Ingredient> ingredients,
+      boolean inputsKnown,
+      JsonObject json) {
     boolean produces(Material material) {
       return result == material;
     }

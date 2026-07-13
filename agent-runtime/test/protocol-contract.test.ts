@@ -68,6 +68,9 @@ describe("shared protocol contract manifest", () => {
             semanticEvaluation.errors.map(({ code }) => code),
             formatSemanticFailure(contractCase.id, validation.validator, semanticEvaluation.errors),
           ).toContain(validation.errorCode);
+          if (validation.validator === "recipe-view-v2") {
+            expect(semanticEvaluation.errors[0]?.code).toBe(validation.errorCode);
+          }
         }
       }
     }

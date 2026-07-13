@@ -8,6 +8,8 @@ import dev.minecraftagent.client.transfer.ViewTransferEncoding;
 import dev.minecraftagent.client.transfer.ViewTransferFailure;
 import dev.minecraftagent.client.transfer.ViewTransferMode;
 import dev.minecraftagent.client.ui.OverlayController;
+import dev.minecraftagent.client.ui.OverlayController.ViewUpdateResult;
+import dev.minecraftagent.client.view.BuildPreviewView;
 import dev.minecraftagent.client.view.StructuredView;
 import dev.minecraftagent.client.view.StructuredViewDecoder;
 import dev.minecraftagent.client.view.ViewDecodeException;
@@ -15,6 +17,7 @@ import java.util.Base64;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 
@@ -221,22 +224,67 @@ public final class ClientPresentationSession {
       sendRejected(chunk.transferId(), "VIEW_" + failure.code().name());
       return;
     }
+    try {
+      if (view.content() instanceof BuildPreviewView && !actions.stage(view)) {
+        sendRejected(chunk.transferId(), "VIEW_PREVIEW_PERSIST_FAILED");
+        return;
+      }
+    } catch (RuntimeException failure) {
+      sendRejected(chunk.transferId(), "VIEW_PREVIEW_PERSIST_FAILED");
+      return;
+    }
     var descriptor = verified.descriptor();
     dispatchForGeneration(
         descriptor.generation(),
         () -> show(descriptor.generation(), chunk.transferId(), descriptor.mode(), view),
-        chunk.transferId());
+        chunk.transferId(),
+        () -> discardStaged(view));
   }
 
   private void show(
       long expectedGeneration, UUID transferId, ViewTransferMode mode, StructuredView view) {
-    var result = mode == ViewTransferMode.SHOW ? overlay.show(view) : overlay.update(view);
+    ViewUpdateResult result;
+    try {
+      result = mode == ViewTransferMode.SHOW ? overlay.show(view) : overlay.update(view);
+    } catch (RuntimeException | LinkageError failure) {
+      discardStaged(view);
+      throw failure;
+    }
     switch (result) {
-      case ADDED, UPDATED -> sendAck(expectedGeneration, transferId, true, "VIEW_DISPLAYED");
-      case IGNORED_STALE -> sendRejected(expectedGeneration, transferId, "VIEW_STALE");
-      case UNKNOWN_VIEW -> sendRejected(expectedGeneration, transferId, "VIEW_UNKNOWN");
-      case CAPACITY_REJECTED ->
-          sendRejected(expectedGeneration, transferId, "VIEW_CAPACITY_REJECTED");
+      case ADDED, UPDATED -> {
+        boolean committed;
+        try {
+          committed = actions.commit(view, overlay.openViewIds());
+        } catch (RuntimeException | LinkageError failure) {
+          committed = false;
+        }
+        if (!committed) {
+          discardStaged(view);
+          sendRejected(expectedGeneration, transferId, "VIEW_PREVIEW_PERSIST_FAILED");
+        } else {
+          sendAck(expectedGeneration, transferId, true, "VIEW_DISPLAYED");
+        }
+      }
+      case IGNORED_STALE -> {
+        discardStaged(view);
+        sendRejected(expectedGeneration, transferId, "VIEW_STALE");
+      }
+      case UNKNOWN_VIEW -> {
+        discardStaged(view);
+        sendRejected(expectedGeneration, transferId, "VIEW_UNKNOWN");
+      }
+      case CAPACITY_REJECTED -> {
+        discardStaged(view);
+        sendRejected(expectedGeneration, transferId, "VIEW_CAPACITY_REJECTED");
+      }
+    }
+  }
+
+  private void discardStaged(StructuredView view) {
+    try {
+      actions.discard(view);
+    } catch (RuntimeException | LinkageError ignored) {
+      // The connection lifecycle still clears every registered artifact as a final boundary.
     }
   }
 
@@ -297,11 +345,17 @@ public final class ClientPresentationSession {
   }
 
   private void dispatchForGeneration(long expectedGeneration, Runnable action, UUID transferId) {
+    dispatchForGeneration(expectedGeneration, action, transferId, () -> {});
+  }
+
+  private void dispatchForGeneration(
+      long expectedGeneration, Runnable action, UUID transferId, Runnable rejected) {
     try {
       if (!clientThread.execute(
           () -> {
             synchronized (this) {
               if (!accepted || generation != expectedGeneration) {
+                rejected.run();
                 return;
               }
             }
@@ -311,9 +365,11 @@ public final class ClientPresentationSession {
               sendError(expectedGeneration, transferId, "CLIENT_PRESENTATION_FAILED");
             }
           })) {
+        rejected.run();
         sendError(expectedGeneration, transferId, "CLIENT_DISPATCH_FAILED");
       }
     } catch (RuntimeException failure) {
+      rejected.run();
       sendError(expectedGeneration, transferId, "CLIENT_DISPATCH_FAILED");
     }
   }
@@ -392,6 +448,22 @@ public final class ClientPresentationSession {
 
   public interface PresentationActionSink {
     PresentationAction prepare(ClientServerMessage.Action action, UUID viewId);
+
+    /**
+     * Runs on the protocol worker. It may persist a validated preview but must not load it; its
+     * result and the later display ACK are availability signals, never world-write authorization.
+     */
+    default boolean stage(StructuredView view) {
+      return true;
+    }
+
+    /** Commits a staged artifact only after the HUD accepted the corresponding view. */
+    default boolean commit(StructuredView view, Set<UUID> displayedViewIds) {
+      return true;
+    }
+
+    /** Rolls back an artifact staged for a view that was not displayed. */
+    default void discard(StructuredView view) {}
 
     default void clear(UUID viewId) {}
 

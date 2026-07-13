@@ -8,6 +8,7 @@ import { checkLogDirectory } from "../health/filesystem.js";
 import { checkModelProvider, type ModelProviderHealthCheck } from "../health/model-provider.js";
 import { registerHealthRoute, RuntimeHealthState } from "../health/runtime-health.js";
 import { checkRuntimeSqlite, type RuntimeSqliteHandle } from "../health/sqlite.js";
+import { loadMarkdownKnowledge } from "../knowledge/markdown-loader.js";
 import { RuntimeLogger } from "../observability/runtime-logger.js";
 import { SchemaRegistry } from "../protocol/schema-registry.js";
 import { UnsupportedModelProvider, type ModelProvider } from "../providers/model-provider.js";
@@ -18,6 +19,8 @@ import {
   SqliteConversationRepository,
 } from "../storage/conversation-repository.js";
 import { migrateRuntimeStorage } from "../storage/migrations.js";
+import { SqliteProjectRepository } from "../storage/project-repository.js";
+import { LocalToolExecutor } from "../tools/local-tool-executor.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
 import { registerPaperHandshakeRoute } from "../transport/paper-handshake.js";
 import { runtimeIdentity, type RuntimeIdentity } from "../version.js";
@@ -81,6 +84,21 @@ async function checkProtocolSchema(protocolRoot?: string): Promise<SchemaRegistr
       "tools/server-recipe-lookup-result.schema.json",
       "tools/server-recipe-uses-arguments.schema.json",
       "tools/server-recipe-uses-result.schema.json",
+      "tools/landmark-search-arguments.schema.json",
+      "tools/landmark-search-result.schema.json",
+      "tools/build-preview-create-arguments.schema.json",
+      "tools/build-preview-create-result.schema.json",
+      "tools/server-docs-search-arguments.schema.json",
+      "tools/server-docs-search-result.schema.json",
+      "tools/project-common.schema.json",
+      "tools/project-list-arguments.schema.json",
+      "tools/project-list-result.schema.json",
+      "tools/project-read-arguments.schema.json",
+      "tools/project-read-result.schema.json",
+      "tools/project-create-arguments.schema.json",
+      "tools/project-create-result.schema.json",
+      "tools/project-update-arguments.schema.json",
+      "tools/project-update-result.schema.json",
     ];
     if (requiredSchemas.some((schema) => !registry.schemaReferences.includes(schema))) {
       throw new Error("A required protocol schema alias is unavailable");
@@ -113,11 +131,13 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
     sqlite = await checkRuntimeSqlite(loaded.paths.rootDirectory, loaded.paths.sqlite);
     const storageNow = options.now?.() ?? new Date();
     let conversations: DisabledConversationRepository | SqliteConversationRepository;
+    let projects: SqliteProjectRepository;
     try {
       migrateRuntimeStorage(sqlite.database, storageNow.toISOString());
       conversations = loaded.config.privacy.storeConversations
         ? new SqliteConversationRepository(sqlite.database)
         : new DisabledConversationRepository();
+      projects = new SqliteProjectRepository(sqlite.database);
       if (loaded.config.privacy.storeConversations && loaded.config.privacy.retentionDays > 0) {
         const cutoff = new Date(
           storageNow.getTime() - loaded.config.privacy.retentionDays * 24 * 60 * 60 * 1000,
@@ -134,6 +154,9 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
       });
     }
 
+    const knowledge = await loadMarkdownKnowledge(loaded.paths.knowledgeRoots);
+    const localTools = new LocalToolExecutor(knowledge, projects);
+
     const provider =
       options.modelProvider ??
       (options.modelProviderHealthCheck === undefined
@@ -148,6 +171,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
       config: loaded.config,
       conversations,
       tools,
+      localTools,
       ...(options.now === undefined ? {} : { now: () => options.now?.().getTime() ?? Date.now() }),
     });
     app = createRuntimeApp();

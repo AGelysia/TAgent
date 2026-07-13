@@ -54,7 +54,16 @@ describe("context windows and module manifests", () => {
     expect(registry.get("locate").toolAllowlist).toEqual([
       "player.context.read",
       "server.info.read",
+      "landmark.search",
     ]);
+    expect(registry.get("guide").toolAllowlist).toContain("server.docs.search");
+    expect(registry.get("build").toolAllowlist).toContain("build.preview.create");
+    expect(registry.get("build").toolAllowlist).toContain("project.read");
+    expect(registry.get("build").instructions).toContain("call project.read in this request");
+    expect(registry.get("build").instructions).toContain("Never claim to have changed the world");
+    expect(registry.get("project").toolAllowlist).toEqual(
+      expect.arrayContaining(["project.list", "project.read", "project.create", "project.update"]),
+    );
     expect(new Set(registry.list().map((manifest) => manifest.instructions)).size).toBe(
       moduleIds.length,
     );

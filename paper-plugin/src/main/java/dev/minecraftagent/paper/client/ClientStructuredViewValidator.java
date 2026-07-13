@@ -108,6 +108,12 @@ final class ClientStructuredViewValidator {
   }
 
   private static void recipeView(JsonObject content) {
+    if (content.has("schemaVersion")
+        && content.get("schemaVersion").isJsonPrimitive()
+        && "2.0".equals(content.get("schemaVersion").getAsString())) {
+      recipeViewV2(content);
+      return;
+    }
     requireFields(content, Set.of("schemaVersion", "query", "selectedRecipe", "recipes"));
     requireLiteral(content, "schemaVersion", "1.0");
     var query = object(content, "query");
@@ -120,6 +126,190 @@ final class ClientStructuredViewValidator {
       invalid();
     }
     recipes.forEach(recipe -> recipe(asObject(recipe)));
+  }
+
+  private static void recipeViewV2(JsonObject content) {
+    requireFields(
+        content,
+        Set.of("schemaVersion", "query", "selectedRecipe", "totalMatches", "truncated", "recipes"));
+    requireLiteral(content, "schemaVersion", "2.0");
+    var query = object(content, "query");
+    requireFields(query, Set.of("mode", "itemId"));
+    requireEnum(query, "mode", Set.of("lookup", "uses"));
+    namespacedId(query, "itemId");
+    var recipes = array(content, "recipes", 1, 16);
+    var selected = integer(content, "selectedRecipe", 0, 15);
+    var totalMatches = integer(content, "totalMatches", recipes.size(), 1_000_000);
+    var truncated = bool(content, "truncated");
+    if (selected >= recipes.size() || (!truncated && totalMatches != recipes.size())) {
+      invalid();
+    }
+    var ids = new HashSet<String>();
+    for (var element : recipes) {
+      var recipe = asObject(element);
+      recipeV2(recipe);
+      if (!ids.add(recipe.get("recipeId").getAsString())) {
+        invalid();
+      }
+    }
+  }
+
+  private static void recipeV2(JsonObject recipe) {
+    requireAllowed(
+        recipe,
+        Set.of(
+            "recipeId",
+            "recipeType",
+            "source",
+            "result",
+            "layout",
+            "remainingItems",
+            "processing"));
+    requirePresent(
+        recipe, Set.of("recipeId", "recipeType", "source", "result", "layout", "remainingItems"));
+    namespacedId(recipe, "recipeId");
+    var type =
+        requireEnum(
+            recipe,
+            "recipeType",
+            Set.of(
+                "shaped",
+                "shapeless",
+                "smelting",
+                "blasting",
+                "smoking",
+                "campfire_cooking",
+                "stonecutting",
+                "smithing_transform",
+                "smithing_trim",
+                "transmute",
+                "complex",
+                "custom"));
+    recipeSourceV2(object(recipe, "source"));
+    if (!recipe.get("result").isJsonNull()) {
+      itemStack(object(recipe, "result"));
+    }
+    var logicalSlots = layoutV2(type, object(recipe, "layout"));
+    var remainingSlots = new HashSet<Integer>();
+    for (var element : array(recipe, "remainingItems", 0, 9)) {
+      var slot = remainingItem(element);
+      if (!logicalSlots.contains(slot) || !remainingSlots.add(slot)) {
+        invalid();
+      }
+    }
+    var cooking = Set.of("smelting", "blasting", "smoking", "campfire_cooking").contains(type);
+    if (cooking != recipe.has("processing")) {
+      invalid();
+    }
+    if (cooking) {
+      processingV2(object(recipe, "processing"));
+    }
+  }
+
+  private static void recipeSourceV2(JsonObject source) {
+    requireFields(source, Set.of("kind", "providerId"));
+    var kind = requireEnum(source, "kind", Set.of("server_registry", "plugin_provider"));
+    if ("server_registry".equals(kind)) {
+      if (!source.get("providerId").isJsonNull()) {
+        invalid();
+      }
+    } else {
+      if (source.get("providerId").isJsonNull()) {
+        invalid();
+      }
+      namespacedId(source, "providerId");
+    }
+  }
+
+  private static Set<Integer> layoutV2(String recipeType, JsonObject layout) {
+    var expected =
+        switch (recipeType) {
+          case "shaped", "shapeless" -> "grid";
+          case "smelting", "blasting", "smoking", "campfire_cooking", "stonecutting" ->
+              "single_input";
+          case "smithing_transform", "smithing_trim" -> "smithing";
+          case "transmute" -> "transmute";
+          case "complex", "custom" -> "unsupported";
+          default -> throw new ClientProtocolException("CLIENT_VIEW_CONTENT_INVALID");
+        };
+    if (!expected.equals(string(layout, "kind", 1, 32))) {
+      invalid();
+    }
+    var slots = new HashSet<Integer>();
+    switch (expected) {
+      case "grid" -> {
+        requireFields(layout, Set.of("kind", "width", "height", "ingredients"));
+        var width = integer(layout, "width", 1, 3);
+        var height = integer(layout, "height", 1, 3);
+        var coordinates = new HashSet<String>();
+        for (var element : array(layout, "ingredients", 1, 9)) {
+          var ingredient = asObject(element);
+          requireFields(ingredient, Set.of("slot", "x", "y", "ingredient"));
+          var slot = integer(ingredient, "slot", 0, 8);
+          var x = integer(ingredient, "x", 0, 2);
+          var y = integer(ingredient, "y", 0, 2);
+          if (x >= width
+              || y >= height
+              || slot != y * width + x
+              || !slots.add(slot)
+              || !coordinates.add(x + ":" + y)) {
+            invalid();
+          }
+          ingredientChoiceV2(object(ingredient, "ingredient"));
+        }
+      }
+      case "single_input" -> {
+        requireFields(layout, Set.of("kind", "ingredient"));
+        ingredientChoiceV2(object(layout, "ingredient"));
+        slots.add(0);
+      }
+      case "smithing" -> {
+        requireFields(layout, Set.of("kind", "template", "base", "addition"));
+        ingredientChoiceV2(object(layout, "template"));
+        ingredientChoiceV2(object(layout, "base"));
+        ingredientChoiceV2(object(layout, "addition"));
+        slots.addAll(Set.of(0, 1, 2));
+      }
+      case "transmute" -> {
+        requireFields(layout, Set.of("kind", "input", "material"));
+        ingredientChoiceV2(object(layout, "input"));
+        ingredientChoiceV2(object(layout, "material"));
+        slots.addAll(Set.of(0, 1));
+      }
+      case "unsupported" -> {
+        requireFields(layout, Set.of("kind", "reason"));
+        requireLiteral(layout, "reason", "UNSUPPORTED_RECIPE_LAYOUT");
+      }
+      default -> invalid();
+    }
+    return Set.copyOf(slots);
+  }
+
+  private static void ingredientChoiceV2(JsonObject choice) {
+    requireAllowed(choice, Set.of("choiceType", "tagId", "reason", "alternatives"));
+    requirePresent(choice, Set.of("choiceType", "alternatives"));
+    var type =
+        requireEnum(
+            choice, "choiceType", Set.of("material", "exact", "item_type", "tag", "unsupported"));
+    if ("unsupported".equals(type)) {
+      requireFields(choice, Set.of("choiceType", "reason", "alternatives"));
+      requireLiteral(choice, "reason", "UNSUPPORTED_INGREDIENT_CHOICE");
+      array(choice, "alternatives", 0, 0);
+      return;
+    }
+    if ("tag".equals(type)) {
+      requireFields(choice, Set.of("choiceType", "tagId", "alternatives"));
+      namespacedId(choice, "tagId");
+    } else {
+      requireFields(choice, Set.of("choiceType", "alternatives"));
+    }
+    array(choice, "alternatives", 1, 64).forEach(alternative -> itemStack(asObject(alternative)));
+  }
+
+  private static void processingV2(JsonObject processing) {
+    requireFields(processing, Set.of("timeTicks", "experience"));
+    integer(processing, "timeTicks", 0, 120000);
+    decimal(processing, "experience", BigDecimal.ZERO, BigDecimal.valueOf(1_000_000));
   }
 
   private static void recipe(JsonObject recipe) {
@@ -329,6 +519,7 @@ final class ClientStructuredViewValidator {
             "origin",
             "transform",
             "baseRegionHash",
+            "changeSetHash",
             "contentHash",
             "paletteHash",
             "contentFormat",
@@ -344,7 +535,7 @@ final class ClientStructuredViewValidator {
     uuid(content, "previewId");
     uuid(content, "projectId");
     integer(content, "revision", 1, Integer.MAX_VALUE);
-    var operation = requireEnum(content, "operation", Set.of("create", "modify"));
+    requireEnum(content, "operation", Set.of("create", "modify"));
     namespacedId(content, "dimension");
     var bounds = object(content, "bounds");
     requireFields(bounds, Set.of("min", "max"));
@@ -352,30 +543,40 @@ final class ClientStructuredViewValidator {
     position(object(bounds, "max"));
     position(object(content, "origin"));
     transform(object(content, "transform"));
-    if ("create".equals(operation)) {
-      if (!content.get("baseRegionHash").isJsonNull()) {
-        invalid();
-      }
-    } else {
-      sha256(content, "baseRegionHash");
-    }
+    sha256(content, "baseRegionHash");
+    sha256(content, "changeSetHash");
     sha256(content, "contentHash");
     sha256(content, "paletteHash");
     requireLiteral(content, "contentFormat", "minecraft-agent.palette-v1");
     requireEnum(content, "encoding", Set.of("identity+base64", "gzip+base64"));
     var compressedBytes = integer(content, "compressedBytes", 1, 16 * 1024 * 1024);
     integer(content, "uncompressedBytes", 1, 64 * 1024 * 1024);
-    integer(content, "blockCount", 1, 250000);
+    integer(content, "blockCount", 0, 250000);
     difference(object(content, "difference"));
-    array(content, "palette", 1, 4096).forEach(entry -> paletteEntry(asObject(entry)));
+    var palette = array(content, "palette", 0, 4096);
+    for (var index = 0; index < palette.size(); index++) {
+      if (paletteEntry(asObject(palette.get(index))) != index) {
+        invalid();
+      }
+    }
     var chunkCount = integer(content, "chunkCount", 1, 256);
     var chunks = array(content, "chunks", 1, 256);
     if (chunks.size() != chunkCount) {
       invalid();
     }
     var total = 0L;
-    for (var index = 0; index < chunks.size(); index++) {
-      total += previewChunk(asObject(chunks.get(index)), index);
+    var indexes = new HashSet<Integer>();
+    for (var chunk : chunks) {
+      var validated = previewChunk(asObject(chunk));
+      if (!indexes.add(validated.index())) {
+        invalid();
+      }
+      total += validated.byteLength();
+    }
+    for (var index = 0; index < chunkCount; index++) {
+      if (!indexes.contains(index)) {
+        invalid();
+      }
     }
     if (total != compressedBytes) {
       invalid();
@@ -405,9 +606,9 @@ final class ClientStructuredViewValidator {
     integer(difference, "removed", 0, 250000);
   }
 
-  private static void paletteEntry(JsonObject entry) {
+  private static int paletteEntry(JsonObject entry) {
     requireFields(entry, Set.of("id", "blockId", "properties"));
-    integer(entry, "id", 0, 4095);
+    var id = integer(entry, "id", 0, 4095);
     namespacedId(entry, "blockId");
     var properties = object(entry, "properties");
     if (properties.size() > 32) {
@@ -422,13 +623,12 @@ final class ClientStructuredViewValidator {
         invalid();
       }
     }
+    return id;
   }
 
-  private static int previewChunk(JsonObject chunk, int expectedIndex) {
+  private static ValidatedChunk previewChunk(JsonObject chunk) {
     requireFields(chunk, Set.of("index", "byteLength", "sha256", "data"));
-    if (integer(chunk, "index", 0, 255) != expectedIndex) {
-      invalid();
-    }
+    var index = integer(chunk, "index", 0, 255);
     var byteLength = integer(chunk, "byteLength", 1, 1024 * 1024);
     var expectedHash = sha256(chunk, "sha256");
     var encoded = string(chunk, "data", 4, 1_398_104);
@@ -443,8 +643,10 @@ final class ClientStructuredViewValidator {
         || !ClientTransferManager.sha256(decoded).equals(expectedHash)) {
       invalid();
     }
-    return byteLength;
+    return new ValidatedChunk(index, byteLength);
   }
+
+  private record ValidatedChunk(int index, int byteLength) {}
 
   private static void boundedJson(JsonElement value, int depth, int[] count) {
     if (depth > 8 || ++count[0] > 512) {

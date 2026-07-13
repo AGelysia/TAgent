@@ -11,6 +11,8 @@ import dev.minecraftagent.client.ui.OverlayController;
 import dev.minecraftagent.client.ui.OverlayPreferences;
 import dev.minecraftagent.client.view.StructuredViewDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -31,6 +33,7 @@ class ClientPresentationSessionTest {
   private static final UUID TRANSFER_ID = UUID.fromString("d0000000-0000-4000-8000-000000000010");
   private static final UUID VIEW_ID = UUID.fromString("d0000000-0000-4000-8000-000000000011");
   private static final UUID REQUEST_ID = UUID.fromString("d0000000-0000-4000-8000-000000000012");
+  private static final UUID BUILD_VIEW_ID = UUID.fromString("88888888-8888-4888-8888-888888888888");
 
   @Test
   void negotiatesReassemblesDisplaysAcknowledgesAndKeepsPinnedPreferenceOnDisconnect()
@@ -250,6 +253,36 @@ class ClientPresentationSessionTest {
     }
   }
 
+  @Test
+  void rollsBackAStagedBuildArtifactWhenTheOverlayRejectsTheUpdate() throws Exception {
+    var outbound = new ArrayList<byte[]>();
+    var actions = new TransactionalActions();
+    var session =
+        session(
+            new OverlayController(OverlayPreferences.defaults()),
+            outbound,
+            actions,
+            action -> {
+              action.run();
+              return true;
+            },
+            new StructuredViewDecoder((blockId, properties) -> {}));
+    session.connect(advertisement());
+    session.receive(
+        frame(
+            "server.hello", "{\"generation\":9,\"accepted\":true,\"viewSchemaVersion\":\"1.0\"}"));
+    outbound.clear();
+    byte[] view = buildView(2);
+
+    session.receive(begin(view, BUILD_VIEW_ID, REQUEST_ID, 2, "update"));
+    session.receive(chunk(view));
+
+    assertEquals(1, actions.stages);
+    assertEquals(0, actions.commits);
+    assertEquals(1, actions.discards);
+    assertEquals("VIEW_UNKNOWN", outboundPayload(outbound.getLast()).get("code").getAsString());
+  }
+
   private static ClientPresentationSession session(
       OverlayController overlay,
       List<byte[]> outbound,
@@ -269,10 +302,19 @@ class ClientPresentationSessionTest {
       List<byte[]> outbound,
       ClientPresentationSession.PresentationActionSink actions,
       ClientPresentationSession.ClientThreadDispatcher dispatcher) {
+    return session(overlay, outbound, actions, dispatcher, new StructuredViewDecoder());
+  }
+
+  private static ClientPresentationSession session(
+      OverlayController overlay,
+      List<byte[]> outbound,
+      ClientPresentationSession.PresentationActionSink actions,
+      ClientPresentationSession.ClientThreadDispatcher dispatcher,
+      StructuredViewDecoder decoder) {
     return new ClientPresentationSession(
         new ClientPayloadCodec(),
         new ViewTransferAccumulator(),
-        new StructuredViewDecoder(),
+        decoder,
         overlay,
         dispatcher,
         outbound::add,
@@ -295,6 +337,25 @@ class ClientPresentationSessionTest {
             + "\",\"pinnable\":true,\"content\":{\"text\":\""
             + text
             + "\"}}")
+        .getBytes(StandardCharsets.UTF_8);
+  }
+
+  private static byte[] buildView(int revision) throws Exception {
+    Path protocol = Path.of(System.getProperty("minecraftAgent.protocolDir"));
+    String content = Files.readString(protocol.resolve("fixtures/valid/build-preview.json"));
+    if (revision != 1) {
+      content = content.replace("\"revision\": 1", "\"revision\": " + revision);
+    }
+    return ("{\"viewSchemaVersion\":\"1.0\",\"viewId\":\""
+            + BUILD_VIEW_ID
+            + "\",\"requestId\":\""
+            + REQUEST_ID
+            + "\",\"viewType\":\"build_preview\",\"revision\":"
+            + revision
+            + ",\"title\":\"Build\",\"fallbackText\":\"Build preview\",\"pinnable\":true,"
+            + "\"content\":"
+            + content
+            + "}")
         .getBytes(StandardCharsets.UTF_8);
   }
 
@@ -429,6 +490,37 @@ class ClientPresentationSessionTest {
         Thread.currentThread().interrupt();
       }
       return invocations::incrementAndGet;
+    }
+  }
+
+  private static final class TransactionalActions
+      implements ClientPresentationSession.PresentationActionSink {
+    private int stages;
+    private int commits;
+    private int discards;
+
+    @Override
+    public ClientPresentationSession.PresentationAction prepare(
+        ClientServerMessage.Action action, UUID viewId) {
+      return () -> {};
+    }
+
+    @Override
+    public boolean stage(dev.minecraftagent.client.view.StructuredView view) {
+      stages++;
+      return true;
+    }
+
+    @Override
+    public boolean commit(
+        dev.minecraftagent.client.view.StructuredView view, java.util.Set<UUID> displayedViewIds) {
+      commits++;
+      return true;
+    }
+
+    @Override
+    public void discard(dev.minecraftagent.client.view.StructuredView view) {
+      discards++;
     }
   }
 }

@@ -5,6 +5,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
@@ -118,6 +121,21 @@ class ClientStructuredViewTest {
     }
     assertInvalid(viewJson("recipe", recipe));
     assertInvalid(viewJson("text", text("safe\u202etext")));
+  }
+
+  @Test
+  void acceptsTheSharedRecipeV2LayoutsAndDynamicResult() throws Exception {
+    var content =
+        JsonParser.parseString(
+                Files.readString(
+                    Path.of(System.getProperty("minecraftAgent.protocolDir"))
+                        .resolve("fixtures/valid/recipe-view-v2.json")))
+            .getAsJsonObject();
+
+    var decoded = ClientStructuredView.fromJson(viewJson("recipe", content));
+
+    assertEquals("2.0", decoded.content().get("schemaVersion").getAsString());
+    assertEquals(6, decoded.content().getAsJsonArray("recipes").size());
   }
 
   private static JsonObject viewJson(String type, JsonObject content) {

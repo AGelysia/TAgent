@@ -13,6 +13,7 @@ import {
   validateProposalArgumentHash,
   validateProtocolVersion,
   validateRecipeView,
+  validateRecipeViewV2,
 } from "../src/protocol/semantic-validation.js";
 import { defaultProtocolRoot } from "../src/protocol/schema-registry.js";
 
@@ -186,6 +187,83 @@ describe("protocol semantic validation", () => {
     expect(validateBuildPreviewChunks(fixture)[0]?.code).toBe("CONTENT_DECOMPRESSION_FAILED");
   });
 
+  it("validates canonical palette-v1 content, palette hashes, geometry, and counts", async () => {
+    const preview = JSON.parse(
+      await readFile(resolve(defaultProtocolRoot(), "fixtures/valid/build-preview.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(validateBuildPreviewChunks(preview)).toEqual([]);
+
+    const wrongPalette = structuredClone(preview);
+    wrongPalette["paletteHash"] = "0".repeat(64);
+    expect(validateBuildPreviewChunks(wrongPalette)[0]?.code).toBe("PALETTE_HASH_MISMATCH");
+
+    const wrongCount = structuredClone(preview);
+    wrongCount["blockCount"] = 0;
+    expect(validateBuildPreviewChunks(wrongCount)[0]?.code).toBe("BLOCK_COUNT_MISMATCH");
+
+    const binaryOrderedPalette = structuredClone(preview);
+    binaryOrderedPalette["palette"] = [
+      { id: 0, blockId: "minecraft:a", properties: { a: "1" } },
+      { id: 1, blockId: "minecraft:a_b", properties: {} },
+    ];
+    binaryOrderedPalette["paletteHash"] = sha256(
+      Buffer.from(
+        '[{"blockId":"minecraft:a","id":0,"properties":{"a":"1"}},{"blockId":"minecraft:a_b","id":1,"properties":{}}]',
+        "utf8",
+      ),
+    );
+    expect(validateBuildPreviewChunks(binaryOrderedPalette)).toEqual([]);
+
+    const nonCanonical = structuredClone(preview);
+    replacePreviewContent(
+      nonCanonical,
+      Buffer.from('{"version":1,"blocks":[{"state":0,"x":0,"y":64,"z":0}]}', "utf8"),
+      false,
+    );
+    expect(validateBuildPreviewChunks(nonCanonical)[0]?.code).toBe("CONTENT_CANONICAL_MISMATCH");
+
+    const duplicateJson = structuredClone(preview);
+    replacePreviewContent(
+      duplicateJson,
+      Buffer.from('{"blocks":[],"blocks":[],"version":1}', "utf8"),
+      false,
+    );
+    expect(validateBuildPreviewChunks(duplicateJson)[0]?.code).toBe("CONTENT_JSON_INVALID");
+  });
+
+  it("rejects concatenated gzip members even when transfer hashes are internally consistent", async () => {
+    const preview = JSON.parse(
+      await readFile(resolve(defaultProtocolRoot(), "fixtures/valid/build-preview.json"), "utf8"),
+    ) as Record<string, unknown>;
+    const original = Buffer.from(
+      ((preview["chunks"] as Array<Record<string, unknown>>)[0]?.["data"] as string) ?? "",
+      "base64",
+    );
+    const member = gzipSync(original);
+    replacePreviewContent(preview, Buffer.concat([member, member]), true, original.length * 2);
+
+    expect(validateBuildPreviewChunks(preview)[0]?.code).toBe("CONTENT_DECOMPRESSION_FAILED");
+  });
+
+  it("rejects the optional gzip header checksum flag consistently across implementations", async () => {
+    const preview = JSON.parse(
+      await readFile(resolve(defaultProtocolRoot(), "fixtures/valid/build-preview.json"), "utf8"),
+    ) as Record<string, unknown>;
+    const original = Buffer.from(
+      ((preview["chunks"] as Array<Record<string, unknown>>)[0]?.["data"] as string) ?? "",
+      "base64",
+    );
+    const withHeaderChecksum = Buffer.concat([
+      Buffer.from([...original.subarray(0, 3), (original[3] ?? 0) | 0x02]),
+      original.subarray(4, 10),
+      Buffer.from([0, 0]),
+      original.subarray(10),
+    ]);
+    replacePreviewContent(preview, withHeaderChecksum, true);
+
+    expect(validateBuildPreviewChunks(preview)[0]?.code).toBe("CONTENT_DECOMPRESSION_FAILED");
+  });
+
   it("reassembles complete chunks by index instead of array order", () => {
     const fixture = validTransferFixture();
     const chunks = fixture["chunks"] as Array<Record<string, unknown>>;
@@ -212,6 +290,28 @@ describe("protocol semantic validation", () => {
     expect(validateRecipeView(recipeView).map(({ code }) => code)).toContain(
       "RECIPE_SLOT_COORDINATE_MISMATCH",
     );
+  });
+
+  it("reports recipe view v2 failures in stable first-error order", () => {
+    const recipeView: Record<string, unknown> = {
+      schemaVersion: "2.0",
+      selectedRecipe: 2,
+      totalMatches: 1,
+      truncated: false,
+      recipes: [{ recipeId: "minecraft:test" }, { recipeId: "minecraft:test" }],
+    };
+
+    expect(validateRecipeViewV2(recipeView).map(({ code }) => code)).toEqual([
+      "RECIPE_SELECTED_INDEX_OUT_OF_RANGE",
+    ]);
+    recipeView["selectedRecipe"] = 0;
+    expect(validateRecipeViewV2(recipeView).map(({ code }) => code)).toEqual([
+      "RECIPE_RESULT_SUMMARY_INVALID",
+    ]);
+    recipeView["totalMatches"] = 2;
+    expect(validateRecipeViewV2(recipeView).map(({ code }) => code)).toEqual([
+      "RECIPE_ID_DUPLICATE",
+    ]);
   });
 
   it("leaves console source and fixed semicolon literal policy to Paper", () => {
@@ -316,4 +416,25 @@ function validCapabilityFixture(): Record<string, unknown> {
       type: "none",
     },
   };
+}
+
+function replacePreviewContent(
+  preview: Record<string, unknown>,
+  transfer: Buffer,
+  gzip: boolean,
+  declaredUncompressedBytes = transfer.length,
+): void {
+  preview["encoding"] = gzip ? "gzip+base64" : "identity+base64";
+  preview["compressedBytes"] = transfer.length;
+  preview["uncompressedBytes"] = declaredUncompressedBytes;
+  preview["contentHash"] = gzip ? "0".repeat(64) : sha256(transfer);
+  const chunks = preview["chunks"] as Array<Record<string, unknown>>;
+  chunks.splice(1);
+  chunks[0] = {
+    index: 0,
+    byteLength: transfer.length,
+    sha256: sha256(transfer),
+    data: transfer.toString("base64"),
+  };
+  preview["chunkCount"] = 1;
 }

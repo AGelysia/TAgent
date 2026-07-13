@@ -145,7 +145,7 @@ already advertised for the connection.
 
 The minimal adapter exposes `litematica.preview.load`,
 `litematica.preview.remove`, and `litematica.material_list.open`. Its controller
-derives a managed `<view-uuid>.litematica` path below a client-owned root,
+derives a managed `<view-uuid>.<revision>.<artifact-uuid>.litematica` path below a client-owned root,
 rejects links, escapes, non-regular files, and files above 16 MiB. It reads and
 hashes the file on the protocol worker, then performs a final metadata recheck
 and every reflected load, remove, Material List, and HUD call on the Minecraft
@@ -154,8 +154,10 @@ a filesystem path. These results remain local presentation facts.
 
 Phase 10 does not convert `minecraft-agent.palette-v1` into a native
 `.litematica` file and does not publish an end-to-end build preview. That
-deterministic generator, complete preview semantics, and build/project business
-flow remain Phase 11.
+was the Phase 10 delivery boundary. Phase 11's deterministic read-only preview
+path is recorded in
+[ADR 0009](0009-phase11-authoritative-knowledge-and-preview.md); world apply and
+rollback remain outside both decisions.
 
 ## Consequences
 
