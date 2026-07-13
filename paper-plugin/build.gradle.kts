@@ -11,6 +11,11 @@ base {
 
 val pluginVersion = version.toString()
 val protocolDirectory = rootProject.layout.projectDirectory.dir("protocol")
+val embedded by configurations.creating
+
+configurations.named("implementation") {
+    extendsFrom(embedded)
+}
 
 repositories {
     mavenCentral()
@@ -20,6 +25,7 @@ repositories {
 }
 
 dependencies {
+    embedded(libs.json.canonicalization)
     compileOnly(libs.paper.api)
     compileOnly(libs.gson)
     compileOnly(libs.snakeyaml)
@@ -78,5 +84,9 @@ tasks.test {
 }
 
 tasks.jar {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from({ embedded.files.map(::zipTree) }) {
+        exclude("META-INF/MANIFEST.MF", "META-INF/*.SF", "META-INF/*.RSA", "META-INF/*.DSA")
+    }
     manifest.attributes["Implementation-Version"] = pluginVersion
 }

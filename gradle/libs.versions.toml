@@ -4,6 +4,7 @@ fabric-loader = "0.19.3"
 google-java-format = "1.35.0"
 gson = "2.11.0"
 java-websocket = "1.6.0"
+json-canonicalization = "1.1"
 json-schema-validator = "1.5.9"
 junit = "5.14.4"
 loom = "1.17.13"
@@ -24,6 +25,7 @@ mockito = { module = "org.mockito:mockito-core", version.ref = "mockito" }
 paper-api = { module = "io.papermc.paper:paper-api", version.ref = "paper" }
 gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
 java-websocket = { module = "org.java-websocket:Java-WebSocket", version.ref = "java-websocket" }
+json-canonicalization = { module = "io.github.erdtman:java-json-canonicalization", version.ref = "json-canonicalization" }
 snakeyaml = { module = "org.yaml:snakeyaml", version = "2.2" }
 
 [plugins]

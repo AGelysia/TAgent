@@ -4,8 +4,7 @@ Last updated: 2026-07-13
 
 ## Current status
 
-Phase 0 through Phase 7 are complete. Phase 8 permissions and server-owned
-proposals are next.
+Phase 0 through Phase 8 are complete. Phase 9 Capability Pack loading is next.
 
 ## Locked decisions
 
@@ -58,6 +57,24 @@ proposals are next.
 - Recipe results are typed bounded snapshots. Registry scans are split across
   ticks and preserve real recipe variants, layouts, ingredient choices, item
   stacks, processing metadata, and available remaining items.
+- Phase 8 proposals are Paper-owned and bound to a live request, player,
+  session, tool, catalog generation, and Online epoch. Production uses a
+  server-fixed 60-second TTL; the domain service rejects any TTL above ten
+  minutes.
+- Frozen proposal arguments use RFC 8785 canonical JSON and the
+  `minecraft-agent/proposal-arguments/v1` domain-separated SHA-256 golden.
+  Confirmation claims one proposal atomically and never asks the model to
+  recreate arguments.
+- `WRITE_WORLD` and `WRITE_PLAYER` always require a live OP and their dedicated
+  permission. An `OWNER` policy is an additional Owner UUID restriction, never
+  an alternative to OP. `SERVER_ADMIN` is Owner-only, and an absent typed tool
+  remains unavailable regardless of player authority.
+- Proposal audit events append and force fixed redacted JSONL records under the
+  private Paper state directory. The audit format has no argument, summary,
+  prompt, credential, or free-text error field.
+- Phase 8 deliberately publishes an empty production write catalog. The
+  synchronous proposal domain has no production `create` caller, and proposal
+  Runtime-Paper transport handlers remain unsupported.
 
 ## Phase 0: repository scaffold
 
@@ -291,9 +308,48 @@ Completed:
       structural-token budget; an oversized success becomes a bounded typed
       failure.
 
+## Phase 8: permissions and Paper-owned proposals
+
+Completed:
+
+- [x] Five explicit risk levels separate reads, temporary writes, world writes,
+      player writes, and server administration. The current production write
+      catalog is intentionally empty.
+- [x] Proposal creation accepts only a registered typed tool and active
+      Paper-originated request context, freezes detached arguments, binds the
+      current catalog generation, and assigns an opaque Paper-owned UUID.
+- [x] RFC 8785 canonicalization, bounded structure/size, a domain-separated
+      SHA-256 digest, constant-time digest comparison, and a shared golden
+      fixture prevent insertion-order or numeric-spelling ambiguity.
+- [x] Paper owns expiry. Production proposals live for 60 seconds and neither a
+      model nor a caller can extend the service's ten-minute hard maximum.
+- [x] Confirmation performs an atomic `PENDING` to `CLAIMED` transition, then
+      repeats Online epoch, actual UUID, online status, current OP/Owner and
+      permission policy, request context, tool/catalog generation, and frozen
+      argument hash checks before an atomic `CLAIMED` to `EXECUTING` admission
+      and typed execution.
+- [x] World and player writes always require a live OP. Owner-restricted policy
+      adds the configured Owner UUID check, and dynamic policy changes or OP
+      removal invalidate an old proposal at confirmation.
+- [x] Adventure actions render only fixed namespaced confirm/reject commands
+      containing the Paper-owned proposal UUID. IDs are not tab-completed and
+      model-controlled command text cannot enter the click event.
+- [x] `/agent off`, Runtime loss, disable, and player quit invalidate pending or
+      claimed proposals. Atomic claim makes concurrent or repeated confirmation
+      single-use; final `EXECUTING` admission cannot be rewritten underneath an
+      already admitted side effect.
+- [x] Paper persists append-and-force JSONL audit events at
+      `<state>/audit/security-audit-v1.jsonl` with `0700`/`0600` permissions.
+      The fixed record shape omits frozen arguments, display summaries, prompts,
+      credentials, and arbitrary exception text, and an unavailable audit sink
+      fails closed before execution admission.
+- [x] Proposal create/confirmed/cancelled schemas and the argument-hash golden
+      are shared contracts. Runtime and Paper proposal transport dispatchers
+      remain unsupported until an explicitly reviewed integration is added.
+
 ## Verification
 
-Verified serially on 2026-07-13:
+Phase 8 was verified serially on 2026-07-13 with:
 
 ```bash
 cd agent-runtime
@@ -310,37 +366,43 @@ cd ..
 
 Results:
 
-- Runtime: 13 Vitest files, 101 tests passed; TypeScript build, ESLint, and
+- Runtime: 13 Vitest files, 102 tests passed; TypeScript build, ESLint, and
   Prettier passed; full and production-only npm audits reported 0
   vulnerabilities.
-- Paper: build and Spotless passed; 197 tests passed, including 63 shared dynamic
-  Schema/HMAC cases plus strict desired-state parsing/atomic persistence,
+- Paper: build and Spotless passed; 250 tests passed, including 73 shared dynamic
+  Schema/HMAC/semantic cases plus strict desired-state parsing/atomic persistence,
   operational epoch invalidation, Owner/OP/console authorization, cancellable
   real-WebSocket handshake/application exchange, provider request correlation,
   cancellation/timeout/late-response races, lifecycle/persistence races,
   session selection/resume binding, explicit module routing, fixed read-tool
-  policy and correlation, typed Bukkit recipe mapping, malformed recipe
-  isolation, output-budget downgrade, command-map transactions, private reply
-  gating, exact Offline output, doctor output, and descriptor tests.
-- Fabric: remapped JAR build and Spotless passed; 64 tests passed, including the
-  same 63 shared protocol cases plus client metadata.
+  policy and correlation, typed Bukkit recipe mapping, proposal hashing,
+  live reauthorization, single-use and `EXECUTING` transitions, audit storage
+  hardening/redaction, fixed Adventure actions, output-budget downgrade,
+  command-map transactions, private reply gating, exact Offline output, doctor
+  output, and descriptor tests.
+- Fabric: remapped JAR build and Spotless passed; 74 tests passed, including the
+  same 73 shared protocol cases plus client metadata.
 - Both JVM reports contain no remote Schema load, `UnknownHostException`,
   invalid-schema error, skipped test, or failed test.
 - Paper `1.21.11-132` JAR SHA-256
   `5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba`
   passed Offline lifecycle, unavailable, token-mismatch, and
   incompatible-protocol cases at `-Xms256M -Xmx512M`. The lifecycle case proved
-  online doctor degradation, exact per-command Offline output, `0600` DISABLED
-  persistence, restart remaining Offline, successful on, Runtime-loss retention,
-  failed on while Runtime was absent, successful on after Runtime restart, both
-  command labels, Console `/agent say` isolation from the provider, and
-  exception-free plugin disable. No Paper, Runtime, or
+  online doctor degradation, exact per-command Offline output, `0700`/`0600`
+  audit storage, audit content redaction, Console proposal-confirmation
+  isolation, unsafe `0640` audit startup failure with no command registration,
+  `0600` DISABLED persistence, restart remaining Offline, successful on,
+  Runtime-loss retention, failed on while Runtime was absent, successful on
+  after Runtime restart, both command labels, Console `/agent say` isolation
+  from the provider, and exception-free plugin disable. No Paper, Runtime, or
   Gradle process remained.
 - Packaged Runtime preserved its compiled authenticated application endpoint,
   OpenAI tool-loop provider, migrations, session/message repository, context
   reducer, Module Manifest, fixed Tool Registry, configuration template, and
-  all shared read-tool schemas. The Paper JAR contains the fixed registry,
-  Bukkit adapters, and the same tool schemas.
+  all shared read-tool/proposal schemas. The Paper JAR contains the fixed read
+  registry, Bukkit adapters, Paper-owned proposal/audit classes, embedded JCS
+  implementation, and the same schemas. The production write catalog remains
+  empty.
 - All protocol JSON files parse successfully; Bash scripts pass `bash -n`.
 
 PowerShell scripts were reviewed for native exit-code propagation but were not
@@ -361,14 +423,18 @@ not suppressed.
 
 - Heartbeat or automatic reconnect. Phase 5 recovery still creates a fresh
   authenticated connection only after explicit `/agent on`.
-- Proposal repositories, write-capable or external-command tools, and client
-  transfers. The request and fixed read-tool paths are live; proposal,
-  write-operation, and client-state ports remain empty.
+- Any production proposal-creation route, write-capable or external-command
+  tool, or Minecraft mutation. Phase 8 supplies the Paper-owned proposal domain,
+  confirmation command boundary, and audit sink, but its production write
+  catalog is empty and the synchronous domain service has no production
+  `create` caller.
+- Runtime-Paper proposal message handlers. The create/confirmed/cancelled
+  schemas and fixtures are active contracts, while authenticated application
+  dispatch still rejects those message types as unsupported.
 - Paper conversation repositories; Paper retains only a transient current
   session selection. Runtime owns the conversation database exclusively.
 - Durable rate accounting, token/cost accounting, or monthly budget
   enforcement.
-- Write-tool policy, proposals, confirmation, or audit persistence.
 - Capability Pack discovery, approval, reload, or command execution.
 - Client custom payload networking, overlay UI, item rendering, or preferences.
 - Structured recipe client views, locate/project/build behavior, world mutation,
@@ -378,7 +444,8 @@ not suppressed.
   base-region hash, and change-policy checks. These remain mandatory Phase 10
   gates before a preview network handler can be enabled.
 
-The presence of a schema does not mark the corresponding feature implemented.
+The presence of a schema or proposal domain object does not mark a write tool
+implemented.
 
 ## Known design risks
 
@@ -428,15 +495,28 @@ path. A command-backed Capability remains disabled unless complete preflight
 parsing is demonstrated for the locked plugin version; otherwise use a typed
 adapter.
 
+### Proposal integration coverage
+
+The pinned Paper smoke exercises startup, Offline, restart, Runtime loss, and
+command-map lifecycle without a real connected player. It does not create or
+click a proposal. Focused JVM tests cover live OP/Owner/permission changes,
+request and catalog binding, expiry, hash tampering, atomic double-click
+behavior, Offline/quit invalidation, fixed Adventure actions, and audit
+redaction; a real-player click remains a later integration lane.
+
 ## Next gates
 
-1. Implement Phase 8 server-owned proposals, expiry, argument hashes, live OP
-   revalidation, and redacted audit records before any write tool is enabled.
-2. Add durable usage/cost accounting before treating daily/monthly limits as
+1. Implement Phase 9 Capability Pack discovery, approval, immutable catalog
+   publication, version matching, and typed argument rendering without enabling
+   an unsafe command-dispatch fallback.
+2. Keep the production write catalog empty until the first fixed typed adapter
+   has operation-specific validation, limits, rollback/partial-failure policy,
+   and a real-player proposal integration test.
+3. Add durable usage/cost accounting before treating daily/monthly limits as
    restart-stable budgets.
-3. Add a real online-player integration lane for private `/agent say` delivery
-   and late dynamic command-tree refresh without increasing routine weak-host
-   resource usage.
-4. Add Gradle dependency-verification metadata before calling a release
+4. Add a real online-player integration lane for private `/agent say` delivery,
+   proposal confirmation, and late dynamic command-tree refresh without
+   increasing routine weak-host resource usage.
+5. Add Gradle dependency-verification metadata before calling a release
    byte-for-byte reproducible; Paper 1.21.11 is available only through an
    upstream mutable snapshot coordinate.

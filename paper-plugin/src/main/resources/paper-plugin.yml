@@ -15,6 +15,21 @@ permissions:
   minecraftagent.command.agent:
     description: Allows access to the Minecraft Agent status command
     default: op
+  minecraftagent.proposal.respond:
+    description: Allows a player to confirm or reject their own Minecraft Agent proposals
+    default: true
+  minecraftagent.write.temporary:
+    description: Allows temporary typed proposal tools when one is installed
+    default: false
+  minecraftagent.write.world:
+    description: Allows authorized operators to confirm typed world writes
+    default: op
+  minecraftagent.write.player:
+    description: Allows authorized operators to confirm typed player writes
+    default: op
+  minecraftagent.server.admin:
+    description: Allows configured owners to confirm typed server administration
+    default: false
   minecraftagent.admin.toggle:
     description: Allows authorized administrators to toggle Minecraft Agent
     default: op

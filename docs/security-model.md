@@ -10,9 +10,11 @@ conditional command-registration boundary. Phase 4 adds persistent Offline
 state, epoch-based admission, explicit cleanup ports, and authorized recovery.
 Phase 5 adds bounded private model requests, literal text replies, rate limits,
 timeout, and cancellation. Phase 6 adds Runtime-owned sessions, owner-filtered
-resume, bounded model context, and explicit one-shot modules. It still does not
-provide write execution, proposals, or Capability Pack loading. Phase 7 enables
-only six fixed typed read tools through a bounded, doubly validated loop.
+resume, bounded model context, and explicit one-shot modules. Phase 7 enables
+only six fixed typed read tools through a bounded, doubly validated loop. Phase
+8 adds the Paper-owned proposal, confirmation, dynamic authorization, and
+redacted audit boundary while deliberately registering no production write
+tool or proposal transport handler.
 
 The governing rule is:
 
@@ -78,15 +80,16 @@ behavioral controls before dispatch:
 - Bound message size before parsing, require strict UTF-8 and duplicate-key
   rejection, and validate closed fields afterward.
 
-After authentication, Phase 7 permits `agent.request`, `agent.cancel`,
+After authentication, Phase 8 still permits `agent.request`, `agent.cancel`,
 `session.resume`, and `tool.result` from Paper and `agent.complete`,
 `agent.error`, `session.resumed`, and `tool.call` from Runtime. Each message is bound to the active
 connection, server ID, request ID, actual player UUID, expected session
 relationship, and issuing Offline epoch. Resume lookup uses server ID and player
 UUID in the same repository query; it does not reveal whether a rejected ID
 belongs to another owner. Tool traffic additionally binds the unique call ID,
-module, tool, and zero-based sequence. Every proposal/view type remains
-rejected.
+module, tool, and zero-based sequence. The proposal payload schemas are shared
+contracts, but every proposal/view transport type remains rejected until a
+direction-specific handler is explicitly wired.
 
 Loopback binding limits remote exposure but does not protect against another
 local process. Token file permissions, log redaction, and host account security
@@ -152,26 +155,80 @@ command at all.
 
 ## Proposal integrity
 
-Paper creates proposals after tool, schema, risk, and permission validation.
-Proposal IDs are opaque and server-owned. A proposal stores at least:
+Paper creates proposals only after tool, schema, risk, permission, and live
+request-context validation. Proposal IDs are opaque and server-owned. The Phase
+8 domain record stores:
 
 - Server, request, session, and player identity.
 - Tool ID and effective catalog generation.
-- Canonical arguments and a domain-separated SHA-256 argument hash.
+- Detached RFC 8785 canonical arguments and a domain-separated SHA-256 argument
+  hash.
 - Risk, expiry, and single-use status.
-- For builds, immutable artifact ID, base-region hash, and change-set hash.
+- Future build tools must additionally bind an immutable artifact ID,
+  base-region hash, and change-set hash.
 
-Canonicalization must be specified before hashing; object property order and
-number/string representation cannot depend on a JSON library's incidental
-output. Confirmation uses a transactional state transition so two clicks cannot
-execute the same proposal twice. After claiming it, Paper repeats Online, UUID,
-OP, permission, tool-generation, bounds, size, and state checks.
+Arguments use RFC 8785 canonical JSON and bounded depth, node count, and UTF-8
+size. The digest input is the UTF-8 domain
+`minecraft-agent/proposal-arguments/v1`, one zero byte, then the canonical JSON;
+the result is lowercase SHA-256 hex. A shared golden covers RFC 8785 number and
+property ordering behavior. Paper freezes a detached value and recomputes its
+hash at confirmation, so a caller cannot rely on a mutable JSON object or a
+library's incidental serialization.
 
-Vanilla clickable confirmation requires fixed server commands such as
-`/agent confirm <proposal-id>` and `/agent reject <proposal-id>`. These command
-paths are required by the design even though they are not implemented during
-Phase 3. A structured client action carries only an action kind and proposal ID;
-it cannot supply a command string.
+Production expiry is server-fixed at 60 seconds. The reusable service rejects a
+non-positive TTL or one above ten minutes, and neither model arguments nor a
+wire timestamp can extend it. The in-memory repository atomically transitions
+one matching entry from `PENDING` to `CLAIMED`, so concurrent clicks cannot
+execute it twice. After claiming it, Paper repeats the Online epoch, server,
+request, session, actual UUID, live player, current permission and policy,
+request context, tool/catalog generation, expiry, and frozen hash checks. A
+future build executor must additionally repeat bounds, size, region hash,
+change-set hash, and allowed-state checks.
+
+Risk authorization is deliberately asymmetric:
+
+- `READ` never creates a proposal.
+- `WRITE_TEMPORARY` requires its typed tool permission and current online
+  player; the production permission defaults to false.
+- `WRITE_WORLD` and `WRITE_PLAYER` require current online status, live OP, and
+  the matching tool permission. If local policy says `OWNER`, configured Owner
+  UUID membership is an additional requirement, never an OP substitute.
+- `SERVER_ADMIN` requires current online status, configured Owner UUID, and the
+  typed permission; its production permission defaults to false.
+
+The policy supplier is read at creation and again at confirmation. Removing OP,
+Owner membership, a permission, the tool, the catalog generation, or the live
+request context makes the old proposal terminally unavailable. Confirmation
+invokes only the registered typed executor with the frozen arguments and never
+returns to the model.
+
+Vanilla clickable confirmation uses fixed namespaced server commands:
+`/minecraftagent:agent confirm <proposal-id>` and
+`/minecraftagent:agent reject <proposal-id>`. Paper builds both Adventure click
+events from the opaque UUID; model text cannot provide a command, and proposal
+IDs are not tab-completed. The command rederives the actual `Player` UUID and
+requires `minecraftagent.proposal.respond`. A structured client action may
+later carry only an action kind and proposal ID; it cannot supply command text.
+
+Player quit invalidates that player's pending or claimed entries. `/agent off`,
+Runtime loss, and plugin disable rotate the epoch and invalidate all entries.
+An entry that has completed final admission is first moved to `EXECUTING`;
+cleanup cannot rewrite that state while its typed side effect reaches a
+terminal audit result. Paper-thread serialization defines the ordering between
+final admission and player/Offline lifecycle events.
+Audit events append and force to `<state>/audit/security-audit-v1.jsonl` under a
+`0700` directory and `0600` file. The fixed JSONL record contains trusted IDs,
+timestamp, tool, risk, catalog generation, event type, and a stable outcome
+code. It has no argument, summary, prompt, credential, rendered command,
+exception, or other free-text field. Audit setup or pre-execution append failure
+fails closed.
+
+Phase 8's production write catalog is empty and the synchronous proposal domain
+has no production `create` caller. These checks are an execution-admission
+foundation, not evidence that a Minecraft write is currently reachable.
+The first production write adapter must split audit persistence onto the worker
+and return to the primary thread for the last live checks and mutation; it must
+not block the Paper thread on `force(true)`.
 
 ## Core read-tool boundary
 
@@ -305,13 +362,15 @@ Responses request only for admitted player work.
 
 ## Current enforcement gap
 
-At the Phase 7 boundary, Paper-side startup, authenticated application channel,
+At the Phase 8 boundary, Paper-side startup, authenticated application channel,
 conditional registration, persistent Offline state, epoch gate, private
 conversation, request cancellation, Runtime-owned sessions, owner-filtered
 resume, one-shot modules, bounded context, Runtime provider limits, and six
-typed read-only tools exist. The request cleanup port and fixed read-tool runtime
-have real producers; proposal, write-operation, and client-state ports remain
-empty. Proposal repositories, durable usage accounting, the Phase 9 capability
-loader, audit storage, client payload handling, and world mutation remain
-absent. Protocol schemas remain necessary contracts, not evidence that a later
-feature is implemented.
+typed read-only tools exist. Paper also has a proposal repository, response
+command boundary, dynamic authorizer, Offline/quit invalidation, and private
+persistent audit sink. The production proposal catalog is empty, the
+synchronous service has no production creation path, and proposal WebSocket
+handlers, write-operation and client-state producers, durable usage accounting,
+the Phase 9 capability loader, client payload handling, and world mutation
+remain absent. Protocol schemas remain necessary contracts, not evidence that a
+later feature is reachable.

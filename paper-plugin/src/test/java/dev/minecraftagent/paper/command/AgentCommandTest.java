@@ -54,9 +54,13 @@ class AgentCommandTest {
     assertTrue(command.execute(sender, "agent", new String[] {"unknown"}));
     assertTrue(command.execute(sender, "agent", new String[] {"on", "extra"}));
     assertTrue(command.execute(sender, "agent", new String[] {"say", "secret"}));
+    assertTrue(
+        command.execute(
+            sender, "agent", new String[] {"confirm", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}));
 
     assertEquals(
-        List.of("AI offline", "AI offline", "AI offline", "AI offline", "AI offline"), messages);
+        List.of("AI offline", "AI offline", "AI offline", "AI offline", "AI offline", "AI offline"),
+        messages);
     assertEquals(0, authorizationCalls[0]);
     assertEquals(0, control.offCalls);
     assertEquals(0, control.onCalls);
@@ -197,7 +201,8 @@ class AgentCommandTest {
     assertEquals(
         List.of(
             "Minecraft Agent: ONLINE",
-            "/agent [say <message>|resume [session]|module list|module <name> <message>|doctor|off|on]"),
+            "/agent [say <message>|resume [session]|module list|module <name> <message>|confirm"
+                + " <proposal>|reject <proposal>|doctor|off|on]"),
         messages);
   }
 
@@ -246,7 +251,8 @@ class AgentCommandTest {
         new String[] {"say"});
     assertEquals(
         List.of(
-            "/agent [say <message>|resume [session]|module list|module <name> <message>|doctor|off|on]"),
+            "/agent [say <message>|resume [session]|module list|module <name> <message>|confirm"
+                + " <proposal>|reject <proposal>|doctor|off|on]"),
         emptyMessages);
   }
 
@@ -344,6 +350,158 @@ class AgentCommandTest {
   }
 
   @Test
+  void proposalResponsesUseActualPlayerIdentityAndDispatchAsyncReplies() {
+    var messages = new ArrayList<String>();
+    var replies = new QueuedReplies();
+    var proposals = new RecordingProposals();
+    var confirm = new CompletableFuture<ProposalResponseGateway.Result>();
+    var reject = new CompletableFuture<ProposalResponseGateway.Result>();
+    proposals.confirmation = confirm;
+    proposals.rejection = reject;
+    var command =
+        command(
+            healthy(),
+            new RecordingControl(),
+            new RecordingRequests(),
+            proposals,
+            ignored -> false,
+            replies::dispatch);
+    var playerId = UUID.randomUUID();
+    var firstProposalId = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    var secondProposalId = UUID.fromString("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    var player = player(messages, playerId, Set.of(AgentCommand.PROPOSAL_PERMISSION));
+
+    command.execute(player, "agent", new String[] {"CoNfIrM", firstProposalId.toString()});
+    assertEquals(playerId, proposals.playerId);
+    assertEquals(firstProposalId, proposals.proposalId);
+    assertEquals("confirm", proposals.operation);
+    assertTrue(messages.isEmpty());
+    confirm.complete(ProposalResponseGateway.Result.CONFIRMED);
+    assertTrue(messages.isEmpty());
+    replies.drain();
+
+    command.execute(player, "agent", new String[] {"reject", secondProposalId.toString()});
+    assertEquals(playerId, proposals.playerId);
+    assertEquals(secondProposalId, proposals.proposalId);
+    assertEquals("reject", proposals.operation);
+    reject.complete(ProposalResponseGateway.Result.REJECTED);
+    replies.drain();
+
+    assertEquals(List.of("Proposal confirmed.", "Proposal rejected."), messages);
+  }
+
+  @Test
+  void proposalResponsesRequirePermissionPlayerAndExactCanonicalId() {
+    var proposals = new RecordingProposals();
+    var command =
+        command(
+            healthy(),
+            new RecordingControl(),
+            new RecordingRequests(),
+            proposals,
+            ignored -> false,
+            Runnable::run);
+    var proposalId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+    var deniedMessages = new ArrayList<String>();
+    command.execute(
+        player(deniedMessages, UUID.randomUUID(), Set.of()),
+        "agent",
+        new String[] {"confirm", proposalId});
+    assertEquals(List.of("You do not have permission to use this command."), deniedMessages);
+
+    var consoleMessages = new ArrayList<String>();
+    command.execute(sender(consoleMessages, true), "agent", new String[] {"reject", proposalId});
+    assertEquals(List.of("This command can only be used by a player."), consoleMessages);
+
+    var invalidMessages = new ArrayList<String>();
+    var permitted =
+        player(invalidMessages, UUID.randomUUID(), Set.of(AgentCommand.PROPOSAL_PERMISSION));
+    command.execute(
+        permitted,
+        "agent",
+        new String[] {"confirm", proposalId.toUpperCase(java.util.Locale.ROOT)});
+    command.execute(permitted, "agent", new String[] {"reject"});
+    assertEquals(
+        List.of(
+            "Proposal ID must be a canonical UUID.",
+            "/agent [say <message>|resume [session]|module list|module <name> <message>|confirm"
+                + " <proposal>|reject <proposal>|doctor|off|on]"),
+        invalidMessages);
+    assertNull(proposals.operation);
+  }
+
+  @Test
+  void proposalResultsAndFailuresUseOnlyFixedSafeMessages() {
+    var expected =
+        java.util.Map.of(
+            ProposalResponseGateway.Result.CONFIRMED,
+            "Proposal confirmed.",
+            ProposalResponseGateway.Result.REJECTED,
+            "Proposal rejected.",
+            ProposalResponseGateway.Result.UNAVAILABLE,
+            "Proposal is unavailable.",
+            ProposalResponseGateway.Result.FAILED,
+            "Proposal response failed. Try again.");
+    for (var entry : expected.entrySet()) {
+      var messages = new ArrayList<String>();
+      var proposals = new RecordingProposals();
+      proposals.confirmation = CompletableFuture.completedFuture(entry.getKey());
+      command(
+              healthy(),
+              new RecordingControl(),
+              new RecordingRequests(),
+              proposals,
+              ignored -> false,
+              Runnable::run)
+          .execute(
+              player(messages, UUID.randomUUID(), Set.of(AgentCommand.PROPOSAL_PERMISSION)),
+              "agent",
+              new String[] {"confirm", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"});
+      assertEquals(List.of(entry.getValue()), messages);
+    }
+
+    for (var synchronous : List.of(false, true)) {
+      var messages = new ArrayList<String>();
+      ProposalResponseGateway proposals =
+          new ProposalResponseGateway() {
+            @Override
+            public CompletionStage<Result> confirm(UUID playerId, UUID proposalId) {
+              if (synchronous) {
+                throw new IllegalStateException("sensitive synchronous detail");
+              }
+              return CompletableFuture.failedFuture(
+                  new IllegalStateException("sensitive asynchronous detail"));
+            }
+          };
+      command(
+              healthy(),
+              new RecordingControl(),
+              new RecordingRequests(),
+              proposals,
+              ignored -> false,
+              Runnable::run)
+          .execute(
+              player(messages, UUID.randomUUID(), Set.of(AgentCommand.PROPOSAL_PERMISSION)),
+              "agent",
+              new String[] {"confirm", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"});
+      assertEquals(List.of("Proposal response failed. Try again."), messages);
+    }
+  }
+
+  @Test
+  void constructorsWithoutProposalGatewayDefaultToUnavailable() {
+    var messages = new ArrayList<String>();
+    command(healthy(), new RecordingControl(), ignored -> false, Runnable::run)
+        .execute(
+            player(messages, UUID.randomUUID(), Set.of(AgentCommand.PROPOSAL_PERMISSION)),
+            "agent",
+            new String[] {"confirm", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"});
+
+    assertEquals(List.of("Proposal is unavailable."), messages);
+  }
+
+  @Test
   void tabCompletionIsStatePermissionAndAuthorizationAware() {
     var permitted = sender(new ArrayList<>(), true);
     var denied = sender(new ArrayList<>(), false);
@@ -373,6 +531,8 @@ class AgentCommandTest {
         List.of("on", "off"), offlineAuthorized.tabComplete(denied, "agent", new String[] {"O"}));
     assertEquals(
         List.of(), offlineAuthorized.tabComplete(denied, "agent", new String[] {"on", "extra"}));
+    assertEquals(
+        List.of(), onlineAuthorized.tabComplete(permitted, "agent", new String[] {"confirm", ""}));
   }
 
   private static void assertRecoveryMessage(
@@ -408,6 +568,17 @@ class AgentCommandTest {
       ToggleAuthorizer authorizer,
       java.util.function.Consumer<Runnable> dispatcher) {
     return new AgentCommand(plugin(), () -> status, control, requests, authorizer, dispatcher);
+  }
+
+  private static AgentCommand command(
+      AgentStatus status,
+      AgentControl control,
+      AgentRequestGateway requests,
+      ProposalResponseGateway proposalResponses,
+      ToggleAuthorizer authorizer,
+      java.util.function.Consumer<Runnable> dispatcher) {
+    return new AgentCommand(
+        plugin(), () -> status, control, requests, proposalResponses, authorizer, dispatcher);
   }
 
   private static AgentStatus healthy() {
@@ -549,6 +720,32 @@ class AgentCommandTest {
       this.sessionId = sessionId;
       this.operation = "resume";
       return Submission.ACCEPTED;
+    }
+  }
+
+  private static final class RecordingProposals implements ProposalResponseGateway {
+    private UUID playerId;
+    private UUID proposalId;
+    private String operation;
+    private CompletionStage<Result> confirmation =
+        CompletableFuture.completedFuture(Result.UNAVAILABLE);
+    private CompletionStage<Result> rejection =
+        CompletableFuture.completedFuture(Result.UNAVAILABLE);
+
+    @Override
+    public CompletionStage<Result> confirm(UUID playerId, UUID proposalId) {
+      this.playerId = playerId;
+      this.proposalId = proposalId;
+      this.operation = "confirm";
+      return confirmation;
+    }
+
+    @Override
+    public CompletionStage<Result> reject(UUID playerId, UUID proposalId) {
+      this.playerId = playerId;
+      this.proposalId = proposalId;
+      this.operation = "reject";
+      return rejection;
     }
   }
 

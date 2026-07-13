@@ -25,6 +25,7 @@ dependencies {
     modImplementation(libs.fabric.api)
 
     testImplementation(platform(libs.junit.bom))
+    testImplementation(libs.json.canonicalization)
     testImplementation(libs.json.schema.validator)
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)

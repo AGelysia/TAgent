@@ -35,6 +35,7 @@ import java.util.stream.StreamSupport;
 import java.util.zip.GZIPInputStream;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import org.erdtman.jcs.JsonCanonicalizer;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
 
@@ -45,6 +46,8 @@ final class SharedProtocolContractTest {
     private static final Pattern PLACEHOLDER = Pattern.compile("\\{([a-z][a-zA-Z0-9_]{0,63})}");
     private static final SchemaValidatorsConfig SCHEMA_CONFIG = schemaConfig();
     private static final String SCHEMA_ID_PREFIX = "https://minecraft-agent.dev/schemas/1.0/";
+    private static final String PROPOSAL_ARGUMENT_HASH_DOMAIN =
+            "minecraft-agent/proposal-arguments/v1";
 
     private final Path protocolRoot =
             Path.of(System.getProperty("minecraftAgent.protocolDir")).toAbsolutePath().normalize();
@@ -94,6 +97,7 @@ final class SharedProtocolContractTest {
             case "recipe-view-v1" -> validateRecipeView(fixture);
             case "capability-manifest-v1" -> validateCapability(fixture);
             case "view-negotiation-v1" -> validateViewNegotiation(fixture);
+            case "proposal-argument-hash-v1" -> validateProposalArgumentHash(fixture);
             default -> List.of("SEMANTIC_VALIDATOR_UNKNOWN");
         };
 
@@ -180,6 +184,51 @@ final class SharedProtocolContractTest {
         var token = exchange.path("publicTestToken").asText();
         if (!handshakeProofMatches(token, paper) || !handshakeProofMatches(token, runtime)) {
             return List.of("HANDSHAKE_PROOF_INVALID");
+        }
+        return List.of();
+    }
+
+    private List<String> validateProposalArgumentHash(JsonNode fixture) {
+        var hashContract = fixture.path("hashContract");
+        var proposal = fixture.path("proposal");
+        var arguments = proposal.path("arguments");
+        if (!fixture.isObject()
+                || !hashContract.isObject()
+                || !proposal.isObject()
+                || !arguments.isObject()) {
+            return List.of("PROPOSAL_ARGUMENT_HASH_STRUCTURE_INVALID");
+        }
+        if (!"SHA-256".equals(hashContract.path("algorithm").asText())
+                || !PROPOSAL_ARGUMENT_HASH_DOMAIN.equals(
+                        hashContract.path("domainUtf8").asText())
+                || !"00".equals(hashContract.path("separatorHex").asText())
+                || !"RFC8785".equals(hashContract.path("canonicalization").asText())) {
+            return List.of("PROPOSAL_ARGUMENT_HASH_CONTRACT_INVALID");
+        }
+
+        final String canonical;
+        try {
+            canonical =
+                    new JsonCanonicalizer(JSON.writeValueAsString(arguments)).getEncodedString();
+        } catch (IOException | RuntimeException error) {
+            return List.of("PROPOSAL_ARGUMENT_CANONICALIZATION_INVALID");
+        }
+        if (!canonical.equals(hashContract.path("canonicalArguments").asText())) {
+            return List.of("PROPOSAL_ARGUMENT_CANONICAL_MISMATCH");
+        }
+
+        var canonicalBytes = canonical.getBytes(StandardCharsets.UTF_8);
+        if (canonicalBytes.length
+                != hashContract.path("canonicalUtf8ByteLength").asInt(-1)) {
+            return List.of("PROPOSAL_ARGUMENT_CANONICAL_LENGTH_MISMATCH");
+        }
+        var expectedHash = sha256(concatenate(List.of(
+                PROPOSAL_ARGUMENT_HASH_DOMAIN.getBytes(StandardCharsets.UTF_8),
+                new byte[] {0},
+                canonicalBytes)));
+        if (!expectedHash.equals(hashContract.path("argumentHash").asText())
+                || !expectedHash.equals(proposal.path("argumentHash").asText())) {
+            return List.of("PROPOSAL_ARGUMENT_HASH_MISMATCH");
         }
         return List.of();
     }

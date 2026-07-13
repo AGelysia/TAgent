@@ -4,16 +4,18 @@
 
 Protocol 1.0 defines contracts for two separate links:
 
-1. Paper to the local Agent Runtime over an authenticated WebSocket. Phase 5
-   keeps the Phase 3 hello exchange and enables `agent.request`,
-   `agent.complete`, `agent.error`, and `agent.cancel` after authentication.
+1. Paper to the local Agent Runtime over an authenticated WebSocket. Phase 7
+   keeps the Phase 3 hello exchange and enables the bounded agent, session, and
+   read-tool exchanges after authentication. Phase 8 adds proposal contracts
+   without enabling proposal transport handlers.
 2. Paper to the optional Fabric client over versioned Minecraft custom payloads
    in a later phase.
 
-Phase 1 owns JSON Schemas, fixtures, and cross-language contract tests. Phase 5
-adds closed terminal and cancellation payloads and keeps the socket open for a
-strictly bounded conversation channel. It still does not register Fabric
-payload handlers or execute tool, proposal, control, or view messages.
+Phase 1 owns JSON Schemas, fixtures, and cross-language contract tests. Later
+phases add closed payloads while keeping the socket open for a strictly bounded
+conversation and read-tool channel. The current implementation still does not
+register Fabric payload handlers or dispatch proposal, control, or view
+messages.
 
 The canonical schema source is `protocol/schemas/`. JVM builds copy those files
 as resources; the TypeScript Runtime loads the same files through its schema
@@ -92,8 +94,9 @@ Paper accepts a tool call only while the request is live and only once for the
 tuple `(requestId, toolCallId)`.
 
 `messageId` deduplicates envelopes. It does not make an unsafe operation safe to
-retry. Proposal confirmation and write execution require Paper-owned durable
-idempotency state in later phases.
+retry. Phase 8 gives Paper-local proposals an atomic single-use claim and a
+durable audit event; active proposal state is memory-only and cannot survive a
+restart. No proposal transport handler or write tool is enabled.
 
 Cancellation, timeout, `/agent off`, player disconnect, Runtime disconnect, and
 terminal agent messages close a request. `agent.cancel` reuses the original
@@ -124,23 +127,25 @@ and MaLiLib versions. It contains no Runtime authentication fields.
 
 Phase 1 includes or targets these closed contracts:
 
-| Contract           | Purpose                                                               |
-| ------------------ | --------------------------------------------------------------------- |
-| `handshake`        | Runtime-Paper version and authentication negotiation                  |
-| `agent-request`    | Session, actual player identity, module, message, and client features |
-| `agent-complete`   | Correlated private fallback text and bounded structured views         |
-| `agent-error`      | Correlated stable error code, safe fallback text, and retry hint      |
-| `agent-cancel`     | Correlated Paper-originated cancellation reason                       |
-| `session-resume`   | Player-owned exact or latest session selection request                |
-| `session-resumed`  | Correlated selected non-null session identifier                       |
-| `tool-call`        | Typed tool identity, closed arguments, and bounded loop sequence      |
-| `tool-result`      | Status, source, trust label, result, or stable error                  |
-| `proposal`         | Frozen write intent and integrity hashes                              |
-| `client-handshake` | Client feature and dependency negotiation                             |
-| `structured-view`  | Trusted fixed view variants and fallback relationship                 |
-| `recipe-view`      | Structured server recipe representation                               |
-| `build-preview`    | Bounded target projection and transform metadata                      |
-| `capability`       | Declarative Capability Pack manifest                                  |
+| Contract             | Purpose                                                               |
+| -------------------- | --------------------------------------------------------------------- |
+| `handshake`          | Runtime-Paper version and authentication negotiation                  |
+| `agent-request`      | Session, actual player identity, module, message, and client features |
+| `agent-complete`     | Correlated private fallback text and bounded structured views         |
+| `agent-error`        | Correlated stable error code, safe fallback text, and retry hint      |
+| `agent-cancel`       | Correlated Paper-originated cancellation reason                       |
+| `session-resume`     | Player-owned exact or latest session selection request                |
+| `session-resumed`    | Correlated selected non-null session identifier                       |
+| `tool-call`          | Typed tool identity, closed arguments, and bounded loop sequence      |
+| `tool-result`        | Status, source, trust label, result, or stable error                  |
+| `proposal`           | Frozen write intent and integrity hashes                              |
+| `proposal-confirmed` | Redacted correlation after trusted confirmation admission             |
+| `proposal-cancelled` | Redacted correlation and a closed cancellation reason                 |
+| `client-handshake`   | Client feature and dependency negotiation                             |
+| `structured-view`    | Trusted fixed view variants and fallback relationship                 |
+| `recipe-view`        | Structured server recipe representation                               |
+| `build-preview`      | Bounded target projection and transform metadata                      |
+| `capability`         | Declarative Capability Pack manifest                                  |
 
 Schemas can exist before their behavior. Phase 5 enables agent request,
 completion, error, and cancellation after hello; Phase 6 adds dedicated session
@@ -160,7 +165,23 @@ zero-based and protocol 1.0 permits `0..7`; an eighth completed call exhausts
 the loop and no ninth call is emitted. Failed/rejected results require
 `result: null`, while a successful result requires typed object data and fixed
 source/trust provenance. The implementation still does not publish a structured
-view, create a proposal, or load a capability.
+view, create a proposal through the authenticated channel, or load a capability.
+
+Phase 8 registers `proposal.create`, `proposal.confirmed`, and
+`proposal.cancelled` payload schemas and a shared RFC 8785 argument-hash golden.
+Paper owns proposal ID, frozen arguments, expiry, risk, and correlation. The
+argument digest is SHA-256 over the UTF-8 bytes of
+`minecraft-agent/proposal-arguments/v1`, one `0x00` byte, and the RFC 8785
+canonical argument object; its wire form is exactly 64 lowercase hexadecimal
+characters. Terminal proposal payloads repeat only fixed correlation and the
+argument hash. They cannot contain arguments, rendered commands, credentials,
+free-form errors, or execution output.
+
+These are contracts, not active application directions. Runtime and Paper still
+reject all three proposal envelope types as unsupported because no dispatcher is
+wired. The Paper-local synchronous proposal service also has no production
+`create` caller and its production typed write catalog is empty. A valid
+proposal envelope therefore cannot cause a proposal or Minecraft write.
 
 ## Client views
 

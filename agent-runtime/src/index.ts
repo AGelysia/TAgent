@@ -136,6 +136,7 @@ export {
   validateProtocolVersion,
   validateBuildPreviewChunks,
   validateCapabilityManifest,
+  validateProposalArgumentHash,
   validateRecipeView,
   validateViewNegotiation,
   runSemanticValidator,

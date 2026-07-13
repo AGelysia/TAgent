@@ -2,11 +2,12 @@
 
 Minecraft Agent is a security-first Minecraft assistant composed of a Paper plugin, a local
 TypeScript runtime, and an optional Fabric client mod. This repository currently implements the
-Phase 0-7 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
+Phase 0-8 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
 loopback Runtime-Paper channel, conditional `/agent` registration, persistent emergency Offline
-controls, private model replies, Runtime-owned sessions, resume, explicit one-shot modules, and a
-bounded six-tool read-only model loop. It does not expose generic execution or mutate Minecraft
-state.
+controls, private model replies, Runtime-owned sessions, resume, explicit one-shot modules, a
+bounded six-tool read-only model loop, and Paper-owned proposal authorization and audit
+infrastructure. The production write catalog is empty: there is no production proposal creator,
+generic execution surface, or Minecraft state mutation.
 
 The product and delivery baseline is recorded in
 [`minecraft_agent_vibe_coding_plan.md`](minecraft_agent_vibe_coding_plan.md). Implementation status
@@ -73,7 +74,7 @@ cd ..
 The Fabric build downloads Minecraft artifacts and is deliberately last. Do not run both Gradle
 builds concurrently on a low-memory host.
 
-## Phase 2-7 Runtime
+## Phase 2-8 Runtime
 
 ```bash
 cd agent-runtime
@@ -106,9 +107,10 @@ After the authenticated hello, the same bounded WebSocket accepts agent request/
 session-resume, and correlated tool-result traffic. A fixed six-entry Module Manifest supplies
 trusted per-request instructions and a fixed read-tool allowlist. Runtime publishes only those
 registered functions to the model, validates every call and typed result locally, and permits at
-most eight serial calls. Proposal, view, and heartbeat types remain unsupported.
+most eight serial calls. Phase 8 adds shared proposal contracts, but proposal, view, and heartbeat
+transport handlers remain unsupported; schema acceptance alone cannot create or execute a proposal.
 
-## Phase 3-7 Paper
+## Phase 3-8 Paper
 
 On first Paper startup, the plugin installs a strict `plugins/MinecraftAgent/config.yml`. Keep its
 Runtime token as the complete `${MINECRAFT_AGENT_SERVER_TOKEN}` environment reference. The endpoint
@@ -155,6 +157,27 @@ server thread without blocking the WebSocket thread; recipe scans are split into
 Results carry fixed source/trust labels, and recipe results retain typed layouts, ingredient
 choices, item stacks, processing metadata, and remaining items instead of model-authored prose.
 
+Phase 8 adds a Paper-owned proposal service for future typed write adapters. It freezes validated
+arguments in RFC 8785 canonical form, hashes them with the
+`minecraft-agent/proposal-arguments/v1` domain, binds them to a live request and catalog generation,
+and assigns an opaque ID with a server-controlled 60-second expiry. Confirmation atomically claims
+the proposal and repeats the Online epoch, actual player UUID, online status, current permission,
+dynamic policy, request context, catalog generation, and argument-hash checks before invoking a
+fixed typed executor. Final admission moves the entry to `EXECUTING`, which cleanup cannot rewrite
+underneath an admitted side effect. `WRITE_WORLD` and `WRITE_PLAYER` always require live OP status; an Owner-only
+policy can further restrict those writes but can never replace OP. `/agent off`, Runtime loss,
+disable, and player quit invalidate affected proposals.
+
+Adventure confirmation actions are built from fixed namespaced commands and a server-owned UUID;
+model text cannot supply a click command. Security events append to
+`<state>/audit/security-audit-v1.jsonl` (under `plugins/MinecraftAgent/state/` by default) with a
+private `0700` directory and `0600` file. Records contain only fixed correlation, risk, tool, state,
+time, and outcome fields; they omit arguments, summaries, prompts, credentials, and free-form
+errors. The service and command boundary are active, but no production write tool is registered and
+the synchronous proposal domain has no production `create` caller yet.
+Before the first write tool is enabled, its adapter must move durable audit I/O to the worker and
+return to the Paper thread for final reauthorization, `EXECUTING` admission, and Bukkit mutation.
+
 The opt-in exact-server smoke pins Paper `1.21.11-132`, verifies its SHA-256, limits the heap to 512
 MiB, and runs every case serially:
 
@@ -165,7 +188,8 @@ MiB, and runs every case serially:
 This is intentionally separate from routine checks because it downloads and starts a real Paper
 server. It cleans up all temporary worlds, logs, credentials, and child processes.
 The smoke includes an Offline/restart/on/Runtime-loss/on lifecycle and checks clean dynamic command
-unregistration in addition to the three initial transport-failure cases.
+unregistration in addition to the three initial transport-failure cases. It does not connect a real
+player or click a proposal; focused JVM tests cover the Phase 8 authorization and confirmation chain.
 
 ## Package
 
@@ -174,8 +198,9 @@ unregistration in addition to the three initial transport-failure cases.
 ```
 
 Artifacts are placed under `dist/`. The package contains the implemented persistent conversation,
-resume, explicit module path, shared tool schemas, Runtime loop, and Paper read adapters. Proposals,
-client UI, generic execution, and world changes remain unavailable.
+resume, explicit module path, shared tool/proposal schemas, Runtime loop, Paper read adapters, and
+Paper proposal authorization and audit infrastructure. The production proposal tool catalog is
+empty, and client UI, generic execution, and world changes remain unavailable.
 
 The packaged Runtime preserves its compiled layout and includes the shared protocol schemas and
 configuration template. Install production dependencies before startup:
@@ -203,4 +228,7 @@ authenticated connection, request ID, server ID, and actual player UUID. Phase 6
 live binding for resume, and Runtime additionally scopes every durable session operation by server
 ID plus player UUID. Phase 7 additionally requires both Runtime and Paper to accept only the fixed
 module tool intersection and binds every result to the live request, temporary or durable session,
-player, tool ID, sequence, call ID, connection, and Online epoch.
+player, tool ID, sequence, call ID, connection, and Online epoch. Phase 8 keeps proposal identity,
+expiry, frozen arguments, one-time claim, live reauthorization, fixed confirmation actions, and
+redacted durable audit records under Paper authority. It deliberately enables no production write
+adapter or proposal transport handler.

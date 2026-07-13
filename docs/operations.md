@@ -1,6 +1,6 @@
 # Operations
 
-## Phase 0-7 purpose
+## Phase 0-8 purpose
 
 The repository remains a development implementation, not a deployable Minecraft
 Agent service. Its useful operations are build, format, contract, readiness,
@@ -10,10 +10,13 @@ loopback `/health` route. Paper Phase 3 adds strict startup inputs and a
 Paper-initiated authenticated Runtime hello; the current implementation includes
 conditional `/agent` registration, persistent emergency Offline controls,
 private model requests, Runtime-owned sessions, resume, explicit modules, and
-six fixed typed read tools. The Fabric artifact remains an entry-point scaffold.
+six fixed typed read tools. Phase 8 adds a Paper-owned proposal authorization
+domain, confirmation command boundary, and private persistent audit sink. Its
+production write catalog is empty and no production route creates a proposal or
+mutates Minecraft state. The Fabric artifact remains an entry-point scaffold.
 
 No real API key, production server token, model account, or Litematica
-installation is required for automated Phase 0-7 checks. Tests use temporary
+installation is required for automated Phase 0-8 checks. Tests use temporary
 secrets, private temporary directories, ephemeral loopback ports, fake provider
 adapters, and a fake incompatible Runtime. The exact Paper `1.21.11-132` server
 is used by the Phase 3 decision smoke; successful and token-mismatch cases use
@@ -45,7 +48,7 @@ org.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m
 
 Run one build at a time. Do not run Gradle and npm checks concurrently. Avoid
 Docker, Testcontainers, a local Paper server, or a graphical Fabric client for
-routine Phase 0-7 validation. The pinned Paper smoke is a short, explicit
+routine Phase 0-8 validation. The pinned Paper smoke is a short, explicit
 exception and must not be left running on this host.
 
 If memory pressure appears, keep the one-worker policy and run each subproject
@@ -219,9 +222,9 @@ The state directory is pinned for one plugin lifecycle. Change
 with it; a live recovery rejects a directory change instead of splitting writes
 between two stores.
 
-`/agent off` closes admission immediately, invalidates the current work epoch,
-cancels live requests while the Runtime link is still available, detaches the
-Runtime, then writes DISABLED on the worker.
+`/agent off` closes admission immediately, invalidates the current work epoch
+and every proposal, cancels live requests while the Runtime link is still
+available, detaches the Runtime, then writes DISABLED on the worker.
 Until ONLINE, every command other than an exact one-argument `on` or `off`
 returns exactly `AI offline`. `/agent on` returns immediately, repeats the full
 local check and authenticated handshake, persists ENABLED, and only then returns
@@ -260,6 +263,78 @@ applies both the 64 KiB frame limit and Runtime's structural-token budget.
 Cancellation, quit, Offline, timeout, and Runtime disconnect invalidate pending
 work. Inspecting the optional capability directory still does not load packs;
 the Capability Pack loader remains Phase 9.
+
+## Paper Phase 8 proposal controls
+
+Phase 8 exposes response commands for a real online player:
+
+```text
+/agent confirm <canonical-proposal-uuid>
+/agent reject <canonical-proposal-uuid>
+```
+
+Both require `minecraftagent.proposal.respond`, which defaults to true. Paper
+uses the actual `Player` UUID and never tab-completes proposal IDs. Adventure
+buttons use fixed namespaced `/minecraftagent:agent confirm <uuid>` and
+`/minecraftagent:agent reject <uuid>` click commands; no model, Runtime, summary,
+or argument can provide the command text.
+
+The permission nodes reserved for typed proposal tools are:
+
+| Risk              | Permission                       | Descriptor default |
+| ----------------- | -------------------------------- | ------------------ |
+| `WRITE_TEMPORARY` | `minecraftagent.write.temporary` | false              |
+| `WRITE_WORLD`     | `minecraftagent.write.world`     | op                 |
+| `WRITE_PLAYER`    | `minecraftagent.write.player`    | op                 |
+| `SERVER_ADMIN`    | `minecraftagent.server.admin`    | false              |
+
+The permission node is necessary but not sufficient. World/player writes always
+repeat live OP status; `security.world-write: OWNER` or
+`security.player-write: OWNER` additionally requires the UUID in `owners`.
+Server administration requires an Owner UUID and its dedicated permission.
+Paper reads the current policy again when the player confirms, so changing OP,
+Owner membership, a permission, request state, or the effective tool catalog
+invalidates an old proposal.
+
+Production assigns a 60-second TTL. The model cannot choose or extend it.
+Confirmation atomically claims one pending proposal, repeats all live checks,
+and hands only the same frozen RFC 8785 arguments to its registered typed
+executor. `/agent off`, Runtime loss, disable, and player quit invalidate active
+entries. Restart starts with an empty active repository, so no old proposal can
+be revived.
+
+The authoritative audit path is relative to configured `state.directory`:
+
+```text
+<state>/audit/security-audit-v1.jsonl
+```
+
+Paper creates the `audit` directory as `0700` and the JSONL file as `0600`,
+rejects unsafe path/file state, appends one closed redacted event, and forces it
+before execution admission. Do not loosen permissions or hand-edit/truncate the
+file while Paper is running. Audit records deliberately omit arguments,
+summaries, prompts, credentials, rendered commands, provider data, and raw
+exceptions. An unavailable audit sink fails proposal admission closed; inspect
+the fixed server diagnostic and correct the state directory ownership, mode,
+file type, free space, or I/O error before retrying.
+
+The file has a 64 MiB hard limit and no live rotation path. Archive it before
+that limit is reached: stop Paper, move the complete file to private retained
+storage, and restart so Paper can create a new `0600` file. Never rotate, replace,
+or truncate it while the plugin is running because the pinned file identity is
+part of the audit safety check.
+
+There is no normal operation that can create or execute a write proposal in the
+Phase 8 package. The production proposal tool catalog is empty, the synchronous
+domain service has no production `create` caller, and proposal Runtime-Paper
+transport handlers remain unsupported. The commands and audit path exist so a
+later reviewed typed adapter cannot bypass this boundary.
+
+Do not register the first write tool against the current synchronous call path.
+That integration must persist the durable intent on the I/O worker, then return
+to the Paper thread for live reauthorization, `CLAIMED` to `EXECUTING`
+admission, and Bukkit mutation. Storage `force(true)` must never block the
+primary server thread.
 
 ## Paper Phase 6 conversation commands
 
@@ -325,6 +400,11 @@ schema into one language and edit it independently. A fixture manifest uses
 paths relative to `protocol/`, allowing each test runner to resolve the same
 schema/fixture pair.
 
+The proposal create/confirmed/cancelled schemas and RFC 8785 hash golden are
+Phase 8 contracts only. The authenticated application dispatchers still reject
+all proposal message types as unsupported; do not treat a passing fixture as an
+enabled network route.
+
 When adding a contract:
 
 1. Add the schema with a stable Draft 2020-12 `$id`.
@@ -337,8 +417,8 @@ When adding a contract:
 ## Generated and local files
 
 Build outputs, Gradle caches, Node modules, Runtime data, logs, environment
-files, and local server directories must remain ignored. Secrets are never
-stored in fixtures or committed configuration.
+files, Paper state/audit data, and local server directories must remain ignored.
+Secrets are never stored in fixtures or committed configuration.
 
 `.env.example` and `agent-runtime/config.example.yml` contain placeholder names
 only. The Runtime does not load `.env` files. Production credentials should be
@@ -347,7 +427,7 @@ warning for plan compatibility and should not be used. A group/world-writable
 configuration is always rejected. Inline secrets additionally require a private
 configuration file; inline secrets and broad read permissions may not be combined.
 
-## Phase 3-5 Paper validation
+## Phase 3-8 Paper validation
 
 [ADR 0001](adr/0001-phase3-conditional-command-registration.md) records the
 selected public `Server#getCommandMap` late-registration design. API-level unit
@@ -373,12 +453,15 @@ case. Its real-server matrix is:
 - Online-player `updateCommands()` invocation and stale completion are verified
   by focused JVM tests. The smoke does not connect a real Minecraft client, so
   client-side tree refresh remains an explicit later integration gap.
+- Proposal policy, hash, expiry, atomic claim, invalidation, fixed Adventure
+  actions, and audit redaction are verified by focused JVM tests. The smoke does
+  not create a proposal or connect a player to click one.
 
 The exact commands, artifact hash, and outcomes are recorded in
 `docs/progress.md`. An initial core failure has no command recovery path; fix it
 externally and restart.
 
-## Troubleshooting Phase 0-7
+## Troubleshooting Phase 0-8
 
 ### Dependency resolution fails
 
@@ -406,10 +489,12 @@ or raw peer message. Check the strict Paper configuration, state permissions,
 fake or local Runtime availability, token match, and protocol version, then
 restart. There is no initial `/agent on` path.
 
-After registration, Phase 7 supports private questions, resume, explicit
-one-shot modules, and the fixed read-tool loop. Write tools, proposals,
-Capability Packs, client payloads, overlays, and Litematica adapters remain
-later phases. The Fabric entry point is still a scaffold.
+After registration, Phase 8 supports private questions, resume, explicit
+one-shot modules, the fixed read-tool loop, proposal response commands, and
+private proposal auditing. The write catalog is empty, so no production
+proposal creation or Minecraft write is available. Capability Packs, client
+payloads, overlays, and Litematica adapters remain later phases. The Fabric
+entry point is still a scaffold.
 
 ### `/agent` exists but returns `AI offline`
 

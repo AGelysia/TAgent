@@ -1,9 +1,11 @@
 package dev.minecraftagent.paper;
 
+import dev.minecraftagent.paper.audit.FileProposalAuditLog;
 import dev.minecraftagent.paper.command.AdminToggleAuthorizer;
 import dev.minecraftagent.paper.command.AgentCommand;
 import dev.minecraftagent.paper.command.AgentControl;
 import dev.minecraftagent.paper.command.PaperCommandRegistration;
+import dev.minecraftagent.paper.command.ProposalResponseGateway;
 import dev.minecraftagent.paper.lifecycle.AdminPolicy;
 import dev.minecraftagent.paper.lifecycle.AgentHealth;
 import dev.minecraftagent.paper.lifecycle.AgentStatus;
@@ -12,6 +14,10 @@ import dev.minecraftagent.paper.lifecycle.OfflineCleanup;
 import dev.minecraftagent.paper.lifecycle.OfflineReason;
 import dev.minecraftagent.paper.lifecycle.OperationalGate;
 import dev.minecraftagent.paper.lifecycle.PaperStartupCoordinator;
+import dev.minecraftagent.paper.proposal.InMemoryProposalRepository;
+import dev.minecraftagent.paper.proposal.ProposalAuthorizer;
+import dev.minecraftagent.paper.proposal.ProposalConfirmationResult;
+import dev.minecraftagent.paper.proposal.ProposalService;
 import dev.minecraftagent.paper.request.AgentPlayerListener;
 import dev.minecraftagent.paper.request.AgentRequestService;
 import dev.minecraftagent.paper.startup.LocalStartupChecks;
@@ -30,7 +36,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Clock;
 import java.time.Duration;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
@@ -50,9 +58,14 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
       new AtomicReference<>();
   private final AtomicReference<AgentRequestService> requestServiceReference =
       new AtomicReference<>();
+  private final AtomicReference<ProposalService> proposalServiceReference = new AtomicReference<>();
+  private final AtomicReference<ProposalAuthorizer.Policy> proposalPolicyReference =
+      new AtomicReference<>(lockedProposalPolicy());
 
   @Override
   public void onEnable() {
+    proposalServiceReference.set(null);
+    proposalPolicyReference.set(lockedProposalPolicy());
     var dataDirectory = getDataFolder().toPath().toAbsolutePath().normalize();
     var configPath = dataDirectory.resolve("config.yml");
     var minecraftVersion = getServer().getMinecraftVersion();
@@ -68,6 +81,28 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     var localChecks = new LocalStartupChecks();
     var connector = new JavaHttpRuntimeConnector(worker);
     var operationalGate = new OperationalGate();
+    var proposalAuthorizer =
+        new ProposalAuthorizer(
+            proposalPolicyReference::get,
+            new ProposalAuthorizer.LivePlayerPolicy() {
+              @Override
+              public boolean isOnline(UUID playerUuid) {
+                var player = getServer().getPlayer(playerUuid);
+                return player != null && player.isOnline();
+              }
+
+              @Override
+              public boolean isOperator(UUID playerUuid) {
+                var player = getServer().getPlayer(playerUuid);
+                return player != null && player.isOnline() && player.isOp();
+              }
+
+              @Override
+              public boolean hasPermission(UUID playerUuid, String permission) {
+                var player = getServer().getPlayer(playerUuid);
+                return player != null && player.isOnline() && player.hasPermission(permission);
+              }
+            });
     var toolRegistry = new ReadToolRegistry();
     var toolExecutor =
         new BukkitReadToolExecutor(
@@ -89,7 +124,9 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
             toolExecutor,
             worker);
     requestServiceReference.set(requests);
-    getServer().getPluginManager().registerEvents(new AgentPlayerListener(requests), this);
+    getServer()
+        .getPluginManager()
+        .registerEvents(new AgentPlayerListener(requests, this::invalidatePlayerProposals), this);
 
     var registration =
         new PaperCommandRegistration(
@@ -126,6 +163,7 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
             },
             control,
             requests,
+            proposalResponses(),
             new AdminToggleAuthorizer(
                 () -> {
                   var current = coordinatorReference.get();
@@ -169,6 +207,25 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
               var desiredModeStore = desiredModeStoreReference.get();
               var desiredMode = desiredModeStore.load();
               var policy = result.config().securityPolicy();
+              var proposalPolicy =
+                  new ProposalAuthorizer.Policy(
+                      result.config().owners(),
+                      proposalWriteAccess(policy.worldWrite()),
+                      proposalWriteAccess(policy.playerWrite()));
+              var proposalAudit = FileProposalAuditLog.open(checkedStateDirectory);
+              var proposalService =
+                  new ProposalService(
+                      result.config().serverId(),
+                      new InMemoryProposalRepository(),
+                      ignored -> java.util.Optional.empty(),
+                      proposalAuthorizer,
+                      ignored -> false,
+                      proposalAudit,
+                      operationalGate,
+                      Clock.systemUTC(),
+                      Duration.ofSeconds(60));
+              proposalPolicyReference.set(proposalPolicy);
+              proposalServiceReference.set(proposalService);
               return new CoreReadiness(
                   settings,
                   warnings,
@@ -212,7 +269,15 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
               }
             },
             new OfflineCleanup(
-                requests, (epoch, reason) -> {}, (epoch, reason) -> {}, (epoch, reason) -> {}),
+                requests,
+                (epoch, reason) -> {
+                  var proposals = proposalServiceReference.get();
+                  if (proposals != null) {
+                    proposals.quiesce(epoch, reason);
+                  }
+                },
+                (epoch, reason) -> {},
+                (epoch, reason) -> {}),
             operationalGate,
             requests);
     coordinatorReference.set(coordinator);
@@ -226,6 +291,8 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     if (current != null) {
       current.close();
     }
+    proposalServiceReference.set(null);
+    proposalPolicyReference.set(lockedProposalPolicy());
     var requests = requestServiceReference.getAndSet(null);
     if (requests != null) {
       requests.close();
@@ -234,6 +301,71 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
 
   private void logWarning(String stage, String code) {
     getLogger().warning("event=startup_warning stage=" + stage + " code=" + code);
+  }
+
+  private ProposalResponseGateway proposalResponses() {
+    return new ProposalResponseGateway() {
+      @Override
+      public java.util.concurrent.CompletionStage<Result> confirm(UUID playerId, UUID proposalId) {
+        var proposals = proposalServiceReference.get();
+        if (proposals == null) {
+          return CompletableFuture.completedFuture(Result.UNAVAILABLE);
+        }
+        var result = proposals.confirm(proposalId, playerId);
+        if (result.status() == ProposalConfirmationResult.Status.EXECUTED
+            && "EXECUTED_AUDIT_INCOMPLETE".equals(result.code())) {
+          getLogger().warning("event=proposal_audit_incomplete code=POST_EXECUTION_AUDIT_FAILED");
+        }
+        return CompletableFuture.completedFuture(mapProposalResult(result, true));
+      }
+
+      @Override
+      public java.util.concurrent.CompletionStage<Result> reject(UUID playerId, UUID proposalId) {
+        var proposals = proposalServiceReference.get();
+        if (proposals == null) {
+          return CompletableFuture.completedFuture(Result.UNAVAILABLE);
+        }
+        return CompletableFuture.completedFuture(
+            mapProposalResult(proposals.reject(proposalId, playerId), false));
+      }
+    };
+  }
+
+  private void invalidatePlayerProposals(UUID playerId) {
+    var proposals = proposalServiceReference.get();
+    if (proposals == null) {
+      return;
+    }
+    try {
+      proposals.invalidatePlayer(playerId);
+    } catch (RuntimeException error) {
+      getLogger().warning("event=proposal_warning code=PLAYER_INVALIDATION_AUDIT_FAILED");
+    }
+  }
+
+  private static ProposalResponseGateway.Result mapProposalResult(
+      ProposalConfirmationResult result, boolean confirmation) {
+    return switch (result.status()) {
+      case EXECUTED -> ProposalResponseGateway.Result.CONFIRMED;
+      case FAILED -> ProposalResponseGateway.Result.FAILED;
+      case REJECTED ->
+          !confirmation && "PLAYER_REJECTED".equals(result.code())
+              ? ProposalResponseGateway.Result.REJECTED
+              : ProposalResponseGateway.Result.UNAVAILABLE;
+    };
+  }
+
+  private static ProposalAuthorizer.WriteAccess proposalWriteAccess(
+      dev.minecraftagent.paper.startup.SecurityPolicy.AccessLevel access) {
+    return switch (access) {
+      case OP -> ProposalAuthorizer.WriteAccess.OP;
+      case OWNER -> ProposalAuthorizer.WriteAccess.OWNER;
+    };
+  }
+
+  private static ProposalAuthorizer.Policy lockedProposalPolicy() {
+    return new ProposalAuthorizer.Policy(
+        Set.of(), ProposalAuthorizer.WriteAccess.OWNER, ProposalAuthorizer.WriteAccess.OWNER);
   }
 
   private static void installDefaultConfig(Path dataDirectory, Path configPath)

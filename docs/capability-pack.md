@@ -6,9 +6,11 @@ A Capability Pack is declarative data that maps one known, version-constrained
 server capability to a typed tool. It is not a plugin system and cannot contain
 Java, scripts, expressions, or arbitrary command text.
 
-Phase 1 may define and validate `capability.schema.json`, fixtures, and this
-format. Pack discovery, approval, hot reload, model exposure, command parsing,
-and execution are not implemented in Phase 0-1.
+Phase 1 defines and validates `capability.schema.json`, fixtures, and this
+format. Phase 8 supplies the Paper-owned proposal authorization boundary that a
+future write capability must use, but its production write catalog is empty.
+Pack discovery, approval, hot reload, model exposure, command parsing, and
+execution remain Phase 9 work.
 
 Unknown commands are not executable proposals. They may produce a
 non-executable Capability draft for an owner to review in a future phase.
@@ -185,9 +187,19 @@ SERVER_ADMIN
 ```
 
 The pack can make a policy stricter, never weaker than Paper's local policy.
-World and player writes require current OP by baseline. Server administration
-is owner-only or disabled. Risky operations use Paper-owned proposals and
-execute frozen arguments after a second authorization check.
+World and player writes always require current live OP status and their typed
+permission. An Owner-only local policy adds configured Owner UUID membership;
+it never lets an Owner replace OP. Server administration is Owner-only and
+requires its separate permission. Risky operations use Paper-owned,
+server-expiring, single-use proposals and execute frozen arguments only after a
+second authorization check.
+
+Phase 8 implements that generic typed proposal boundary, its RFC 8785
+domain-separated argument hash, fixed Adventure response actions, Offline/quit
+invalidation, and redacted persistent audit events. It does not load this
+manifest, publish a capability tool, or provide a production proposal-creation
+route. A Phase 9 loader must supply a reviewed typed decoder/validator/executor;
+it cannot point the proposal service at generic command dispatch.
 
 A reversibility declaration is informational until the referenced undo
 capability is independently validated and available. It does not justify a
@@ -207,4 +219,6 @@ larger default limit or skip confirmation.
 - Proof that parsing has no side effect and that an unknown command remains a
   non-executable draft.
 
-No such execution tests are claimed by Phase 0-1.
+Phase 8 tests the proposal permission and single-use chain independently of a
+capability. None of the pack discovery, approval, parsing, or execution tests
+above is claimed until Phase 9 implements the loader and a reviewed adapter.

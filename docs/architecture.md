@@ -2,14 +2,16 @@
 
 ## Status and scope
 
-This document records the target architecture and decisions through Phase 7.
+This document records the target architecture and decisions through Phase 8.
 The repository contains build scaffolding, protocol contracts, the Runtime
 configuration/readiness boundary, Paper-side authenticated startup and Offline
 recovery, private conversations, Runtime-owned sessions, one-shot module
-routing, and a bounded loop for six fixed read-only tools. Proposal and write
-execution, Paper repositories, client views, and Litematica integration remain
-later work. The conditional command and Offline recovery paths have been
-validated on the pinned Paper `1.21.11-132` server artifact.
+routing, a bounded loop for six fixed read-only tools, and Paper-owned proposal
+authorization with private persistent security auditing. The production write
+catalog is empty, so no production path creates a proposal or mutates Minecraft
+state. Capability loading, client views, and Litematica integration remain later
+work. The conditional command and Offline recovery paths have been validated on
+the pinned Paper `1.21.11-132` server artifact.
 
 The implementation has three deployable components:
 
@@ -81,7 +83,7 @@ dev.minecraftagent.paper
   request          live player requests, timeout, cancellation, and private reply
   tool             catalog and execution state machine
   policy           risk and permission intersection
-  proposal         frozen proposals and confirmation
+  proposal         frozen proposals, live reauthorization, and confirmation
   capability       pack loading and effective registry
   minecraft        Paper API adapters for context, recipe, and build operations
   client           custom payload gateway and view sanitization
@@ -98,6 +100,12 @@ executable only after the complete startup gate, and routes calls through the
 separate `tool` domain and Bukkit adapter. It still cannot invoke a descriptor
 generically. The optional capability-directory inspection is not Capability
 Pack loading; the loader and effective capability registry remain Phase 9 work.
+
+Phase 8 introduces a separate typed proposal catalog and service. Production
+publishes an empty implementation: the service has no production `create`
+caller and cannot reinterpret a read descriptor as a write tool. Future write
+adapters must enter through a fixed decoder, validator, live guard, and executor;
+there is no generic command or Bukkit invocation port.
 
 ### Agent Runtime
 
@@ -177,7 +185,7 @@ Paper and Runtime must never write the same SQLite file. A shared SQLite file
 would blur the security boundary and introduces two-process migration and lock
 contention.
 
-The planned split is:
+The authority split is:
 
 | Paper-owned store                         | Runtime-owned store                |
 | ----------------------------------------- | ---------------------------------- |
@@ -194,6 +202,10 @@ versioned protocol. Phase 2 creates the Runtime-owned readiness database file
 and holds its checked connection. Phase 6 applies versioned session/message
 migrations and uses the same private Runtime-owned connection for bounded
 repository operations. Paper still opens no database.
+Phase 8 keeps active proposal state in a bounded in-memory repository and writes
+authoritative, redacted JSONL security events below Paper's private state
+directory. Restart therefore cannot revive a proposal, while the audit history
+survives it.
 
 ## State and health
 
@@ -270,8 +282,8 @@ unregistration path.
 rotates the epoch; permits are issued only ONLINE and revalidation requires both
 ONLINE state and the exact issuing epoch. STOPPING therefore closes command and
 future request/tool/proposal/client admission before cleanup or filesystem I/O.
-The four explicit cleanup ports exist now, while their request, proposal,
-operation, and client producers arrive in later phases.
+The request and proposal cleanup ports have concrete producers; operation and
+client producers arrive in later phases.
 
 Paper persists only `DesiredMode` in a strict private state file. Transient
 health, Runtime failure, connection identity, and Offline reason are never
@@ -336,8 +348,8 @@ The implemented Phase 7 boundary is:
 - Conversation storage can be disabled. That mode persists no message content,
   returns no durable session, and rejects resume explicitly.
 - The application channel supports intermediate `tool.call` and `tool.result`
-  only for the six fixed read tools. Proposal and write execution remain
-  unsupported.
+  only for the six fixed read tools. Runtime-Paper proposal dispatch and write
+  execution remain unsupported.
 - Paper independently repeats the fixed catalog, module, closed-argument,
   player permission, session, sequence, connection, and epoch checks. Bukkit
   reads are scheduled on the server thread; recipe registry scans are sliced
@@ -345,7 +357,7 @@ The implemented Phase 7 boundary is:
 - Tool traffic is transient. Only a successful final user/assistant pair is
   committed to the Runtime conversation transaction.
 
-The following remain outside the Phase 7 implementation boundary:
+The following remained outside the Phase 7 implementation boundary:
 
 - Durable usage accounting and monthly budget enforcement.
 - Proposal creation, confirmation, audit persistence, and every write tool.
@@ -355,3 +367,58 @@ The following remain outside the Phase 7 implementation boundary:
 
 Schemas in the repository define future contracts; they are not evidence that
 the corresponding behavior is active.
+
+## Phase 8 proposal authorization boundary
+
+[ADR 0006](adr/0006-phase8-paper-owned-proposal-authorization.md) keeps proposal
+identity and execution admission entirely under Paper authority. A creation
+request must match a live Paper-originated request context and a registered
+typed write tool. Paper freezes a detached RFC 8785 canonical argument object,
+hashes the domain plus a zero byte plus its UTF-8 canonical bytes, records the
+current catalog generation, and assigns an opaque UUID and server-owned expiry.
+Production fixes the TTL at 60 seconds; the reusable service rejects a TTL over
+ten minutes.
+
+The active repository permits exactly one atomic transition from `PENDING` to
+`CLAIMED`. After the claim and before the typed executor, Paper repeats the
+Online epoch, server/request/session/player binding, actual online player UUID,
+current permission and dynamic risk policy, catalog generation, request
+context, expiry, and frozen hash checks. `WRITE_WORLD` and `WRITE_PLAYER`
+unconditionally require live OP status; an Owner-only local setting adds Owner
+membership instead of replacing OP. The executor receives the same frozen
+arguments and never calls the model again.
+
+The final compare-and-set is `CLAIMED` to `EXECUTING`. Offline and quit cleanup
+may invalidate `PENDING` or `CLAIMED`, but cannot rewrite `EXECUTING` while an
+already admitted typed side effect reaches its terminal audited state.
+Production adapters must keep final admission and Bukkit mutation on the
+primary server thread so Offline commands and player lifecycle events are
+serialized with them.
+
+Adventure confirmation is derived from a safe `ProposalView`. Click events use
+only fixed namespaced `/minecraftagent:agent confirm <uuid>` and
+`/minecraftagent:agent reject <uuid>` commands generated by Paper. Proposal IDs
+are not tab-completed, and neither a model summary nor argument can become a
+command. Player quit invalidates that player's active entries; Offline, Runtime
+loss, and disable invalidate all entries through the proposal cleanup port.
+
+Before execution admission, Paper appends and forces a fixed record to
+`<state>/audit/security-audit-v1.jsonl`. The directory is `0700`, the file is
+`0600`, unsafe links or modes fail closed, and fields are limited to trusted
+correlation IDs, time, risk, tool, catalog generation, event type, and stable
+outcome code. Arguments, display summaries, prompts, credentials, and arbitrary
+exceptions have no audit field. Audit unavailability prevents new proposal
+execution admission.
+
+This phase intentionally stops at the authorization boundary. The production
+write catalog is empty, the synchronous domain service has no production
+creation route, and the authenticated WebSocket still rejects
+`proposal.create`, `proposal.confirmed`, and `proposal.cancelled` as unsupported.
+Unit tests exercise the permission and single-use chain; the pinned real-Paper
+smoke does not connect a player or click an actual proposal.
+
+The synchronous file audit calls are unreachable from a production proposal
+command in Phase 8. Before registering the first write tool, the proposal API
+must be split into worker-thread durable intent persistence and a primary-thread
+final reauthorization/`EXECUTING`/mutation step. No adapter may call
+`force(true)` or wait for storage on the Paper primary thread.

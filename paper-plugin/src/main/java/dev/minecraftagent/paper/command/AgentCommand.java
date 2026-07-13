@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.CompletionStage;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import org.bukkit.command.Command;
@@ -23,6 +24,7 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
   public static final String PERMISSION = "minecraftagent.command.agent";
   public static final String USE_PERMISSION = "minecraftagent.use";
   public static final String MODULE_PERMISSION = "minecraftagent.module";
+  public static final String PROPOSAL_PERMISSION = "minecraftagent.proposal.respond";
   public static final String TOGGLE_PERMISSION = "minecraftagent.admin.toggle";
 
   private static final String OFFLINE_MESSAGE = "AI offline";
@@ -42,11 +44,17 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
   private static final String SESSION_INVALID_MESSAGE = "AI session ID must be a canonical UUID.";
   private static final String MODULE_UNKNOWN_MESSAGE = "Unknown AI module. Use /agent module list.";
   private static final String MODULE_LIST_PREFIX = "AI modules: ";
+  private static final String PROPOSAL_ID_INVALID_MESSAGE = "Proposal ID must be a canonical UUID.";
+  private static final String PROPOSAL_CONFIRMED_MESSAGE = "Proposal confirmed.";
+  private static final String PROPOSAL_REJECTED_MESSAGE = "Proposal rejected.";
+  private static final String PROPOSAL_UNAVAILABLE_MESSAGE = "Proposal is unavailable.";
+  private static final String PROPOSAL_FAILED_MESSAGE = "Proposal response failed. Try again.";
 
   private final Plugin plugin;
   private final Supplier<AgentStatus> status;
   private final AgentControl control;
   private final AgentRequestGateway requests;
+  private final ProposalResponseGateway proposalResponses;
   private final ToggleAuthorizer toggleAuthorizer;
   private final Consumer<Runnable> replyDispatcher;
 
@@ -61,6 +69,7 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
         status,
         control,
         (playerId, message) -> AgentRequestGateway.Submission.RUNTIME_UNAVAILABLE,
+        ProposalResponseGateway.unavailable(),
         toggleAuthorizer,
         replyDispatcher);
   }
@@ -72,15 +81,35 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
       AgentRequestGateway requests,
       ToggleAuthorizer toggleAuthorizer,
       Consumer<Runnable> replyDispatcher) {
+    this(
+        plugin,
+        status,
+        control,
+        requests,
+        ProposalResponseGateway.unavailable(),
+        toggleAuthorizer,
+        replyDispatcher);
+  }
+
+  public AgentCommand(
+      Plugin plugin,
+      Supplier<AgentStatus> status,
+      AgentControl control,
+      AgentRequestGateway requests,
+      ProposalResponseGateway proposalResponses,
+      ToggleAuthorizer toggleAuthorizer,
+      Consumer<Runnable> replyDispatcher) {
     super(
         "agent",
         "Controls Minecraft Agent readiness",
-        "/agent [say <message>|resume [session]|module list|module <name> <message>|doctor|off|on]",
+        "/agent [say <message>|resume [session]|module list|module <name> <message>|confirm"
+            + " <proposal>|reject <proposal>|doctor|off|on]",
         List.of());
     this.plugin = Objects.requireNonNull(plugin);
     this.status = Objects.requireNonNull(status);
     this.control = Objects.requireNonNull(control);
     this.requests = Objects.requireNonNull(requests);
+    this.proposalResponses = Objects.requireNonNull(proposalResponses);
     this.toggleAuthorizer = Objects.requireNonNull(toggleAuthorizer);
     this.replyDispatcher = Objects.requireNonNull(replyDispatcher);
   }
@@ -123,6 +152,10 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
     }
     if (arguments.length >= 1 && arguments[0].equalsIgnoreCase("module")) {
       module(sender, arguments);
+      return true;
+    }
+    if (arguments.length >= 1 && isProposalResponse(arguments[0])) {
+      respondToProposal(sender, arguments);
       return true;
     }
 
@@ -287,6 +320,62 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
         sender, requests.submitModule(player.getUniqueId(), selected.orElseThrow(), message));
   }
 
+  private void respondToProposal(CommandSender sender, String[] arguments) {
+    if (!sender.hasPermission(PROPOSAL_PERMISSION)) {
+      sender.sendMessage(PERMISSION_DENIED_MESSAGE);
+      return;
+    }
+    if (!(sender instanceof Player player)) {
+      sender.sendMessage(PLAYER_ONLY_MESSAGE);
+      return;
+    }
+    if (arguments.length != 2) {
+      sender.sendMessage(getUsage());
+      return;
+    }
+    var proposalId = canonicalUuid(arguments[1]);
+    if (proposalId == null) {
+      sender.sendMessage(PROPOSAL_ID_INVALID_MESSAGE);
+      return;
+    }
+
+    CompletionStage<ProposalResponseGateway.Result> completion;
+    try {
+      completion =
+          arguments[0].equalsIgnoreCase("confirm")
+              ? proposalResponses.confirm(player.getUniqueId(), proposalId)
+              : proposalResponses.reject(player.getUniqueId(), proposalId);
+      if (completion == null) {
+        dispatchProposalReply(sender, ProposalResponseGateway.Result.FAILED);
+        return;
+      }
+      completion.whenComplete(
+          (result, error) ->
+              dispatchProposalReply(
+                  sender,
+                  error == null && result != null
+                      ? result
+                      : ProposalResponseGateway.Result.FAILED));
+    } catch (RuntimeException error) {
+      dispatchProposalReply(sender, ProposalResponseGateway.Result.FAILED);
+    }
+  }
+
+  private void dispatchProposalReply(CommandSender sender, ProposalResponseGateway.Result result) {
+    var message =
+        switch (result) {
+          case CONFIRMED -> PROPOSAL_CONFIRMED_MESSAGE;
+          case REJECTED -> PROPOSAL_REJECTED_MESSAGE;
+          case UNAVAILABLE -> PROPOSAL_UNAVAILABLE_MESSAGE;
+          case FAILED -> PROPOSAL_FAILED_MESSAGE;
+        };
+    try {
+      replyDispatcher.accept(() -> sender.sendMessage(message));
+    } catch (RuntimeException ignored) {
+      // A failed reply dispatch must not expose gateway details or escape command execution.
+    }
+  }
+
   private static void handleSubmission(
       CommandSender sender, AgentRequestGateway.Submission submission) {
     switch (submission) {
@@ -311,6 +400,10 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
 
   private static boolean isToggle(String argument) {
     return argument.equalsIgnoreCase("on") || argument.equalsIgnoreCase("off");
+  }
+
+  private static boolean isProposalResponse(String argument) {
+    return argument.equalsIgnoreCase("confirm") || argument.equalsIgnoreCase("reject");
   }
 
   private static String healthLabel(AgentHealth health) {

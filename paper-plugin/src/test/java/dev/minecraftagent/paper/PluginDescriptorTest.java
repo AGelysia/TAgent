@@ -24,6 +24,31 @@ class PluginDescriptorTest {
       assertTrue(descriptor.contains("minecraftagent.command.agent:"));
       assertTrue(
           descriptor.contains(
+              "minecraftagent.proposal.respond:\n"
+                  + "    description: Allows a player to confirm or reject their own Minecraft Agent proposals\n"
+                  + "    default: true"));
+      assertTrue(
+          descriptor.contains(
+              "minecraftagent.write.temporary:\n"
+                  + "    description: Allows temporary typed proposal tools when one is installed\n"
+                  + "    default: false"));
+      assertTrue(
+          descriptor.contains(
+              "minecraftagent.write.world:\n"
+                  + "    description: Allows authorized operators to confirm typed world writes\n"
+                  + "    default: op"));
+      assertTrue(
+          descriptor.contains(
+              "minecraftagent.write.player:\n"
+                  + "    description: Allows authorized operators to confirm typed player writes\n"
+                  + "    default: op"));
+      assertTrue(
+          descriptor.contains(
+              "minecraftagent.server.admin:\n"
+                  + "    description: Allows configured owners to confirm typed server administration\n"
+                  + "    default: false"));
+      assertTrue(
+          descriptor.contains(
               "minecraftagent.module:\n"
                   + "    description: Allows a player to route one request through an explicit Agent module\n"
                   + "    default: true"));

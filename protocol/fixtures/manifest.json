@@ -498,6 +498,122 @@
       ]
     },
     {
+      "id": "envelope.proposal-create.valid",
+      "category": "valid",
+      "file": "valid/envelope-proposal-create.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        },
+        {
+          "schema": "proposal.schema.json",
+          "documentPointer": "/payload",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "envelope.proposal-confirmed.valid",
+      "category": "valid",
+      "file": "valid/envelope-proposal-confirmed.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        },
+        {
+          "schema": "proposal-confirmed.schema.json",
+          "documentPointer": "/payload",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "envelope.proposal-cancelled.valid",
+      "category": "valid",
+      "file": "valid/envelope-proposal-cancelled.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        },
+        {
+          "schema": "proposal-cancelled.schema.json",
+          "documentPointer": "/payload",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "proposal-confirmed.arguments-leak-invalid",
+      "category": "invalid_field",
+      "file": "invalid/envelope-proposal-confirmed-arguments-leak.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        },
+        {
+          "schema": "proposal-confirmed.schema.json",
+          "documentPointer": "/payload",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "proposal-confirmed.hash-format-invalid",
+      "category": "invalid_format",
+      "file": "invalid/proposal-confirmed-hash-format-invalid.json",
+      "validations": [
+        {
+          "schema": "proposal-confirmed.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "proposal-confirmed.status-invalid",
+      "category": "invalid_value",
+      "file": "invalid/proposal-confirmed-status-invalid.json",
+      "validations": [
+        {
+          "schema": "proposal-confirmed.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "proposal-cancelled.reason-invalid",
+      "category": "invalid_value",
+      "file": "invalid/proposal-cancelled-reason-invalid.json",
+      "validations": [
+        {
+          "schema": "proposal-cancelled.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "proposal-cancelled.missing-correlation",
+      "category": "invalid_field",
+      "file": "invalid/proposal-cancelled-missing-correlation.json",
+      "validations": [
+        {
+          "schema": "proposal-cancelled.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
       "id": "proposal.valid",
       "category": "valid",
       "file": "valid/proposal.json",
@@ -506,6 +622,34 @@
           "schema": "proposal.schema.json",
           "documentPointer": "",
           "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "proposal.argument-hash-v1-golden",
+      "category": "valid",
+      "file": "valid/proposal-argument-hash-v1.json",
+      "validations": [
+        {
+          "schema": "proposal.schema.json",
+          "documentPointer": "/proposal",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "proposal-argument-hash-v1",
+        "expectedValid": true
+      }
+    },
+    {
+      "id": "proposal.summary-control-character-invalid",
+      "category": "invalid_value",
+      "file": "invalid/proposal-summary-control-character.json",
+      "validations": [
+        {
+          "schema": "proposal.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
         }
       ]
     },

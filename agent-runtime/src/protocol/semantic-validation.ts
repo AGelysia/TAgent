@@ -60,6 +60,10 @@ const TOTAL_COMPRESSED_BYTES_FIELDS = [
 ] as const;
 const TOTAL_UNCOMPRESSED_BYTES_FIELDS = ["totalUncompressedBytes", "uncompressedBytes"] as const;
 const CONTENT_HASH_FIELDS = ["contentSha256", "contentHash", "sha256"] as const;
+const PROPOSAL_ARGUMENT_HASH_DOMAIN = "minecraft-agent/proposal-arguments/v1";
+const PROPOSAL_ARGUMENT_CANONICAL_LIMIT_BYTES = 65_536;
+const PROPOSAL_ARGUMENT_NODE_LIMIT = 4_096;
+const PROPOSAL_ARGUMENT_DEPTH_LIMIT = 32;
 
 export const BUILD_PREVIEW_UNCOMPRESSED_HARD_LIMIT_BYTES = 64 * 1024 * 1024;
 export const BUILD_PREVIEW_COMPRESSED_HARD_LIMIT_BYTES = 16 * 1024 * 1024;
@@ -422,6 +426,179 @@ function decodeCanonicalBase64(value: string): Buffer | undefined {
 
 function sha256(value: Buffer | string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function hasValidUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) {
+        return false;
+      }
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function canonicalizeJson(value: unknown): string | undefined {
+  const budget = { nodes: 0, textBytes: 0 };
+
+  function encode(candidate: unknown, depth: number): string | undefined {
+    budget.nodes += 1;
+    if (depth > PROPOSAL_ARGUMENT_DEPTH_LIMIT || budget.nodes > PROPOSAL_ARGUMENT_NODE_LIMIT) {
+      return undefined;
+    }
+    if (candidate === null) {
+      return "null";
+    }
+    if (typeof candidate === "boolean") {
+      return candidate ? "true" : "false";
+    }
+    if (typeof candidate === "number") {
+      return Number.isFinite(candidate) ? JSON.stringify(candidate) : undefined;
+    }
+    if (typeof candidate === "string") {
+      budget.textBytes += Buffer.byteLength(candidate, "utf8");
+      if (
+        !hasValidUnicode(candidate) ||
+        budget.textBytes > PROPOSAL_ARGUMENT_CANONICAL_LIMIT_BYTES
+      ) {
+        return undefined;
+      }
+      return JSON.stringify(candidate);
+    }
+    if (Array.isArray(candidate)) {
+      const encoded: string[] = [];
+      for (let index = 0; index < candidate.length; index += 1) {
+        if (!Object.hasOwn(candidate, index)) {
+          return undefined;
+        }
+        const item = encode(candidate[index], depth + 1);
+        if (item === undefined) {
+          return undefined;
+        }
+        encoded.push(item);
+      }
+      return `[${encoded.join(",")}]`;
+    }
+    if (!isRecord(candidate)) {
+      return undefined;
+    }
+    const prototype = Object.getPrototypeOf(candidate) as unknown;
+    if (prototype !== Object.prototype && prototype !== null) {
+      return undefined;
+    }
+
+    const encoded: string[] = [];
+    for (const key of Object.keys(candidate).sort()) {
+      budget.textBytes += Buffer.byteLength(key, "utf8");
+      if (!hasValidUnicode(key) || budget.textBytes > PROPOSAL_ARGUMENT_CANONICAL_LIMIT_BYTES) {
+        return undefined;
+      }
+      const item = encode(candidate[key], depth + 1);
+      if (item === undefined) {
+        return undefined;
+      }
+      encoded.push(`${JSON.stringify(key)}:${item}`);
+    }
+    return `{${encoded.join(",")}}`;
+  }
+
+  const canonical = encode(value, 0);
+  return canonical !== undefined &&
+    Buffer.byteLength(canonical, "utf8") <= PROPOSAL_ARGUMENT_CANONICAL_LIMIT_BYTES
+    ? canonical
+    : undefined;
+}
+
+export function validateProposalArgumentHash(value: unknown): SemanticValidationError[] {
+  const rule = "proposal-argument-hash-v1";
+  if (!isRecord(value) || !isRecord(value["hashContract"]) || !isRecord(value["proposal"])) {
+    return [
+      semanticError(
+        "PROPOSAL_ARGUMENT_HASH_STRUCTURE_INVALID",
+        rule,
+        "",
+        "proposal argument hash fixture is incomplete",
+      ),
+    ];
+  }
+
+  const hashContract = value["hashContract"];
+  const proposal = value["proposal"];
+  if (
+    hashContract["algorithm"] !== "SHA-256" ||
+    hashContract["domainUtf8"] !== PROPOSAL_ARGUMENT_HASH_DOMAIN ||
+    hashContract["separatorHex"] !== "00" ||
+    hashContract["canonicalization"] !== "RFC8785" ||
+    !isRecord(proposal["arguments"])
+  ) {
+    return [
+      semanticError(
+        "PROPOSAL_ARGUMENT_HASH_CONTRACT_INVALID",
+        rule,
+        "/hashContract",
+        "proposal argument hash contract metadata is invalid",
+      ),
+    ];
+  }
+
+  const canonical = canonicalizeJson(proposal["arguments"]);
+  if (canonical === undefined) {
+    return [
+      semanticError(
+        "PROPOSAL_ARGUMENT_CANONICALIZATION_INVALID",
+        rule,
+        "/proposal/arguments",
+        "proposal arguments cannot be canonicalized as RFC 8785 JSON",
+      ),
+    ];
+  }
+  if (hashContract["canonicalArguments"] !== canonical) {
+    return [
+      semanticError(
+        "PROPOSAL_ARGUMENT_CANONICAL_MISMATCH",
+        rule,
+        "/hashContract/canonicalArguments",
+        "documented canonical arguments do not match the proposal",
+      ),
+    ];
+  }
+
+  const canonicalBytes = Buffer.from(canonical, "utf8");
+  if (hashContract["canonicalUtf8ByteLength"] !== canonicalBytes.length) {
+    return [
+      semanticError(
+        "PROPOSAL_ARGUMENT_CANONICAL_LENGTH_MISMATCH",
+        rule,
+        "/hashContract/canonicalUtf8ByteLength",
+        "documented canonical argument length is incorrect",
+      ),
+    ];
+  }
+
+  const expectedHash = sha256(
+    Buffer.concat([
+      Buffer.from(PROPOSAL_ARGUMENT_HASH_DOMAIN, "utf8"),
+      Buffer.from([0]),
+      canonicalBytes,
+    ]),
+  );
+  if (hashContract["argumentHash"] !== expectedHash || proposal["argumentHash"] !== expectedHash) {
+    return [
+      semanticError(
+        "PROPOSAL_ARGUMENT_HASH_MISMATCH",
+        rule,
+        "/proposal/argumentHash",
+        "proposal argument hash does not match the canonical arguments",
+      ),
+    ];
+  }
+  return [];
 }
 
 function decodeContent(
@@ -1021,6 +1198,9 @@ export function runSemanticValidator(validator: string, value: unknown): Semanti
     case "view-negotiation-v1":
       errors = validateViewNegotiation(value);
       break;
+    case "proposal-argument-hash-v1":
+      errors = validateProposalArgumentHash(value);
+      break;
     case "protocol-version-compatible":
       errors = validateProtocolVersion(value);
       break;
@@ -1059,6 +1239,11 @@ export function validateContractSemantics(
   for (const originalRule of rules) {
     const rule = normalizeRule(originalRule);
     if (rule === "" || rule === "none" || rule.includes("protocol-version")) {
+      continue;
+    }
+
+    if (rule === "proposal-argument-hash-v1") {
+      errors.push(...validateProposalArgumentHash(value));
       continue;
     }
 

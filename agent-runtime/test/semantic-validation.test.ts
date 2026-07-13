@@ -10,6 +10,7 @@ import {
   validateCapabilityManifest,
   validateContractSemantics,
   validateHandshakeProof,
+  validateProposalArgumentHash,
   validateProtocolVersion,
   validateRecipeView,
 } from "../src/protocol/semantic-validation.js";
@@ -90,6 +91,31 @@ describe("protocol semantic validation", () => {
 
     expect(errors).toHaveLength(2);
     expect(errors.every(({ rule }) => rule === "protocol-version-compatible")).toBe(true);
+  });
+
+  it("locks the proposal argument JCS and domain-separated hash vector", async () => {
+    const fixture = JSON.parse(
+      await readFile(
+        resolve(defaultProtocolRoot(), "fixtures/valid/proposal-argument-hash-v1.json"),
+        "utf8",
+      ),
+    ) as Record<string, unknown>;
+
+    expect(validateProposalArgumentHash(fixture)).toEqual([]);
+
+    const wrongHash = structuredClone(fixture);
+    const proposal = wrongHash["proposal"] as Record<string, unknown>;
+    proposal["argumentHash"] = "0".repeat(64);
+    expect(validateProposalArgumentHash(wrongHash)[0]?.code).toBe(
+      "PROPOSAL_ARGUMENT_HASH_MISMATCH",
+    );
+
+    const wrongCanonicalArguments = structuredClone(fixture);
+    const contract = wrongCanonicalArguments["hashContract"] as Record<string, unknown>;
+    contract["canonicalArguments"] = "{}";
+    expect(validateProposalArgumentHash(wrongCanonicalArguments)[0]?.code).toBe(
+      "PROPOSAL_ARGUMENT_CANONICAL_MISMATCH",
+    );
   });
 
   it("accepts a continuous transfer with valid lengths and hashes", () => {

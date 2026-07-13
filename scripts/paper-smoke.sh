@@ -358,22 +358,53 @@ assert_clean_plugin_disable() {
   fi
 }
 
+assert_audit_storage() {
+  local server_root=$1
+  local audit_directory="${server_root}/plugins/MinecraftAgent/state/audit"
+  local audit_file="${audit_directory}/security-audit-v1.jsonl"
+  if [[ ! -d "$audit_directory" || -L "$audit_directory" ]] \
+    || [[ "$(stat -c '%a' "$audit_directory")" != 700 ]]; then
+    printf 'Proposal audit directory is missing or unsafe\n' >&2
+    [[ -e "$audit_directory" || -L "$audit_directory" ]] && stat "$audit_directory" >&2
+    return 1
+  fi
+  if [[ ! -f "$audit_file" || -L "$audit_file" ]] \
+    || [[ "$(stat -c '%a' "$audit_file")" != 600 ]] \
+    || [[ "$(stat -c '%h' "$audit_file")" != 1 ]]; then
+    printf 'Proposal audit file is missing or unsafe\n' >&2
+    [[ -e "$audit_file" || -L "$audit_file" ]] && stat "$audit_file" >&2
+    return 1
+  fi
+  if rg -q "$TEST_TOKEN|$WRONG_TOKEN|phase5-smoke-question" "$audit_file"; then
+    printf 'Proposal audit file contains smoke secrets or message content\n' >&2
+    cat "$audit_file" >&2
+    return 1
+  fi
+}
+
 run_offline_lifecycle_case() {
   local case_root=$1
   local server_root="${case_root}/server"
   local first_log="${case_root}/paper-first.log"
+  local unsafe_audit_log="${case_root}/paper-unsafe-audit.log"
   local restart_log="${case_root}/paper-restart.log"
   local input_fifo="${case_root}/console.input"
   prepare_paper_server "$server_root"
 
   launch_paper "$server_root" "$first_log" "$TEST_TOKEN" "$input_fifo"
   wait_for_log "$first_log" 'event=startup_ready health=DEGRADED' 20
+  assert_audit_storage "$server_root"
   run_console_command "$first_log" 'agent doctor' 'Warning: OPTIONAL_CAPABILITY_UNAVAILABLE$' 10
   if ! rg -q 'Minecraft Agent health: DEGRADED$' <<<"$LAST_COMMAND_OUTPUT"; then
     printf 'Online doctor did not report DEGRADED health\n' >&2
     printf '%s\n' "$LAST_COMMAND_OUTPUT" >&2
     return 1
   fi
+  run_console_command \
+    "$first_log" \
+    'agent confirm aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' \
+    'This command can only be used by a player\.$' \
+    10
   run_console_command \
     "$first_log" 'agent say phase5-smoke-question' 'This command can only be used by a player\.$' 10
   if rg -q 'phase5-smoke-question|Paper smoke response\.' "${case_root}/runtime.log"; then
@@ -400,8 +431,28 @@ run_offline_lifecycle_case() {
   stop_paper
   assert_clean_plugin_disable "$first_log"
 
+  local audit_file="${server_root}/plugins/MinecraftAgent/state/audit/security-audit-v1.jsonl"
+  chmod 640 "$audit_file"
+  launch_paper "$server_root" "$unsafe_audit_log" "$TEST_TOKEN" "$input_fifo"
+  wait_for_log \
+    "$unsafe_audit_log" \
+    'event=startup_failed stage=STATE code=AUDIT_STORAGE_UNSAFE' \
+    20
+  run_console_command \
+    "$unsafe_audit_log" 'agent' 'Unknown or incomplete command' 10
+  if rg -q 'Minecraft Agent: (ONLINE|DEGRADED)|event=startup_ready' \
+    "$unsafe_audit_log"; then
+    printf 'Unsafe proposal audit storage did not fail startup closed\n' >&2
+    tail -n 160 "$unsafe_audit_log" >&2
+    return 1
+  fi
+  stop_paper
+  assert_clean_plugin_disable "$unsafe_audit_log"
+  chmod 600 "$audit_file"
+
   launch_paper "$server_root" "$restart_log" "$TEST_TOKEN" "$input_fifo"
   wait_for_log "$restart_log" 'event=agent_offline reason=MANUAL' 20
+  assert_audit_storage "$server_root"
   run_offline_command "$restart_log" 'agent'
   run_offline_command "$restart_log" 'minecraftagent:agent doctor'
   run_offline_command "$restart_log" 'agent unknown'
@@ -439,6 +490,7 @@ run_offline_lifecycle_case() {
 
   stop_paper
   assert_clean_plugin_disable "$restart_log"
+  assert_audit_storage "$server_root"
   printf 'paper-smoke case=offline-lifecycle result=passed\n'
 }
 

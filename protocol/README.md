@@ -24,19 +24,21 @@ Runtime-Paper messages use two schema passes:
 
 The protocol 1.0 payload registry is:
 
-| Envelope `type`                | Payload schema                |
-| ------------------------------ | ----------------------------- |
-| `runtime.hello`, `paper.hello` | `handshake.schema.json`       |
-| `agent.request`                | `agent-request.schema.json`   |
-| `agent.complete`               | `agent-complete.schema.json`  |
-| `agent.error`                  | `agent-error.schema.json`     |
-| `agent.cancel`                 | `agent-cancel.schema.json`    |
-| `session.resume`               | `session-resume.schema.json`  |
-| `session.resumed`              | `session-resumed.schema.json` |
-| `tool.call`                    | `tool-call.schema.json`       |
-| `tool.result`                  | `tool-result.schema.json`     |
-| `proposal.create`              | `proposal.schema.json`        |
-| `view.publish`                 | `structured-view.schema.json` |
+| Envelope `type`                | Payload schema                   |
+| ------------------------------ | -------------------------------- |
+| `runtime.hello`, `paper.hello` | `handshake.schema.json`          |
+| `agent.request`                | `agent-request.schema.json`      |
+| `agent.complete`               | `agent-complete.schema.json`     |
+| `agent.error`                  | `agent-error.schema.json`        |
+| `agent.cancel`                 | `agent-cancel.schema.json`       |
+| `session.resume`               | `session-resume.schema.json`     |
+| `session.resumed`              | `session-resumed.schema.json`    |
+| `tool.call`                    | `tool-call.schema.json`          |
+| `tool.result`                  | `tool-result.schema.json`        |
+| `proposal.create`              | `proposal.schema.json`           |
+| `proposal.confirmed`           | `proposal-confirmed.schema.json` |
+| `proposal.cancelled`           | `proposal-cancelled.schema.json` |
+| `view.publish`                 | `structured-view.schema.json`    |
 
 The envelope reserves the other protocol message types listed in its enum. A
 consumer must reject one with `UNSUPPORTED_MESSAGE_TYPE` until a concrete
@@ -294,11 +296,66 @@ ID rather than embedding a URL.
 
 ## Proposal and capability semantics
 
-- Proposal `argumentHash` is SHA-256 of RFC 8785 canonical frozen arguments.
-  Expiration, active request binding, live player UUID/OP status, Offline state,
-  current tool policy, region hash, and change-set hash are rechecked at
-  confirmation. Confirmation executes the frozen arguments without another LLM
-  call.
+- `proposal.create` establishes the `PENDING` state. Paper is the authority for
+  the proposal ID, frozen arguments, risk, summary, expiration, and hashes; a
+  model or client value does not establish any of them. The envelope
+  `requestId`, authenticated `serverId`, and payload `proposalId`, `sessionId`,
+  `playerUuid`, `tool`, and `argumentHash` form the correlation tuple.
+- Proposal `argumentHash` is calculated over the exact frozen `arguments`
+  object after tool-specific validation. Let `C` be its RFC 8785 canonical JSON
+  encoded as UTF-8. The digest input is exactly the UTF-8 bytes of
+  `minecraft-agent/proposal-arguments/v1`, one `0x00` byte, then `C`. Hash that
+  byte string with SHA-256 and encode the 32-byte digest as exactly 64 lowercase
+  hexadecimal characters without a prefix. Producers and consumers reject
+  uppercase, `sha256:`-prefixed, base64, or non-canonical encodings rather than
+  normalizing them.
+- RFC 8785's I-JSON constraints apply before hashing. Numeric inputs are parsed
+  as finite IEEE 754 binary64 values and serialized with the ECMAScript number
+  algorithm; values that cannot survive that representation without violating a
+  tool's type contract are rejected rather than hashed with arbitrary-precision
+  or library-specific formatting.
+- `proposal.confirmed` transitions one matching `PENDING` proposal to
+  `CONFIRMED` only after the trusted Paper click handler has consumed its
+  one-time confirmation and all live checks have passed. It means the write was
+  authorized for immediate execution; the subsequent `tool.result` and audit
+  event carry execution success or failure. Confirmation executes the frozen
+  arguments without another LLM call.
+- `proposal.cancelled` transitions one matching `PENDING` proposal to
+  `CANCELLED`. Its `reason` is a closed machine-readable code; arbitrary detail
+  is deliberately absent. Expiration, request cancellation, Offline, disconnect,
+  permission or policy changes, hash mismatch, change-limit failure, invalid
+  request context, unavailable audit persistence, failed execution admission,
+  supersession, and shutdown all invalidate rather than authorize the proposal.
+- Both terminal payloads echo the stored correlation fields and exact
+  `argumentHash`. They are closed schemas and never contain `arguments`, a
+  rendered command, credentials, free-form errors, or an execution result.
+  Terminal events therefore cannot copy sensitive tool parameters into a
+  confirmation result. Logs and user-visible messages must use the trusted
+  bounded `summary` or field-name allowlists, never serialize frozen arguments.
+- Confirmation rechecks expiration, active request binding, live player UUID
+  and online state, OP status, Offline state, current tool policy, argument
+  hash, region hash, change-set hash, and operation limits. A mismatch produces
+  `proposal.cancelled` and no write. Terminal transitions are one-shot;
+  duplicate clicks and late or conflicting terminal messages have no effect.
+- JSON Schema limits only the outer proposal shape. Paper additionally owns the
+  TTL and enforces bounded canonical-argument depth, node count, UTF-8 byte
+  length, and the registered tool's closed argument schema before hashing or
+  storing anything. `expiresAt` must be later than creation and no later than
+  the server's configured maximum TTL; a model cannot extend it. The trusted
+  `summary` rejects C0 and DEL control characters before it can reach Adventure,
+  logs, or a client view.
+- `fixtures/valid/proposal-argument-hash-v1.json` is the cross-language golden
+  vector. Its numeric values intentionally cover RFC 8785's ECMAScript number
+  serialization, including negative zero, exponent form, and binary64 rounding.
+  Implementations must reproduce both `canonicalArguments` and `argumentHash`;
+  merely hashing a JSON library's input spelling or insertion order is invalid.
+
+Phase 8 makes these three payload schemas and the Paper-local authorization
+state machine a shared contract. Schema registration does not install a
+Runtime-Paper proposal transport dispatcher. A component without an explicitly
+wired handler still rejects these message types as unsupported; schema validity
+alone must never create, confirm, cancel, or execute a proposal.
+
 - Capability template placeholders must have a one-to-one match with declared
   arguments. Descriptor ranges must be internally ordered. Values use
   type-specific encoders, control characters are rejected, `commandRoot` must
