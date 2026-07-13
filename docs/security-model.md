@@ -14,7 +14,10 @@ resume, bounded model context, and explicit one-shot modules. Phase 7 enables
 only six fixed typed read tools through a bounded, doubly validated loop. Phase
 8 adds the Paper-owned proposal, confirmation, dynamic authorization, and
 redacted audit boundary while deliberately registering no production write
-tool or proposal transport handler.
+tool or proposal transport handler. Phase 9 adds strict Capability Pack
+discovery, deterministic compatibility checks, exact content approval,
+required-only typed rendering, parse-only command preflight, and atomic
+registry generations while retaining that empty production execution surface.
 
 The governing rule is:
 
@@ -55,6 +58,8 @@ preview, or player click cannot replace Paper-side validation.
 9. Paper revalidates bounds, current region state, block count, and allowed
    BlockStates immediately before a world change.
 10. Offline gating applies at both command dispatch and tool execution.
+11. Capability registry membership is metadata, not invocation authority; a
+    reviewed adapter and the complete proposal chain remain mandatory.
 
 The effective permission is the intersection of local policy, current player
 permission, module allowlist, tool policy, live request context, and proposal
@@ -258,21 +263,117 @@ Capability Packs are data, not plugins. Loading a pack must never load Java,
 scripts, or arbitrary classes. Unknown server commands produce a non-executable
 Capability draft, not an executable proposal.
 
-A command-backed capability is allowed only if the locked Paper and target
-plugin APIs provide a reliable parse-and-validate path before execution. If a
-third-party command cannot be fully validated without executing it, the
-capability stays disabled and a typed plugin adapter is required. Simple string
-replacement followed by command dispatch is prohibited.
+Phase 9 traversal is bounded by entry, file, byte, depth, alias, and YAML-depth
+limits. It rejects unsafe roots, escapes, links, hard links, non-regular
+manifest files, unsafe write modes, invalid UTF-8, and incomplete discovery.
+Only `.json`, `.yml`, and `.yaml` names are installed manifests. Each passes
+through SnakeYAML `SafeConstructor` and then a closed manual typed parser.
+Unknown keys, unexpected nodes, invalid values, duplicate IDs, and inconsistent
+policy disable the affected manifest.
 
-External pack directories require controlled ownership and permissions. A
-future approval record binds pack ID, version, and content hash. Hot reload must
-validate a complete replacement registry before atomically changing the active
-catalog generation.
+Production first requires the plugin data ancestor to be single-owner `0700`
+and proves Paper can write it. The loader inherits that composition boundary,
+uses the capability root owner as its authority, and requires descendants to
+match. It does not independently resolve the process effective UID. A future
+executor or reuse outside this startup composition must pass an explicit
+trusted owner/ancestor into the loader rather than infer authority from the
+candidate root.
 
-Phase 3 only inspects the optional capability directory and converts its
-unavailability into a `DEGRADED` warning. It does not parse, approve, register,
-or execute a pack. The Capability Pack loader and effective registry remain
-Phase 9 work.
+Relative path components are closed and bounded. Final entries use
+`NOFOLLOW_LINKS`, regular files are checked around each read, directories are
+checked around enumeration, and parsing/approval is followed by a complete
+second discovery whose sorted entry fingerprint must equal the first. Ordinary
+concurrent modification is a non-publishable `ROOT_CHANGED` failure.
+
+This does not extend the local threat model to a malicious writer running as
+the Paper OS UID or root. Path-based checks cannot prove the absence of every
+intermediate-component symlink race or deliberately restored ABA state.
+Capability maintenance must occur while Paper is stopped. Before execution,
+online reload, or same-UID writers become in-scope adversaries, the loader must
+take the trusted owner explicitly and use `SecureDirectoryStream` with
+descriptor-relative traversal instead of path re-resolution.
+
+`status: example` and `status: draft` are permanent deny markers. A status-free
+manifest remains disabled until all required plugins match a deterministic
+numeric version range and a Paper-owned approval port matches its complete
+capability ID, positive integer manifest version, and lowercase SHA-256 of the
+RFC 8785 canonical typed content. A pack cannot declare its own approval. Any
+content change invalidates the old hash approval. Production obtains the exact
+lookup set from the strict, bounded `capabilities.approvals` configuration.
+
+Manifest `number` minima and maxima are validated before hashing. Their
+normalized decimal must survive conversion to IEEE-754 binary64, JCS number
+serialization, and decimal parsing without changing value. Negative zero is
+normalized to zero; `0.10000000000000001` and `9007199254740993` are rejected.
+This prevents distinct source decimals from receiving one approval identity
+after JCS rounding.
+
+Console source is default-deny and no manifest field can override that policy.
+Risk, permission, confirmation, maximum-block, and reversal declarations are
+checked as an intersection: pack data can narrow authority but cannot raise it.
+A reversal target is separately validated and approved; missing, unavailable,
+self-referential, or cyclic targets are denied. It must also match the source
+capability's command source, effect category, scope, and normalized plugin
+requirements. Effective entries map risk, permission, confirmation, and block
+limits into typed Phase 8 policy metadata without acquiring an executor.
+
+The effective registry is an immutable snapshot. A complete candidate produces
+a bounded `added`, `removed`, `changed`, and `unchanged` diff. Publication is one
+atomic snapshot and generation change; incomplete discovery or a global
+authority failure cannot publish a partial traversal. Ordinary per-manifest
+rejection is retained as a disabled draft in the complete evaluated snapshot;
+it does not hide independent valid entries. Each future request and proposal
+must bind the exact generation that defined it.
+
+An unavailable optional root retains the prior snapshot rather than publishing
+an empty interpretation of unreadable state. Catalog logs allow only validated
+capability IDs, generation/status, fixed diff classes, stable diagnostic counts,
+and the exact version/hash tuple needed for approval. Manifest descriptions,
+arguments, templates, paths, parser exceptions, and other raw values are not
+logged.
+
+Global load failures use a separate fixed `capability_catalog_diagnostic` code
+event. `capability_manifest_disabled` counts only diagnostics attached to draft
+manifests, so one global condition is not presented twice as both catalog and
+manifest failure.
+
+Only `PUBLISHED` catalog events use the unprefixed `added`, `removed`,
+`changed`, and `unchanged` fields. `STALE` and `REJECTED` events label the
+unapplied preview as `proposed_added`, `proposed_removed`, `proposed_changed`,
+and `proposed_unchanged`, while their generation field remains the active
+generation. Local desired-state and audit-path safety checks occur before
+publication; Runtime authentication occurs afterward. A failed handshake may
+therefore update inert metadata but cannot register the command or make a
+capability executable.
+
+Typed argument compilation is closed and required-only. Every declared argument
+must be present and an undeclared argument is rejected. Each semantic codec
+renders only its bounded canonical grammar. The fixed template is printable
+ASCII, begins with an exact trusted root, and is at most 1024 characters;
+placeholders cannot modify literal text or introduce a separator, quote,
+newline, control character, or extra command structure. The rendered command is
+again bounded and root-checked.
+
+Brigadier preflight calls parse only, requires the exact registered root and
+full input consumption with a resolved command, and never calls execute or
+Bukkit dispatch. A third-party Bukkit command may appear under a Paper
+top-level Brigadier wrapper without exposing the plugin's real parser. Such a
+node is not proof of complete or side-effect-free validation. Execution remains
+disabled unless the locked target provides a separately reviewed parser or a
+typed API adapter.
+
+Load-time plugin compatibility can become stale after a plugin disable, enable,
+or version change. Every future executor must repeat current catalog/generation
+availability and each required plugin's live enabled/version check at proposal
+creation and immediately before final execution. An approved effective entry is
+not a live authorization fact.
+
+Phase 9 intentionally exposes no generic dispatch operation, no pack-backed
+Runtime tool, and no Capability proposal-creation route. An effective record has
+no executor. Before the first write adapter, Phase 8 audit persistence and
+`force(true)` must run on a worker and return to the primary thread for the last
+live checks, `EXECUTING` transition, and Bukkit mutation. A synchronous audit
+call on the Paper thread or a simple render-and-dispatch path is prohibited.
 
 ## Client and view safety
 
@@ -362,15 +463,19 @@ Responses request only for admitted player work.
 
 ## Current enforcement gap
 
-At the Phase 8 boundary, Paper-side startup, authenticated application channel,
+At the Phase 9 boundary, Paper-side startup, authenticated application channel,
 conditional registration, persistent Offline state, epoch gate, private
 conversation, request cancellation, Runtime-owned sessions, owner-filtered
 resume, one-shot modules, bounded context, Runtime provider limits, and six
 typed read-only tools exist. Paper also has a proposal repository, response
 command boundary, dynamic authorizer, Offline/quit invalidation, and private
-persistent audit sink. The production proposal catalog is empty, the
-synchronous service has no production creation path, and proposal WebSocket
-handlers, write-operation and client-state producers, durable usage accounting,
-the Phase 9 capability loader, client payload handling, and world mutation
-remain absent. Protocol schemas remain necessary contracts, not evidence that a
-later feature is reachable.
+persistent audit sink. It now also has a bounded Capability Pack loader,
+deterministic version and approval checks, immutable registry generations,
+typed command rendering, and parse-only Brigadier preflight.
+
+The production proposal catalog is still empty, the synchronous service has no
+production creation path, and no capability record has an executor. Proposal
+WebSocket handlers, write-operation and client-state producers, durable usage
+accounting, trusted third-party command adapters, client payload handling, and
+world mutation remain absent. Protocol schemas and an effective capability
+record remain necessary contracts, not evidence that execution is reachable.

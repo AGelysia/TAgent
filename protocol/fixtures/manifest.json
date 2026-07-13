@@ -1151,6 +1151,202 @@
       }
     },
     {
+      "id": "capability.status-example",
+      "category": "valid",
+      "file": "valid/capability-status-example.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "capability-manifest-v1",
+        "expectedValid": true
+      }
+    },
+    {
+      "id": "capability.status-self-approved",
+      "category": "policy_override",
+      "file": "invalid/capability-status-self-approved.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "capability.console-self-authorization",
+      "category": "policy_override",
+      "file": "invalid/capability-console-self-authorization.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "capability.optional-argument",
+      "category": "semantic_error",
+      "file": "invalid/capability-optional-argument.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "capability-manifest-v1",
+        "expectedValid": false,
+        "errorCode": "CAPABILITY_OPTIONAL_ARGUMENT_UNSUPPORTED"
+      }
+    },
+    {
+      "id": "capability.placeholder-not-standalone",
+      "category": "semantic_error",
+      "file": "invalid/capability-placeholder-not-standalone.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "capability-manifest-v1",
+        "expectedValid": false,
+        "errorCode": "CAPABILITY_TEMPLATE_PLACEHOLDER_MALFORMED"
+      }
+    },
+    {
+      "id": "capability.plugin-version-range",
+      "category": "semantic_error",
+      "file": "invalid/capability-plugin-version-range.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "capability-manifest-v1",
+        "expectedValid": false,
+        "errorCode": "CAPABILITY_PLUGIN_VERSION_RANGE_INVALID"
+      }
+    },
+    {
+      "id": "capability.plugin-duplicate",
+      "category": "semantic_error",
+      "file": "invalid/capability-plugin-duplicate.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "capability-manifest-v1",
+        "expectedValid": false,
+        "errorCode": "CAPABILITY_PLUGIN_REQUIREMENT_DUPLICATE"
+      }
+    },
+    {
+      "id": "capability.plugin-version-golden",
+      "category": "valid",
+      "file": "valid/capability-plugin-version-v1.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "/manifest",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "capability-plugin-version-v1",
+        "expectedValid": true
+      }
+    },
+    {
+      "id": "capability.effect-constraint",
+      "category": "semantic_error",
+      "file": "invalid/capability-effect-constraint.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "capability-manifest-v1",
+        "expectedValid": false,
+        "errorCode": "CAPABILITY_EFFECT_CONSTRAINT_INVALID"
+      }
+    },
+    {
+      "id": "capability.confirmation-policy",
+      "category": "semantic_error",
+      "file": "invalid/capability-confirmation-policy.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "capability-manifest-v1",
+        "expectedValid": false,
+        "errorCode": "CAPABILITY_CONFIRMATION_POLICY_INVALID"
+      }
+    },
+    {
+      "id": "capability-pack.reversal-valid",
+      "category": "valid",
+      "file": "valid/capability-pack-reversal.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "/capabilities/0",
+          "expectedValid": true
+        },
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "/capabilities/1",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "capability-pack-v1",
+        "expectedValid": true
+      }
+    },
+    {
+      "id": "capability-pack.reversal-missing",
+      "category": "semantic_error",
+      "file": "invalid/capability-pack-reversal-missing.json",
+      "validations": [
+        {
+          "schema": "capability.schema.json",
+          "documentPointer": "/capabilities/0",
+          "expectedValid": true
+        }
+      ],
+      "semanticValidation": {
+        "validator": "capability-pack-v1",
+        "expectedValid": false,
+        "errorCode": "CAPABILITY_REVERSIBILITY_TARGET_INVALID"
+      }
+    },
+    {
       "id": "capability.command-injection",
       "category": "command_injection",
       "file": "invalid/capability-command-injection.json",

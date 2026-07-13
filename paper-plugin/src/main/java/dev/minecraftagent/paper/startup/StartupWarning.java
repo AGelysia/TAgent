@@ -4,7 +4,9 @@ import java.util.Objects;
 
 public record StartupWarning(Code code, Stage stage) {
   public enum Code {
-    OPTIONAL_CAPABILITY_UNAVAILABLE
+    OPTIONAL_CAPABILITY_UNAVAILABLE,
+    CAPABILITY_CATALOG_UNAVAILABLE,
+    CAPABILITY_PACK_DISABLED
   }
 
   public enum Stage {

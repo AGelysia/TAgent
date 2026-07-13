@@ -214,11 +214,11 @@ describe("protocol semantic validation", () => {
     );
   });
 
-  it("leaves console source and semicolon policy to Paper", () => {
+  it("leaves console source and fixed semicolon literal policy to Paper", () => {
     const capability = validCapabilityFixture();
     const execution = capability["execution"] as Record<string, unknown>;
     execution["source"] = "console";
-    execution["template"] = "/say {message};literal";
+    execution["template"] = "/say {message} ;literal";
 
     expect(validateCapabilityManifest(capability)).toEqual([]);
   });
@@ -280,7 +280,14 @@ describe("protocol semantic validation", () => {
 
 function validCapabilityFixture(): Record<string, unknown> {
   return {
+    id: "example.say",
+    version: 1,
+    description: "Send one fixed-form message",
+    requirements: {
+      plugins: [],
+    },
     execution: {
+      type: "command",
       source: "player",
       commandRoot: "say",
       template: "/say {message}",
@@ -288,10 +295,25 @@ function validCapabilityFixture(): Record<string, unknown> {
     arguments: {
       message: {
         type: "string",
+        description: "Message token",
         required: true,
         minLength: 1,
         maxLength: 64,
       },
+    },
+    effects: {
+      category: "READ",
+      scope: "request",
+      maximumBlocks: null,
+    },
+    permissions: {
+      minimum: "ANY",
+    },
+    confirmation: {
+      required: false,
+    },
+    reversibility: {
+      type: "none",
     },
   };
 }

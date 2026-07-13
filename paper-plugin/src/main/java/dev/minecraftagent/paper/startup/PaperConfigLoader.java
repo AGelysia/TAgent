@@ -2,6 +2,7 @@ package dev.minecraftagent.paper.startup;
 
 import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 
+import dev.minecraftagent.paper.capability.model.CapabilityApproval;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
@@ -40,7 +41,11 @@ public final class PaperConfigLoader {
   private static final Pattern OWNER_UUID =
       Pattern.compile(
           "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+  private static final Pattern CAPABILITY_ID =
+      Pattern.compile("^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+$");
+  private static final Pattern SHA256 = Pattern.compile("^[0-9a-f]{64}$");
   private static final int MAX_OWNERS = 128;
+  private static final int MAX_CAPABILITY_APPROVALS = 128;
 
   private static final Set<String> PHASE_3_ROOT_KEYS =
       Set.of("config-version", "server", "runtime", "state", "security", "capabilities");
@@ -53,6 +58,9 @@ public final class PaperConfigLoader {
   private static final Set<String> SECURITY_KEYS =
       Set.of("policy-version", "world-write", "player-write", "server-admin", "allow-op-toggle");
   private static final Set<String> CAPABILITY_KEYS = Set.of("directory");
+  private static final Set<String> CAPABILITY_KEYS_WITH_APPROVALS =
+      Set.of("directory", "approvals");
+  private static final Set<String> CAPABILITY_APPROVAL_KEYS = Set.of("id", "version", "sha256");
 
   public PaperStartupConfig load(
       Path configFile, Path dataDirectory, Map<String, String> environment) throws StartupFailure {
@@ -100,14 +108,16 @@ public final class PaperConfigLoader {
     var securityPolicy = parseSecurityPolicy(security);
     securityPolicy.validate();
 
-    var capabilities =
-        requireMapping(
-            root, "capabilities", CAPABILITY_KEYS, StartupFailure.Code.PAPER_CONFIG_INVALID);
+    var capabilities = requireCapabilityMapping(root);
     var optionalCapabilityDirectory =
         resolveContainedDirectory(
             normalizedDataDirectory,
             requireString(capabilities, "directory", StartupFailure.Code.PAPER_CONFIG_INVALID),
             StartupFailure.Code.PAPER_CONFIG_INVALID);
+    var capabilityApprovals =
+        capabilities.containsKey("approvals")
+            ? requireCapabilityApprovals(capabilities)
+            : Set.<CapabilityApproval>of();
 
     return new PaperStartupConfig(
         serverId,
@@ -116,7 +126,8 @@ public final class PaperConfigLoader {
             endpoint, serverToken, connectTimeout, handshakeTimeout),
         stateDirectory,
         securityPolicy,
-        optionalCapabilityDirectory);
+        optionalCapabilityDirectory,
+        capabilityApprovals);
   }
 
   private static Map<?, ?> parseRoot(Path configFile) throws StartupFailure {
@@ -268,6 +279,48 @@ public final class PaperConfigLoader {
       }
     }
     return Set.copyOf(owners);
+  }
+
+  private static Map<?, ?> requireCapabilityMapping(Map<?, ?> root) throws StartupFailure {
+    var value = root.get("capabilities");
+    if (!(value instanceof Map<?, ?> mapping)) {
+      throw failure(StartupFailure.Code.PAPER_CONFIG_INVALID, StartupFailure.Stage.CONFIG);
+    }
+    requireExactKeys(
+        mapping,
+        mapping.containsKey("approvals") ? CAPABILITY_KEYS_WITH_APPROVALS : CAPABILITY_KEYS,
+        StartupFailure.Code.PAPER_CONFIG_INVALID);
+    return mapping;
+  }
+
+  private static Set<CapabilityApproval> requireCapabilityApprovals(Map<?, ?> capabilities)
+      throws StartupFailure {
+    var value = capabilities.get("approvals");
+    if (!(value instanceof List<?> entries) || entries.size() > MAX_CAPABILITY_APPROVALS) {
+      throw failure(StartupFailure.Code.PAPER_CONFIG_INVALID, StartupFailure.Stage.CONFIG);
+    }
+
+    var approvals = new LinkedHashSet<CapabilityApproval>();
+    for (var entry : entries) {
+      if (!(entry instanceof Map<?, ?> approval)) {
+        throw failure(StartupFailure.Code.PAPER_CONFIG_INVALID, StartupFailure.Stage.CONFIG);
+      }
+      requireExactKeys(
+          approval, CAPABILITY_APPROVAL_KEYS, StartupFailure.Code.PAPER_CONFIG_INVALID);
+      var id = requireString(approval, "id", StartupFailure.Code.PAPER_CONFIG_INVALID);
+      var version = requireInteger(approval, "version", StartupFailure.Code.PAPER_CONFIG_INVALID);
+      var sha256 = requireString(approval, "sha256", StartupFailure.Code.PAPER_CONFIG_INVALID);
+      if (!CAPABILITY_ID.matcher(id).matches()
+          || id.length() > 128
+          || version < 1
+          || !SHA256.matcher(sha256).matches()) {
+        throw failure(StartupFailure.Code.PAPER_CONFIG_INVALID, StartupFailure.Stage.CONFIG);
+      }
+      if (!approvals.add(new CapabilityApproval(id, version, sha256))) {
+        throw failure(StartupFailure.Code.PAPER_CONFIG_INVALID, StartupFailure.Stage.CONFIG);
+      }
+    }
+    return Set.copyOf(approvals);
   }
 
   private static Path resolveContainedDirectory(

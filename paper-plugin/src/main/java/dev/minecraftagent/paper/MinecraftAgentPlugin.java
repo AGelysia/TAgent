@@ -1,6 +1,10 @@
 package dev.minecraftagent.paper;
 
 import dev.minecraftagent.paper.audit.FileProposalAuditLog;
+import dev.minecraftagent.paper.capability.PaperInstalledPluginInventory;
+import dev.minecraftagent.paper.capability.load.CapabilityPackLoader;
+import dev.minecraftagent.paper.capability.model.CapabilityDiagnostic;
+import dev.minecraftagent.paper.capability.registry.CapabilityRegistry;
 import dev.minecraftagent.paper.command.AdminToggleAuthorizer;
 import dev.minecraftagent.paper.command.AgentCommand;
 import dev.minecraftagent.paper.command.AgentControl;
@@ -22,6 +26,7 @@ import dev.minecraftagent.paper.request.AgentPlayerListener;
 import dev.minecraftagent.paper.request.AgentRequestService;
 import dev.minecraftagent.paper.startup.LocalStartupChecks;
 import dev.minecraftagent.paper.startup.StartupFailure;
+import dev.minecraftagent.paper.startup.StartupWarning;
 import dev.minecraftagent.paper.state.FileDesiredModeStore;
 import dev.minecraftagent.paper.tool.BukkitReadToolExecutor;
 import dev.minecraftagent.paper.tool.ReadToolRegistry;
@@ -38,7 +43,10 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.List;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
@@ -61,6 +69,7 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
   private final AtomicReference<ProposalService> proposalServiceReference = new AtomicReference<>();
   private final AtomicReference<ProposalAuthorizer.Policy> proposalPolicyReference =
       new AtomicReference<>(lockedProposalPolicy());
+  private final CapabilityRegistry capabilityRegistry = new CapabilityRegistry();
 
   @Override
   public void onEnable() {
@@ -79,6 +88,10 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
               return thread;
             });
     var localChecks = new LocalStartupChecks();
+    var pluginInventory =
+        new PaperInstalledPluginInventory(
+            java.util.Arrays.asList(getServer().getPluginManager().getPlugins()));
+    getServer().getPluginManager().registerEvents(pluginInventory, this);
     var connector = new JavaHttpRuntimeConnector(worker);
     var operationalGate = new OperationalGate();
     var proposalAuthorizer =
@@ -194,7 +207,8 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
                       runtime.connectTimeout(),
                       runtime.handshakeTimeout());
               var warnings =
-                  result.warnings().stream().map(warning -> warning.code().name()).toList();
+                  new TreeSet<>(
+                      result.warnings().stream().map(warning -> warning.code().name()).toList());
               var checkedStateDirectory = result.config().stateDirectory();
               var trustedStateDirectory = stateDirectoryReference.get();
               if (trustedStateDirectory == null) {
@@ -224,11 +238,12 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
                       operationalGate,
                       Clock.systemUTC(),
                       Duration.ofSeconds(60));
+              refreshCapabilityCatalog(result, pluginInventory, warnings);
               proposalPolicyReference.set(proposalPolicy);
               proposalServiceReference.set(proposalService);
               return new CoreReadiness(
                   settings,
-                  warnings,
+                  List.copyOf(warnings),
                   desiredMode,
                   desiredModeStore,
                   new AdminPolicy(result.config().owners(), policy.allowOpToggle()));
@@ -301,6 +316,97 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
 
   private void logWarning(String stage, String code) {
     getLogger().warning("event=startup_warning stage=" + stage + " code=" + code);
+  }
+
+  private void refreshCapabilityCatalog(
+      dev.minecraftagent.paper.startup.LocalStartupResult startup,
+      PaperInstalledPluginInventory pluginInventory,
+      Set<String> warnings) {
+    if (startup.warnings().stream()
+        .anyMatch(
+            warning -> warning.code() == StartupWarning.Code.OPTIONAL_CAPABILITY_UNAVAILABLE)) {
+      getLogger()
+          .warning(
+              "event=capability_catalog status=RETAINED generation="
+                  + capabilityRegistry.snapshot().generation()
+                  + " code=OPTIONAL_CAPABILITY_UNAVAILABLE");
+      return;
+    }
+
+    var approvals = startup.config().capabilityApprovals();
+    var loaded =
+        new CapabilityPackLoader(pluginInventory, approvals::contains)
+            .load(startup.config().optionalCapabilityDirectory());
+    var preview = capabilityRegistry.preview(loaded);
+    var publication = capabilityRegistry.publish(preview);
+    if (publication.status() != CapabilityRegistry.PublishStatus.PUBLISHED) {
+      warnings.add(StartupWarning.Code.CAPABILITY_CATALOG_UNAVAILABLE.name());
+    } else if (loaded.drafts().stream().anyMatch(draft -> !draft.enabled())) {
+      warnings.add(StartupWarning.Code.CAPABILITY_PACK_DISABLED.name());
+    }
+
+    var diffPrefix =
+        publication.status() == CapabilityRegistry.PublishStatus.PUBLISHED ? "" : "proposed_";
+    getLogger()
+        .info(
+            "event=capability_catalog status="
+                + publication.status().name()
+                + " generation="
+                + publication.snapshot().generation()
+                + " "
+                + diffPrefix
+                + "added="
+                + formatCapabilityIds(preview.diff().added())
+                + " "
+                + diffPrefix
+                + "removed="
+                + formatCapabilityIds(preview.diff().removed())
+                + " "
+                + diffPrefix
+                + "changed="
+                + formatCapabilityIds(preview.diff().changed())
+                + " "
+                + diffPrefix
+                + "unchanged="
+                + formatCapabilityIds(preview.diff().unchanged()));
+
+    var diagnosticCounts = new TreeMap<CapabilityDiagnostic.Code, Integer>();
+    for (var diagnostic : loaded.globalDiagnostics()) {
+      getLogger().warning("event=capability_catalog_diagnostic code=" + diagnostic.code().name());
+    }
+    for (var draft : loaded.drafts()) {
+      for (var diagnostic : draft.diagnostics()) {
+        diagnosticCounts.merge(diagnostic.code(), 1, Integer::sum);
+      }
+      if (draft.diagnostics().stream()
+          .anyMatch(
+              diagnostic -> diagnostic.code() == CapabilityDiagnostic.Code.APPROVAL_REQUIRED)) {
+        draft
+            .identity()
+            .ifPresent(
+                identity ->
+                    getLogger()
+                        .info(
+                            "event=capability_approval_required id="
+                                + identity.id()
+                                + " version="
+                                + identity.version()
+                                + " sha256="
+                                + identity.contentSha256()));
+      }
+    }
+    for (var entry : diagnosticCounts.entrySet()) {
+      getLogger()
+          .warning(
+              "event=capability_manifest_disabled code="
+                  + entry.getKey().name()
+                  + " count="
+                  + entry.getValue());
+    }
+  }
+
+  private static String formatCapabilityIds(Set<String> ids) {
+    return ids.isEmpty() ? "-" : String.join(",", ids);
   }
 
   private ProposalResponseGateway proposalResponses() {

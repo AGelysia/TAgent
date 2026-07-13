@@ -356,15 +356,38 @@ Runtime-Paper proposal transport dispatcher. A component without an explicitly
 wired handler still rejects these message types as unsupported; schema validity
 alone must never create, confirm, cancel, or execute a proposal.
 
-- Capability template placeholders must have a one-to-one match with declared
-  arguments. Descriptor ranges must be internally ordered. Values use
+- Capability template placeholders must each occupy one complete space-delimited
+  command token and have a one-to-one match with declared arguments. A fixed
+  command with `arguments: {}` and no placeholders is valid.
+  Optional arguments are not valid in v1 because the format has no optional
+  template segments. Descriptor ranges must be internally ordered. Values use
   type-specific encoders, control characters are rejected, `commandRoot` must
   resolve to the expected plugin, and the fully rendered command must pass the
   server parser without leftovers.
+- Plugin requirements use only space-separated numeric comparators. Each
+  comparator is one of `=`, `>`, `>=`, `<`, or `<=` followed by one to three
+  numeric components, for example `=2.20.1` or `>=7.3 <8`. Bare versions,
+  wildcards, pre-release labels, alternatives, and duplicate plugin names are
+  invalid. One range contains at most 16 comparisons within the schema's
+  128-character bound. This validates the range language only; Paper still
+  compares it with the exact installed plugin identity and version. An
+  installed version uses the same one-to-three numeric-component grammar
+  without an operator. Missing components compare as zero; suffixes and leading
+  zeroes are invalid and disable the capability rather than being normalized.
+- Only `WRITE_WORLD` has a non-null `maximumBlocks`, and it must be bounded by
+  the schema. The other effect categories use null. Every non-`READ` effect
+  requires confirmation; a pack can require confirmation for a read as a
+  stricter policy.
 - The capability schema can represent `source: console` so manifests have a
   stable shape, but Paper policy rejects console source by default. A manifest
-  being schema-valid never enables it. Write effects still require the local
-  permission policy and confirmation.
+  being schema-valid never enables it. No `consolePolicy` or similar override
+  exists in the closed schema, so pack content cannot relax that default. Write
+  effects still require the local permission policy and confirmation.
+- Optional `status` is exactly `example` or `draft`. Either value is an
+  unconditional deny marker and can never enter the effective registry. An
+  absent status means only that the manifest is a normal candidate; approval is
+  separate Paper-owned `(id, version, hash)` state. Values such as `approved`
+  are rejected by the schema.
 - Capability v1 does not accept manifest-supplied regular expressions. A future
   schema may add a portable, bounded pattern language only after Java and
   TypeScript validators can prove identical behavior.
@@ -374,26 +397,44 @@ its first error in this order:
 
 | Error code                                  | Rule                                                                                           |
 | ------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `CAPABILITY_TEMPLATE_PLACEHOLDER_MALFORMED` | Braces do not contain one complete declared-name token.                                        |
+| `CAPABILITY_TEMPLATE_PLACEHOLDER_MALFORMED` | Braces do not contain one complete declared-name token, or the placeholder is not standalone.  |
 | `CAPABILITY_TEMPLATE_ARGUMENT_UNDECLARED`   | A placeholder has no argument descriptor.                                                      |
 | `CAPABILITY_TEMPLATE_ARGUMENT_DUPLICATE`    | One argument is substituted more than once.                                                    |
 | `CAPABILITY_REQUIRED_ARGUMENT_UNUSED`       | A required argument descriptor has no template placeholder.                                    |
 | `CAPABILITY_OPTIONAL_ARGUMENT_UNSUPPORTED`  | A command template argument is not required; optional template segments are not defined in v1. |
 | `CAPABILITY_COMMAND_ROOT_MISMATCH`          | The template's first literal command token differs from `commandRoot`.                         |
 | `CAPABILITY_ARGUMENT_RANGE_INVALID`         | Numeric or string descriptor minimum exceeds its maximum.                                      |
+| `CAPABILITY_PLUGIN_REQUIREMENT_DUPLICATE`   | A plugin name appears more than once, compared case-insensitively.                             |
+| `CAPABILITY_PLUGIN_VERSION_RANGE_INVALID`   | A plugin range is outside the closed numeric comparator grammar.                               |
 | `CAPABILITY_EFFECT_CONSTRAINT_INVALID`      | Effect category, scope, and maximum-block constraints are inconsistent.                        |
 | `CAPABILITY_CONFIRMATION_POLICY_INVALID`    | A write/admin effect does not require confirmation.                                            |
+| `CAPABILITY_PACK_ID_DUPLICATE`              | A complete candidate set contains the same capability ID more than once.                       |
 | `CAPABILITY_REVERSIBILITY_TARGET_INVALID`   | A referenced reversal capability is missing or incompatible in the loaded pack set.            |
 
-Phase 1 executes placeholder shape/coverage, required-only template arguments,
-command-root equality, and descriptor range ordering. Effect/confirmation
-consistency, reversal target resolution, plugin ownership, and rendered-command parsing require Paper policy
-and the effective registry in Phase 9; their codes remain reserved until then.
+The Phase 9 shared contract executes placeholder shape/coverage, required-only
+template arguments, command-root equality, descriptor ranges, plugin range
+syntax, effect limits, and confirmation consistency. `capability-pack-v1`
+additionally resolves reversal targets over a complete candidate set. A target
+must be an independently valid normal candidate, cannot refer to itself, and
+must have the same execution source, effect category, scope, and plugin
+requirement set. `fixtures/valid/capability-pack-reversal.json` and its missing
+target counterpart keep this rule identical in TypeScript and Java. The golden
+set is semantic test input, not a new pack-file or wire format.
+
+`fixtures/valid/capability-plugin-version-v1.json` is the cross-language version
+comparison vector. Its conjunction exercises all five comparison operators and
+covers omitted zero components, ordinary mismatches, suffix rejection,
+leading-zero rejection, and too many components. The validator proves
+deterministic matching only; it does not prove that a plugin owns a command root
+or approve the capability.
 
 Resolving `commandRoot` to the expected installed plugin, checking its version,
-enforcing `source: console`, and checking the live permission are later Paper
-policy steps. They must not be reported as manifest structure success merely
-because `capability-manifest-v1` passed.
+enforcing `source: console`, rejecting `ANY` for writes, requiring `OWNER` for
+server administration, rejecting reversal cycles/transitively unavailable
+targets, and checking live permission are Paper policy and complete-publication
+steps. They must not be reported as manifest structure success merely because
+`capability-manifest-v1` passed. Likewise, neither semantic validator approves,
+registers, renders, proposes, or executes a capability.
 
 ## Fixtures
 

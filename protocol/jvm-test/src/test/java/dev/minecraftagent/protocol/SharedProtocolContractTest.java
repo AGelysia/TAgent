@@ -15,6 +15,7 @@ import com.networknt.schema.resource.UriSchemaLoader;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -28,7 +29,9 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
@@ -44,6 +47,13 @@ final class SharedProtocolContractTest {
     private static final int MAX_PREVIEW_UNCOMPRESSED_BYTES = 67_108_864;
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Pattern PLACEHOLDER = Pattern.compile("\\{([a-z][a-zA-Z0-9_]{0,63})}");
+    private static final Pattern CAPABILITY_PLUGIN_VERSION_RANGE = Pattern.compile(
+            "^(?:=|>=|>|<=|<)(?:0|[1-9][0-9]*)(?:\\.(?:0|[1-9][0-9]*)){0,2}"
+                    + "(?: (?:=|>=|>|<=|<)(?:0|[1-9][0-9]*)(?:\\.(?:0|[1-9][0-9]*)){0,2})*$");
+    private static final Pattern CAPABILITY_PLUGIN_VERSION =
+            Pattern.compile("^(?:0|[1-9][0-9]*)(?:\\.(?:0|[1-9][0-9]*)){0,2}$");
+    private static final Pattern CAPABILITY_PLUGIN_COMPARISON = Pattern.compile(
+            "^(>=|<=|=|>|<)((?:0|[1-9][0-9]*)(?:\\.(?:0|[1-9][0-9]*)){0,2})$");
     private static final SchemaValidatorsConfig SCHEMA_CONFIG = schemaConfig();
     private static final String SCHEMA_ID_PREFIX = "https://minecraft-agent.dev/schemas/1.0/";
     private static final String PROPOSAL_ARGUMENT_HASH_DOMAIN =
@@ -96,6 +106,8 @@ final class SharedProtocolContractTest {
             case "build-preview-transfer-v1" -> validateBuildPreview(fixture);
             case "recipe-view-v1" -> validateRecipeView(fixture);
             case "capability-manifest-v1" -> validateCapability(fixture);
+            case "capability-pack-v1" -> validateCapabilityPack(fixture);
+            case "capability-plugin-version-v1" -> validateCapabilityPluginVersion(fixture);
             case "view-negotiation-v1" -> validateViewNegotiation(fixture);
             case "proposal-argument-hash-v1" -> validateProposalArgumentHash(fixture);
             default -> List.of("SEMANTIC_VALIDATOR_UNKNOWN");
@@ -434,12 +446,27 @@ final class SharedProtocolContractTest {
     }
 
     private List<String> validateCapability(JsonNode manifest) {
+        if (!manifest.isObject()
+                || !manifest.path("requirements").path("plugins").isArray()
+                || !manifest.path("execution").isObject()
+                || !manifest.path("arguments").isObject()
+                || !manifest.path("effects").isObject()
+                || !manifest.path("confirmation").isObject()
+                || !manifest.path("reversibility").isObject()) {
+            return List.of("CAPABILITY_STRUCTURE_INVALID");
+        }
         var execution = manifest.path("execution");
         var template = execution.path("template").asText();
         var arguments = manifest.path("arguments");
         var argumentUses = new HashMap<String, Integer>();
         var matcher = PLACEHOLDER.matcher(template);
         while (matcher.find()) {
+            if (matcher.start() == 0
+                    || template.charAt(matcher.start() - 1) != ' '
+                    || (matcher.end() < template.length()
+                            && template.charAt(matcher.end()) != ' ')) {
+                return List.of("CAPABILITY_TEMPLATE_PLACEHOLDER_MALFORMED");
+            }
             var argument = matcher.group(1);
             argumentUses.merge(argument, 1, Integer::sum);
         }
@@ -479,7 +506,167 @@ final class SharedProtocolContractTest {
                 return List.of("CAPABILITY_ARGUMENT_RANGE_INVALID");
             }
         }
+
+        var pluginNames = new HashSet<String>();
+        for (var plugin : manifest.path("requirements").path("plugins")) {
+            var normalizedName = plugin.path("name").asText().toLowerCase(Locale.ROOT);
+            if (!pluginNames.add(normalizedName)) {
+                return List.of("CAPABILITY_PLUGIN_REQUIREMENT_DUPLICATE");
+            }
+            var versionRange = plugin.path("version").asText();
+            if (!CAPABILITY_PLUGIN_VERSION_RANGE.matcher(versionRange).matches()
+                    || versionRange.split(" ").length > 16) {
+                return List.of("CAPABILITY_PLUGIN_VERSION_RANGE_INVALID");
+            }
+        }
+
+        var effects = manifest.path("effects");
+        var category = effects.path("category").asText();
+        var maximumBlocks = effects.path("maximumBlocks");
+        if (("WRITE_WORLD".equals(category) && !maximumBlocks.isNumber())
+                || (!"WRITE_WORLD".equals(category) && !maximumBlocks.isNull())) {
+            return List.of("CAPABILITY_EFFECT_CONSTRAINT_INVALID");
+        }
+        if (!"READ".equals(category)
+                && !manifest.path("confirmation").path("required").asBoolean()) {
+            return List.of("CAPABILITY_CONFIRMATION_POLICY_INVALID");
+        }
         return List.of();
+    }
+
+    private List<String> validateCapabilityPack(JsonNode pack) {
+        var capabilities = pack.path("capabilities");
+        if (!pack.isObject() || !capabilities.isArray()) {
+            return List.of("CAPABILITY_PACK_STRUCTURE_INVALID");
+        }
+        var byId = new HashMap<String, JsonNode>();
+        for (var capability : capabilities) {
+            var manifestIssues = validateCapability(capability);
+            if (!manifestIssues.isEmpty()) {
+                return manifestIssues;
+            }
+            var id = capability.path("id").asText();
+            if (byId.putIfAbsent(id, capability) != null) {
+                return List.of("CAPABILITY_PACK_ID_DUPLICATE");
+            }
+        }
+        for (var capability : capabilities) {
+            var reversibility = capability.path("reversibility");
+            if (!"capability".equals(reversibility.path("type").asText())) {
+                continue;
+            }
+            var target = byId.get(reversibility.path("capability").asText());
+            if (target == null
+                    || target == capability
+                    || target.has("status")
+                    || !target.path("execution")
+                            .path("source")
+                            .equals(capability.path("execution").path("source"))
+                    || !target.path("effects")
+                            .path("category")
+                            .equals(capability.path("effects").path("category"))
+                    || !target.path("effects")
+                            .path("scope")
+                            .equals(capability.path("effects").path("scope"))
+                    || !pluginRequirements(target).equals(pluginRequirements(capability))) {
+                return List.of("CAPABILITY_REVERSIBILITY_TARGET_INVALID");
+            }
+        }
+        return List.of();
+    }
+
+    private Map<String, String> pluginRequirements(JsonNode capability) {
+        var requirements = new HashMap<String, String>();
+        for (var plugin : capability.path("requirements").path("plugins")) {
+            requirements.put(
+                    plugin.path("name").asText().toLowerCase(Locale.ROOT),
+                    plugin.path("version").asText());
+        }
+        return requirements;
+    }
+
+    private List<String> validateCapabilityPluginVersion(JsonNode golden) {
+        var manifest = golden.path("manifest");
+        var cases = golden.path("cases");
+        if (!golden.isObject() || !manifest.isObject() || !cases.isArray() || cases.isEmpty()) {
+            return List.of("CAPABILITY_PLUGIN_VERSION_GOLDEN_STRUCTURE_INVALID");
+        }
+        var manifestIssues = validateCapability(manifest);
+        if (!manifestIssues.isEmpty()) {
+            return manifestIssues;
+        }
+        var plugins = manifest.path("requirements").path("plugins");
+        if (plugins.size() != 1) {
+            return List.of("CAPABILITY_PLUGIN_VERSION_GOLDEN_STRUCTURE_INVALID");
+        }
+        var range = plugins.get(0).path("version").asText();
+        for (var testCase : cases) {
+            if (!testCase.path("installedVersion").isTextual()
+                    || !Set.of("match", "mismatch", "invalid")
+                            .contains(testCase.path("expected").asText())) {
+                return List.of("CAPABILITY_PLUGIN_VERSION_GOLDEN_STRUCTURE_INVALID");
+            }
+            var installedVersion = testCase.path("installedVersion").asText();
+            var expected = testCase.path("expected").asText();
+            var installed = parseCapabilityVersion(installedVersion);
+            var actual = installed == null
+                    ? "invalid"
+                    : capabilityVersionMatches(range, installed) ? "match" : "mismatch";
+            if (!actual.equals(expected)) {
+                return List.of("CAPABILITY_PLUGIN_VERSION_GOLDEN_MISMATCH");
+            }
+        }
+        return List.of();
+    }
+
+    private List<BigInteger> parseCapabilityVersion(String value) {
+        if (value.length() > 128 || !CAPABILITY_PLUGIN_VERSION.matcher(value).matches()) {
+            return null;
+        }
+        var components = new ArrayList<BigInteger>(3);
+        for (var component : value.split("\\.")) {
+            components.add(new BigInteger(component));
+        }
+        while (components.size() < 3) {
+            components.add(BigInteger.ZERO);
+        }
+        return components;
+    }
+
+    private boolean capabilityVersionMatches(String range, List<BigInteger> installed) {
+        for (var token : range.split(" ")) {
+            var comparison = CAPABILITY_PLUGIN_COMPARISON.matcher(token);
+            if (!comparison.matches()) {
+                return false;
+            }
+            var boundary = parseCapabilityVersion(comparison.group(2));
+            if (boundary == null) {
+                return false;
+            }
+            var order = compareCapabilityVersions(installed, boundary);
+            var matches = switch (comparison.group(1)) {
+                case "=" -> order == 0;
+                case ">" -> order > 0;
+                case ">=" -> order >= 0;
+                case "<" -> order < 0;
+                case "<=" -> order <= 0;
+                default -> false;
+            };
+            if (!matches) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private int compareCapabilityVersions(List<BigInteger> left, List<BigInteger> right) {
+        for (var index = 0; index < 3; index++) {
+            var comparison = left.get(index).compareTo(right.get(index));
+            if (comparison != 0) {
+                return comparison;
+            }
+        }
+        return 0;
     }
 
     private List<String> validateViewNegotiation(JsonNode negotiation) {

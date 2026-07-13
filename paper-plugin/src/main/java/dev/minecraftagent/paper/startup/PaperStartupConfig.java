@@ -1,5 +1,6 @@
 package dev.minecraftagent.paper.startup;
 
+import dev.minecraftagent.paper.capability.model.CapabilityApproval;
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -54,6 +55,7 @@ public final class PaperStartupConfig {
   private final Path stateDirectory;
   private final SecurityPolicy securityPolicy;
   private final Path optionalCapabilityDirectory;
+  private final Set<CapabilityApproval> capabilityApprovals;
 
   public PaperStartupConfig(
       String serverId,
@@ -61,13 +63,15 @@ public final class PaperStartupConfig {
       RuntimeSettings runtime,
       Path stateDirectory,
       SecurityPolicy securityPolicy,
-      Path optionalCapabilityDirectory) {
+      Path optionalCapabilityDirectory,
+      Set<CapabilityApproval> capabilityApprovals) {
     this.serverId = Objects.requireNonNull(serverId);
     this.owners = Set.copyOf(owners);
     this.runtime = Objects.requireNonNull(runtime);
     this.stateDirectory = Objects.requireNonNull(stateDirectory);
     this.securityPolicy = Objects.requireNonNull(securityPolicy);
     this.optionalCapabilityDirectory = Objects.requireNonNull(optionalCapabilityDirectory);
+    this.capabilityApprovals = Set.copyOf(capabilityApprovals);
   }
 
   public String serverId() {
@@ -94,6 +98,10 @@ public final class PaperStartupConfig {
     return optionalCapabilityDirectory;
   }
 
+  public Set<CapabilityApproval> capabilityApprovals() {
+    return capabilityApprovals;
+  }
+
   @Override
   public String toString() {
     return "PaperStartupConfig[serverId="
@@ -104,6 +112,8 @@ public final class PaperStartupConfig {
         + runtime
         + ", stateDirectory=<redacted>, securityPolicy="
         + securityPolicy
-        + ", optionalCapabilityDirectory=<redacted>]";
+        + ", optionalCapabilityDirectory=<redacted>, capabilityApprovalsCount="
+        + capabilityApprovals.size()
+        + "]";
   }
 }

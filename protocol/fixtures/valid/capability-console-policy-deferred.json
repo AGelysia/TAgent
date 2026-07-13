@@ -1,6 +1,7 @@
 {
   "id": "example.console_info",
   "version": 1,
+  "status": "draft",
   "description": "Schema-valid console source rejected later by Paper policy.",
   "requirements": {
     "plugins": []

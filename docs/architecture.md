@@ -2,16 +2,18 @@
 
 ## Status and scope
 
-This document records the target architecture and decisions through Phase 8.
+This document records the target architecture and decisions through Phase 9.
 The repository contains build scaffolding, protocol contracts, the Runtime
 configuration/readiness boundary, Paper-side authenticated startup and Offline
 recovery, private conversations, Runtime-owned sessions, one-shot module
 routing, a bounded loop for six fixed read-only tools, and Paper-owned proposal
-authorization with private persistent security auditing. The production write
-catalog is empty, so no production path creates a proposal or mutates Minecraft
-state. Capability loading, client views, and Litematica integration remain later
-work. The conditional command and Offline recovery paths have been validated on
-the pinned Paper `1.21.11-132` server artifact.
+authorization with private persistent security auditing. Phase 9 adds a
+fail-closed Capability Pack loader, typed renderer, parse-only Brigadier
+preflight boundary, and immutable generation registry. The production write
+catalog remains empty: no Capability route creates a proposal, dispatches a
+command, or mutates Minecraft state. Client views and Litematica integration
+remain later work. The conditional command and Offline recovery paths have been
+validated on the pinned Paper `1.21.11-132` server artifact.
 
 The implementation has three deployable components:
 
@@ -98,14 +100,18 @@ Phase 3 introduced `CoreToolRuntime` as non-executable readiness metadata.
 Phase 7 retains the exact six read-only, closed-schema descriptors, marks them
 executable only after the complete startup gate, and routes calls through the
 separate `tool` domain and Bukkit adapter. It still cannot invoke a descriptor
-generically. The optional capability-directory inspection is not Capability
-Pack loading; the loader and effective capability registry remain Phase 9 work.
+generically. Phase 9 adds a separate Capability loader and registry whose
+effective records deliberately contain no invocation operation.
 
 Phase 8 introduces a separate typed proposal catalog and service. Production
 publishes an empty implementation: the service has no production `create`
 caller and cannot reinterpret a read descriptor as a write tool. Future write
 adapters must enter through a fixed decoder, validator, live guard, and executor;
 there is no generic command or Bukkit invocation port.
+
+Phase 9 does not fill that catalog or add a creation caller. Capability
+validation, approval, and registry publication are prerequisites for a future
+adapter, not a bridge around the Phase 8 boundary.
 
 ### Agent Runtime
 
@@ -361,7 +367,8 @@ The following remained outside the Phase 7 implementation boundary:
 
 - Durable usage accounting and monthly budget enforcement.
 - Proposal creation, confirmation, audit persistence, and every write tool.
-- Capability Pack loading and command-backed capability execution are Phase 9.
+- Capability Pack loading was assigned to Phase 9; generic command-backed
+  execution remains excluded.
 - Client payload networking, overlay UI, item views, recipe behavior, locate,
   guide, project, build, and Litematica behavior.
 
@@ -422,3 +429,103 @@ command in Phase 8. Before registering the first write tool, the proposal API
 must be split into worker-thread durable intent persistence and a primary-thread
 final reauthorization/`EXECUTING`/mutation step. No adapter may call
 `force(true)` or wait for storage on the Paper primary thread.
+
+## Phase 9 fail-closed capability broker
+
+[ADR 0007](adr/0007-phase9-fail-closed-capability-broker.md) separates
+declarative discovery, effective registry publication, command preflight, and
+actual execution. Phase 9 implements the first three boundaries without
+providing the fourth.
+
+The loader walks only the configured Paper-owned capability root. Entry count,
+file count, per-file and total bytes, directory depth, YAML aliases, and YAML
+depth are bounded. Unsafe roots, path escapes, links, non-regular or hard-linked
+manifest files, unsafe write modes, invalid UTF-8, and incomplete discovery
+produce stable diagnostics. Only `.json`, `.yml`, and `.yaml` files are installed
+manifests. All three pass through SnakeYAML `SafeConstructor` and a second
+closed manual parser that rejects unknown keys, node types, values, and
+inconsistent risk, permission, confirmation, or reversal declarations.
+
+Relative path components use a closed bounded grammar. Files are checked around
+their final-component `NOFOLLOW_LINKS` read, directories are checked before and
+after enumeration, and a second full discovery must reproduce the first sorted
+entry fingerprint after parsing and approval. An ordinary concurrent change is
+therefore non-publishable. Traversal remains path based, however; it does not
+claim descriptor-relative protection against an intermediate symlink swap or a
+restored ABA state by a same-UID/root writer. The current threat model requires
+offline pack maintenance. Online reload or a broader local-adversary model must
+first adopt `SecureDirectoryStream` descriptor-relative traversal.
+
+Plugin compatibility is derived from a Paper-owned point-in-time inventory.
+The v1 range language accepts only explicit comparisons over one to three
+numeric components. Missing, disabled, ambiguous, non-numeric, or mismatched
+plugins disable a manifest. A manifest with `status: example` or
+`status: draft` is permanently non-effective; absence of status is only
+eligibility for the separate approval step. Console source is rejected by
+default and pack data has no local-policy override.
+
+That inventory is load-time evidence only. A future executor must recheck the
+current catalog entry/generation and each required plugin's live enabled state
+and version at proposal creation and final execution. Registry membership alone
+cannot satisfy live compatibility.
+
+Paper hashes the RFC 8785 canonical typed manifest with SHA-256. Owner approval
+is an exact port lookup over capability ID, positive integer manifest version,
+and lowercase content hash. Production supplies that port from the bounded,
+strict `capabilities.approvals` configuration snapshot. A complete load builds
+an immutable candidate registry. Preview computes `added`, `removed`,
+`changed`, and `unchanged` IDs; publication atomically swaps the snapshot and
+advances the generation. An incomplete traversal or global authority failure
+cannot publish. An ordinary rejected manifest remains a disabled draft in the
+complete evaluated snapshot, so independent valid entries need not be hidden.
+Publication uses compare-and-set against the preview base. An unavailable
+optional root retains the prior generation. Fixed logs expose only validated
+diff IDs, generation/status, stable draft-disabled code counts, separate stable
+global catalog diagnostic codes, and the exact ID/version/hash tuple needed for
+a separately reviewed approval. Global failures are not double-counted in the
+draft-manifest totals.
+
+Unapplied `STALE` and `REJECTED` previews use `proposed_added`,
+`proposed_removed`, `proposed_changed`, and `proposed_unchanged`; only a
+`PUBLISHED` event uses unprefixed diff fields. For an unapplied preview, the
+event's generation remains the active snapshot generation. Publication runs
+after local desired-state and proposal-audit path safety checks but before
+Runtime authentication. A failed Runtime handshake can therefore leave a new
+metadata generation, which remains non-executable and does not make startup
+successful.
+
+The argument compiler accepts only the closed manifest types and required
+arguments. Supplied JSON must contain every declared name and no undeclared
+name. Type-specific codecs apply range and grammar checks before a fixed ASCII
+template can render. The template, rendered command, and root are bounded to
+1024 characters; placeholders cannot alter trusted literals or introduce
+additional template structure.
+
+Before content hashing, each `number` argument bound must round-trip from its
+normalized decimal through IEEE-754 binary64 and RFC 8785/JCS serialization
+back to the same decimal. Collision-prone values such as
+`0.10000000000000001` and `9007199254740993` are rejected before an approval
+identity can be created.
+
+`BrigadierCommandPreflight` removes the one trusted leading slash and invokes
+only dispatcher parsing. It requires exact root membership, complete reader
+consumption, context nodes, and a resolved command, and never invokes
+`CommandDispatcher.execute` or Bukkit dispatch. Paper's top-level Brigadier
+node can be a compatibility wrapper for a third-party Bukkit command. That node
+alone does not demonstrate a complete side-effect-free target parser, so a
+locked target-specific parser or typed API adapter is still required before
+execution can be enabled.
+
+An effective record maps effect category to the matching Phase 8 `RiskLevel`
+and carries typed permission, confirmation, and block-limit metadata, but no
+executor. Reversal references additionally require a separately effective
+target with matching command source, effect category, scope, and normalized
+plugin requirements; incompatibility and cycles disable the referencing graph.
+
+Production exposes no generic command-dispatch port, Capability proposal
+creation route, or pack-backed Runtime tool. Effective capability records are
+validated metadata without an executor. Unknown commands remain Proposal Only
+and may produce non-executable draft material, never a proposal. Before the
+first write adapter, the Phase 8 durable-audit path must also move persistence
+and `force(true)` to the worker and return to the primary thread for final live
+reauthorization, `EXECUTING` admission, and Bukkit mutation.

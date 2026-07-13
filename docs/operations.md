@@ -1,6 +1,6 @@
 # Operations
 
-## Phase 0-8 purpose
+## Phase 0-9 purpose
 
 The repository remains a development implementation, not a deployable Minecraft
 Agent service. Its useful operations are build, format, contract, readiness,
@@ -13,10 +13,14 @@ private model requests, Runtime-owned sessions, resume, explicit modules, and
 six fixed typed read tools. Phase 8 adds a Paper-owned proposal authorization
 domain, confirmation command boundary, and private persistent audit sink. Its
 production write catalog is empty and no production route creates a proposal or
-mutates Minecraft state. The Fabric artifact remains an entry-point scaffold.
+mutates Minecraft state. Phase 9 adds bounded Capability Pack discovery,
+deterministic compatibility and approval checks, typed rendering, parse-only
+Brigadier preflight, and immutable registry generations. It does not add a
+generic command dispatch or Capability proposal-creation route. The Fabric
+artifact remains an entry-point scaffold.
 
 No real API key, production server token, model account, or Litematica
-installation is required for automated Phase 0-8 checks. Tests use temporary
+installation is required for automated Phase 0-9 checks. Tests use temporary
 secrets, private temporary directories, ephemeral loopback ports, fake provider
 adapters, and a fake incompatible Runtime. The exact Paper `1.21.11-132` server
 is used by the Phase 3 decision smoke; successful and token-mismatch cases use
@@ -48,7 +52,7 @@ org.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m
 
 Run one build at a time. Do not run Gradle and npm checks concurrently. Avoid
 Docker, Testcontainers, a local Paper server, or a graphical Fabric client for
-routine Phase 0-8 validation. The pinned Paper smoke is a short, explicit
+routine Phase 0-9 validation. The pinned Paper smoke is a short, explicit
 exception and must not be left running on this host.
 
 If memory pressure appears, keep the one-worker policy and run each subproject
@@ -171,13 +175,16 @@ real token in `config.yml`. State paths remain beneath the plugin data directory
 `allow-op-toggle` defaults to false; do not enable it unless every live OP should
 be eligible for the dedicated toggle permission.
 
-The Phase 3 startup order is:
+The current startup order extends the Phase 3 boundary as follows:
 
 ```text
 platform + strict config + security policy
   -> private state directory probe
   -> six core descriptor readiness checks
   -> optional capability directory inspection
+  -> desired-state load and private proposal-audit path open
+  -> bounded capability pack load and second-fingerprint verification
+  -> immutable capability registry preview/publication
   -> authenticated Runtime hello with timeout
   -> return to the Paper primary thread
   -> conditional /agent registration and player command-tree refresh
@@ -185,7 +192,9 @@ platform + strict config + security policy
 
 Filesystem and Runtime work stay off the primary thread. A missing or invalid
 optional capability directory produces a warning and `DEGRADED`; it does not
-block registration. Any core failure leaves both `agent` and
+block registration or expose a partial capability registry. Pack diagnostics
+are stable and value-free; they must not contain manifest values or paths. Any
+core failure leaves both `agent` and
 `minecraftagent:agent` absent. Correct the configuration, state permissions,
 Runtime availability, token, or protocol externally and restart the server.
 Phase 4 `/agent on` is not an initial-startup recovery mechanism.
@@ -261,8 +270,8 @@ and model loops remain asynchronous. Recipe lookup/usage scans at most 128
 registry entries or 2 ms per scheduled slice, returns at most 16 matches, and
 applies both the 64 KiB frame limit and Runtime's structural-token budget.
 Cancellation, quit, Offline, timeout, and Runtime disconnect invalidate pending
-work. Inspecting the optional capability directory still does not load packs;
-the Capability Pack loader remains Phase 9.
+work. Phase 9 pack entries do not join this six-tool Runtime loop and do not add
+a command executor or a proposal creation route.
 
 ## Paper Phase 8 proposal controls
 
@@ -325,7 +334,7 @@ or truncate it while the plugin is running because the pinned file identity is
 part of the audit safety check.
 
 There is no normal operation that can create or execute a write proposal in the
-Phase 8 package. The production proposal tool catalog is empty, the synchronous
+Phase 9 package. The production proposal tool catalog is empty, the synchronous
 domain service has no production `create` caller, and proposal Runtime-Paper
 transport handlers remain unsupported. The commands and audit path exist so a
 later reviewed typed adapter cannot bypass this boundary.
@@ -335,6 +344,149 @@ That integration must persist the durable intent on the I/O worker, then return
 to the Paper thread for live reauthorization, `CLAIMED` to `EXECUTING`
 admission, and Bukkit mutation. Storage `force(true)` must never block the
 primary server thread.
+
+## Paper Phase 9 capability controls
+
+The configured capability root is relative to the Paper plugin data directory:
+
+```yaml
+capabilities:
+  directory: capabilities
+  approvals: []
+```
+
+Do not point it outside the plugin directory, replace it with a symlink, or
+loosen its ownership or mode. The default load limits are 512 discovered
+entries, 128 manifest files, 256 KiB per file, 4 MiB total content, eight
+directory levels, zero YAML aliases, and YAML depth 32. Invalid UTF-8,
+path escapes, links, hard-linked or non-regular manifest files, unsafe write
+modes, oversize data, or an incomplete walk produce stable diagnostics. Only
+case-insensitive `.json`, `.yml`, and `.yaml` files are loaded as manifests;
+other regular files are ignored but still count as directory entries. All
+supported extensions use the same safe construction and closed parse. A global
+traversal, plugin-inventory, approval-source, or hash failure cannot publish. An
+ordinary invalid manifest becomes a disabled draft in the complete replacement
+instead of hiding independent valid entries.
+
+The normal startup composition has already required the plugin data directory
+to be single-owner `0700` and writable by Paper. The capability loader relies
+on that trusted ancestor, then treats the capability root owner as authoritative
+and requires descendants to match it. Do not reuse the loader against a root
+owned by a different account; it does not independently compare the root owner
+with the process effective UID.
+
+Path components are limited to bounded ASCII names. The loader checks directory
+identity around enumeration and file identity around a final-component
+`NOFOLLOW_LINKS` read. After all parsing, compatibility, approval, and reversal
+work, it repeats the entire discovery and compares names, types, file keys,
+sizes, owners, permissions, link counts, modification times, and change times.
+An ordinary concurrent edit reports `ROOT_CHANGED` and cannot publish.
+
+These are path-based checks, not descriptor-relative traversal. They do not
+claim protection from every intermediate symlink swap or deliberately restored
+ABA state by a concurrent process running as the Paper OS UID or root. Stop
+Paper before adding, removing, renaming, editing, or approving a manifest. Do
+not build an online reload command on this path. Such a feature, or a threat
+model that treats same-UID processes as hostile, first requires an explicit
+trusted-owner input and `SecureDirectoryStream` descriptor-relative traversal.
+
+Manifests pass `SafeConstructor` and a closed typed parse. Plugin ranges must
+use explicit numeric comparisons such as `>=2.20 <3`; prerelease strings,
+wildcards, and vendor suffixes are not accepted by the v1 matcher. A missing,
+disabled, ambiguously named, non-numeric, or out-of-range installed plugin
+disables the affected manifest.
+
+Repository examples are safe to inspect for review because they carry
+`status: example` or `status: draft`. Their JSON files can be discovered by the
+installed loader, but those statuses are permanent deny markers and cannot be
+approved. Removing the status does not approve a file. A status-free candidate
+requires an exact owner approval of its capability ID, positive integer
+version, and lowercase SHA-256 over RFC 8785 canonical typed content.
+
+For a `number` descriptor, both `minimum` and `maximum` must round-trip from the
+normalized decimal through IEEE-754 binary64 and JCS serialization to the same
+decimal before Paper creates that hash. Values such as
+`0.10000000000000001` and `9007199254740993` are rejected rather than allowed
+to collide with another canonical number. Negative zero is normalized to zero.
+
+The strict Paper configuration accepts at most 128 duplicate-free approvals:
+
+```yaml
+capabilities:
+  directory: capabilities
+  approvals:
+    - id: reviewed.capability
+      version: 1
+      sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+```
+
+The repeated `a` hash above is illustrative, not an approval to deploy. On an
+otherwise valid status-free candidate, Paper emits one fixed
+`event=capability_approval_required` line containing only the validated ID,
+positive version, and computed lowercase hash. Review the complete manifest and
+target compatibility before using that exact tuple. Stop Paper before changing
+the manifest or approval list, update the strict configuration, then restart
+and inspect the load outcome. The production loader uses this configuration
+snapshot as its Paper-owned approval port. Pack data cannot self-approve, and
+the package exposes no player, model, or Runtime approval command.
+
+The registry preview classifies IDs as `added`, `removed`, `changed`, or
+`unchanged`. Only a complete candidate can be atomically published as the next
+immutable generation. Treat any `changed` entry as requiring a fresh review and
+hash approval. Per-manifest failures remain disabled drafts in that complete
+snapshot. Do not infer that an entry is executable from successful load or
+effective-registry membership.
+
+Each refresh emits a fixed `event=capability_catalog` record with publication
+status, generation, and four validated ID sets. `status=PUBLISHED` uses
+`added`, `removed`, `changed`, and `unchanged`. `status=STALE` or
+`status=REJECTED` uses `proposed_added`, `proposed_removed`,
+`proposed_changed`, and `proposed_unchanged`; those fields describe an unapplied
+preview, and `generation` remains the active snapshot generation. Disabled
+manifests are reported as
+`event=capability_manifest_disabled code=<stable-code> count=<n>`; raw manifest
+values and paths are not logged. That count includes draft-manifest diagnostics
+only. A non-publishable global load diagnostic is logged once as
+`event=capability_catalog_diagnostic code=<stable-code>` instead of being folded
+into the manifest count. `/agent doctor` reports
+`CAPABILITY_PACK_DISABLED` when a complete catalog contains disabled drafts and
+`CAPABILITY_CATALOG_UNAVAILABLE` when publication fails. If the optional root
+itself is unavailable, Paper reports `OPTIONAL_CAPABILITY_UNAVAILABLE` and
+retains the prior immutable generation instead of replacing it with an empty
+catalog.
+
+Catalog loading/publication runs only after the desired-state store and private
+proposal-audit path pass their safety checks. It still precedes the Runtime
+handshake. A bad token, unavailable Runtime, or incompatible protocol can
+therefore leave a newly published catalog generation even though `/agent` is not
+registered or recovery stays Offline. That generation is inert metadata and is
+not rolled back as if it were an executed operation.
+
+The fixed template compiler accepts printable ASCII templates up to 1024
+characters and required typed arguments only. It rejects undeclared arguments,
+missing arguments, separators, controls, unsafe normalization, malformed typed
+tokens, and root changes. Brigadier preflight invokes parse only and requires
+full consumption; it never dispatches. A Paper Brigadier root wrapping a
+third-party Bukkit command is not evidence that the plugin supplied a safe
+complete parser.
+
+Plugin compatibility in the registry is only the inventory snapshot taken for
+that load. A future executor must recheck the capability's current
+catalog/generation availability and every required plugin's live enabled state
+and version both when creating a proposal and immediately before final
+execution. Effective-registry membership alone is insufficient.
+
+Console source is denied by default and no manifest setting can enable it.
+There is no supported generic `dispatchCommand`, pack-backed Runtime tool, or
+Capability proposal-creation path. Unknown commands remain non-executable
+Proposal Only material. Operators should therefore expect Phase 9 diagnostics
+and registry diffs, not command execution, from installed manifests.
+
+Before enabling the first production write adapter, implement and review both a
+target-specific side-effect-free parser or typed API adapter and the Phase 8
+thread split: durable audit and `force(true)` on the worker, followed by final
+live authorization, `EXECUTING` admission, and Bukkit mutation on the primary
+thread.
 
 ## Paper Phase 6 conversation commands
 
@@ -400,10 +552,13 @@ schema into one language and edit it independently. A fixture manifest uses
 paths relative to `protocol/`, allowing each test runner to resolve the same
 schema/fixture pair.
 
-The proposal create/confirmed/cancelled schemas and RFC 8785 hash golden are
-Phase 8 contracts only. The authenticated application dispatchers still reject
-all proposal message types as unsupported; do not treat a passing fixture as an
-enabled network route.
+The proposal create/confirmed/cancelled schemas and proposal-argument RFC 8785
+hash golden are Phase 8 contracts only. The authenticated application
+dispatchers still reject all proposal message types as unsupported; do not
+treat a passing fixture as an enabled network route. Phase 9 capability
+fixtures additionally lock status deny markers, required-only arguments,
+numeric plugin ranges, policy consistency, and pack-level reversal semantics.
+Passing those contracts establishes valid data, not an enabled command.
 
 When adding a contract:
 
@@ -427,7 +582,7 @@ warning for plan compatibility and should not be used. A group/world-writable
 configuration is always rejected. Inline secrets additionally require a private
 configuration file; inline secrets and broad read permissions may not be combined.
 
-## Phase 3-8 Paper validation
+## Phase 3-9 Paper validation
 
 [ADR 0001](adr/0001-phase3-conditional-command-registration.md) records the
 selected public `Server#getCommandMap` late-registration design. API-level unit
@@ -445,6 +600,11 @@ case. Its real-server matrix is:
 - Runtime unavailable, invalid token/proof, and incompatible protocol: neither
   command label exists.
 - Optional capability warning: readiness is `DEGRADED` and the command exists.
+- Capability example restart: after the initial missing-directory warning, the
+  harness installs `server-version.example.json` as `0600` and restarts. The
+  catalog reports `status=PUBLISHED generation=1`, reports `EXAMPLE_ONLY`, and
+  `/agent doctor` reports `CAPABILITY_PACK_DISABLED`; no pack command or Agent
+  execution route is exposed.
 - Offline lifecycle: manual off persists a `0600` DISABLED state, restart remains
   Offline with both labels registered, explicit on recovers, Runtime loss retains
   the command, and a second on recovers against a restarted Runtime.
@@ -456,12 +616,17 @@ case. Its real-server matrix is:
 - Proposal policy, hash, expiry, atomic claim, invalidation, fixed Adventure
   actions, and audit redaction are verified by focused JVM tests. The smoke does
   not create a proposal or connect a player to click one.
+- Capability discovery bounds, strict parsing, deterministic version matching,
+  exact approval identity, registry diffs, typed rendering, and parse-only
+  Brigadier behavior are verified by focused tests. The real-server smoke proves
+  that a discovered `example` remains disabled; it does not dispatch a pack
+  command or prove a third-party parser safe.
 
 The exact commands, artifact hash, and outcomes are recorded in
 `docs/progress.md`. An initial core failure has no command recovery path; fix it
 externally and restart.
 
-## Troubleshooting Phase 0-8
+## Troubleshooting Phase 0-9
 
 ### Dependency resolution fails
 
@@ -481,6 +646,22 @@ Check JSON Schema draft selection, format validation, `$ref` base URI, and
 fixture path resolution. The schema and fixture remain authoritative; do not
 weaken one validator merely to match the other.
 
+### A capability stays disabled
+
+Use the stable capability code and known field, not the rejected manifest
+value. Check root/file safety and limits first, then manifest structure,
+duplicate ID, plugin availability and numeric version, console-source policy,
+risk/permission/confirmation consistency, reversal target compatibility, and
+the exact ID/version/hash approval. `example` and `draft` can never become
+effective.
+
+An effective entry still does not execute in Phase 9. The absence of dispatch
+is the expected production boundary, not a registry or permission fault.
+
+`ROOT_CHANGED` means the pre/post discovery fingerprints differed. Stop Paper,
+complete the filesystem change, verify ownership and modes, then restart; do not
+retry by continuously modifying the tree during a live recovery.
+
 ### The plugin loads but `/agent` is absent
 
 Phase 3 deliberately leaves the command absent when a core startup check fails.
@@ -489,12 +670,13 @@ or raw peer message. Check the strict Paper configuration, state permissions,
 fake or local Runtime availability, token match, and protocol version, then
 restart. There is no initial `/agent on` path.
 
-After registration, Phase 8 supports private questions, resume, explicit
-one-shot modules, the fixed read-tool loop, proposal response commands, and
-private proposal auditing. The write catalog is empty, so no production
-proposal creation or Minecraft write is available. Capability Packs, client
-payloads, overlays, and Litematica adapters remain later phases. The Fabric
-entry point is still a scaffold.
+After registration, Phase 9 supports private questions, resume, explicit
+one-shot modules, the fixed read-tool loop, proposal response commands, private
+proposal auditing, and fail-closed Capability Pack validation/registry
+publication. The write catalog is empty, so no production Capability proposal,
+command dispatch, or Minecraft write is available. Client payloads, overlays,
+and Litematica adapters remain later phases. The Fabric entry point is still a
+scaffold.
 
 ### `/agent` exists but returns `AI offline`
 

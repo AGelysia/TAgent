@@ -2,12 +2,13 @@
 
 Minecraft Agent is a security-first Minecraft assistant composed of a Paper plugin, a local
 TypeScript runtime, and an optional Fabric client mod. This repository currently implements the
-Phase 0-8 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
+Phase 0-9 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
 loopback Runtime-Paper channel, conditional `/agent` registration, persistent emergency Offline
 controls, private model replies, Runtime-owned sessions, resume, explicit one-shot modules, a
 bounded six-tool read-only model loop, and Paper-owned proposal authorization and audit
-infrastructure. The production write catalog is empty: there is no production proposal creator,
-generic execution surface, or Minecraft state mutation.
+infrastructure. It also includes bounded Capability Pack loading, typed validation, and immutable
+catalog publication. The production write catalog is empty: there is no production proposal
+creator, generic execution surface, or Minecraft state mutation.
 
 The product and delivery baseline is recorded in
 [`minecraft_agent_vibe_coding_plan.md`](minecraft_agent_vibe_coding_plan.md). Implementation status
@@ -35,7 +36,8 @@ metadata before they can be called byte-for-byte reproducible.
 - `paper-plugin/`: the authoritative server-side security and execution boundary.
 - `agent-runtime/`: local TypeScript process for routing, model access, and persistence.
 - `client-mod/`: optional, client-only Fabric presentation layer.
-- `capability-packs/`: reviewed capability manifests; never an arbitrary command interface.
+- `capability-packs/`: non-executable Capability examples and drafts; never an arbitrary command
+  interface.
 - `docs/`: architecture, security, protocol, operations, and progress records.
 - `scripts/`: resource-conscious development, verification, and packaging commands.
 
@@ -110,7 +112,7 @@ registered functions to the model, validates every call and typed result locally
 most eight serial calls. Phase 8 adds shared proposal contracts, but proposal, view, and heartbeat
 transport handlers remain unsupported; schema acceptance alone cannot create or execute a proposal.
 
-## Phase 3-8 Paper
+## Phase 3-9 Paper
 
 On first Paper startup, the plugin installs a strict `plugins/MinecraftAgent/config.yml`. Keep its
 Runtime token as the complete `${MINECRAFT_AGENT_SERVER_TOKEN}` environment reference. The endpoint
@@ -121,6 +123,11 @@ The default `owners: []` permits only the local server console to run `/agent on
 `/agent off`. Add canonical player UUIDs to `owners` for player administration. Setting
 `security.allow-op-toggle: true` additionally permits a live OP with
 `minecraftagent.admin.toggle`; it remains false by default.
+
+`capabilities.approvals` is an optional list and defaults to empty. Each entry must match the exact
+capability `id`, positive manifest `version`, and lowercase 64-character `sha256` of the canonical
+typed manifest. Pack content cannot approve itself, and editing a hashed field makes the previous
+approval miss.
 
 Paper performs configuration, state, policy, descriptor, and Runtime authentication checks away
 from the server thread. Only a successful result returns to the primary thread and registers
@@ -178,6 +185,21 @@ the synchronous proposal domain has no production `create` caller yet.
 Before the first write tool is enabled, its adapter must move durable audit I/O to the worker and
 return to the Paper thread for final reauthorization, `EXECUTING` admission, and Bukkit mutation.
 
+Phase 9 adds a fail-closed Capability broker under the configured `capabilities.directory`. Discovery
+bounds entries, files, bytes, directory and YAML depth, and rejects unsafe paths, links, modes,
+aliases, invalid UTF-8, unknown fields, and partial loads. Plugin names and deterministic numeric
+version ranges are checked against a Paper-owned snapshot. Manifests marked `example` or `draft`
+are permanently non-effective, regardless of any matching approval.
+
+A complete load builds an immutable catalog snapshot. Preview reports `added`, `removed`, `changed`,
+and `unchanged` IDs; publication atomically replaces the snapshot and advances its generation.
+Arguments are required-only and use closed typed codecs. Fixed templates and rendered commands are
+limited to 1024 characters, and Brigadier preflight calls parse only, requires complete consumption,
+and never calls execute or Bukkit dispatch. Console source is denied by default, and unknown commands
+remain non-executable Proposal Only material. Production still exposes no generic command dispatch,
+pack-backed Runtime tool, or Capability proposal-creation route. The first write adapter must retain
+the worker-thread durable audit and primary-thread final authorization sequence described above.
+
 The opt-in exact-server smoke pins Paper `1.21.11-132`, verifies its SHA-256, limits the heap to 512
 MiB, and runs every case serially:
 
@@ -199,8 +221,10 @@ player or click a proposal; focused JVM tests cover the Phase 8 authorization an
 
 Artifacts are placed under `dist/`. The package contains the implemented persistent conversation,
 resume, explicit module path, shared tool/proposal schemas, Runtime loop, Paper read adapters, and
-Paper proposal authorization and audit infrastructure. The production proposal tool catalog is
-empty, and client UI, generic execution, and world changes remain unavailable.
+Paper proposal authorization and audit infrastructure. It also contains the bounded Capability Pack
+loader, exact approval and immutable catalog/diff model, required-only typed renderer, and parse-only
+Brigadier preflight. The production proposal tool catalog remains empty; Capability proposal
+creation, generic execution, client UI, and world changes remain unavailable.
 
 The packaged Runtime preserves its compiled layout and includes the shared protocol schemas and
 configuration template. Install production dependencies before startup:
@@ -231,4 +255,8 @@ module tool intersection and binds every result to the live request, temporary o
 player, tool ID, sequence, call ID, connection, and Online epoch. Phase 8 keeps proposal identity,
 expiry, frozen arguments, one-time claim, live reauthorization, fixed confirmation actions, and
 redacted durable audit records under Paper authority. It deliberately enables no production write
-adapter or proposal transport handler.
+adapter or proposal transport handler. Phase 9 bounds Capability discovery and parsing, requires
+exact ID/version/hash approval, permanently excludes `example` and `draft`, rejects console source
+and incompatible plugins, compiles required-only typed arguments into bounded fixed templates, and
+keeps Brigadier at parse-only preflight. Immutable catalog publication cannot introduce a generic
+dispatch operation or Capability proposal-creation route; unknown commands remain fail-closed.

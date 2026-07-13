@@ -25,6 +25,9 @@
       "minimum": 1,
       "maximum": 2147483647
     },
+    "status": {
+      "enum": ["example", "draft"]
+    },
     "description": {
       "type": "string",
       "minLength": 1,
@@ -53,7 +56,7 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 128,
-                "pattern": "^[^\\r\\n]+$"
+                "pattern": "^[ -~]+$"
               }
             }
           }
@@ -81,7 +84,7 @@
           "type": "string",
           "minLength": 2,
           "maxLength": 1024,
-          "pattern": "^/[^\\r\\n]+$"
+          "pattern": "^/[ -~]+$"
         }
       }
     },

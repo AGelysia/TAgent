@@ -64,6 +64,11 @@ const PROPOSAL_ARGUMENT_HASH_DOMAIN = "minecraft-agent/proposal-arguments/v1";
 const PROPOSAL_ARGUMENT_CANONICAL_LIMIT_BYTES = 65_536;
 const PROPOSAL_ARGUMENT_NODE_LIMIT = 4_096;
 const PROPOSAL_ARGUMENT_DEPTH_LIMIT = 32;
+const CAPABILITY_PLUGIN_VERSION_RANGE =
+  /^(?:=|>=|>|<=|<)(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){0,2}(?: (?:=|>=|>|<=|<)(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){0,2})*$/u;
+const CAPABILITY_PLUGIN_VERSION = /^(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){0,2}$/u;
+const CAPABILITY_PLUGIN_COMPARISON =
+  /^(>=|<=|=|>|<)((?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){0,2})$/u;
 
 export const BUILD_PREVIEW_UNCOMPRESSED_HARD_LIMIT_BYTES = 64 * 1024 * 1024;
 export const BUILD_PREVIEW_COMPRESSED_HARD_LIMIT_BYTES = 16 * 1024 * 1024;
@@ -993,24 +998,36 @@ export function validateRecipeView(value: unknown): SemanticValidationError[] {
 
 export function validateCapabilityManifest(value: unknown): SemanticValidationError[] {
   const rule = "capability-manifest-v1";
-  if (!isRecord(value) || !isRecord(value["execution"]) || !isRecord(value["arguments"])) {
+  if (
+    !isRecord(value) ||
+    !isRecord(value["requirements"]) ||
+    !Array.isArray(value["requirements"]["plugins"]) ||
+    !isRecord(value["execution"]) ||
+    !isRecord(value["arguments"]) ||
+    !isRecord(value["effects"]) ||
+    !isRecord(value["confirmation"]) ||
+    !isRecord(value["reversibility"])
+  ) {
     return [
       semanticError(
         "CAPABILITY_STRUCTURE_INVALID",
         rule,
         "",
-        "capability manifest must contain execution and arguments objects",
+        "capability manifest is missing a required closed object",
       ),
     ];
   }
 
   const execution = value["execution"];
   const argumentsRecord = value["arguments"];
+  const plugins = value["requirements"]["plugins"];
+  const effects = value["effects"];
+  const confirmation = value["confirmation"];
   const template = execution["template"];
   const commandRoot = execution["commandRoot"];
 
   if (typeof template === "string") {
-    const placeholderPattern = /\{([a-z][a-zA-Z\d_]*)\}/gu;
+    const placeholderPattern = /\{([a-z][a-zA-Z\d_]{0,63})\}/gu;
     const matches = [...template.matchAll(placeholderPattern)];
     if (/[{}]/u.test(template.replace(placeholderPattern, ""))) {
       return [
@@ -1021,6 +1038,25 @@ export function validateCapabilityManifest(value: unknown): SemanticValidationEr
           "template contains an incomplete or malformed placeholder",
         ),
       ];
+    }
+
+    for (const match of matches) {
+      const start = match.index ?? -1;
+      const end = start + match[0].length;
+      if (
+        start <= 0 ||
+        template[start - 1] !== " " ||
+        (end < template.length && template[end] !== " ")
+      ) {
+        return [
+          semanticError(
+            "CAPABILITY_TEMPLATE_PLACEHOLDER_MALFORMED",
+            rule,
+            "/execution/template",
+            "template placeholders must occupy complete command tokens",
+          ),
+        ];
+      }
     }
 
     const placeholderNames = matches.map((match) => match[1]!);
@@ -1113,6 +1149,309 @@ export function validateCapabilityManifest(value: unknown): SemanticValidationEr
     }
   }
 
+  const pluginNames = new Set<string>();
+  for (let index = 0; index < plugins.length; index += 1) {
+    const plugin = plugins[index];
+    if (!isRecord(plugin) || typeof plugin["name"] !== "string") {
+      return [
+        semanticError(
+          "CAPABILITY_STRUCTURE_INVALID",
+          rule,
+          `/requirements/plugins/${index}`,
+          "plugin requirement is not a closed name and version object",
+        ),
+      ];
+    }
+    const normalizedName = plugin["name"].toLowerCase();
+    if (pluginNames.has(normalizedName)) {
+      return [
+        semanticError(
+          "CAPABILITY_PLUGIN_REQUIREMENT_DUPLICATE",
+          rule,
+          `/requirements/plugins/${index}/name`,
+          `plugin ${JSON.stringify(plugin["name"])} is declared more than once`,
+        ),
+      ];
+    }
+    pluginNames.add(normalizedName);
+    if (
+      typeof plugin["version"] !== "string" ||
+      !CAPABILITY_PLUGIN_VERSION_RANGE.test(plugin["version"]) ||
+      plugin["version"].split(" ").length > 16
+    ) {
+      return [
+        semanticError(
+          "CAPABILITY_PLUGIN_VERSION_RANGE_INVALID",
+          rule,
+          `/requirements/plugins/${index}/version`,
+          "plugin version range must be an AND-list of closed numeric comparators",
+        ),
+      ];
+    }
+  }
+
+  const effectCategory = effects["category"];
+  const maximumBlocks = effects["maximumBlocks"];
+  if (
+    (effectCategory === "WRITE_WORLD" && typeof maximumBlocks !== "number") ||
+    (effectCategory !== "WRITE_WORLD" && maximumBlocks !== null)
+  ) {
+    return [
+      semanticError(
+        "CAPABILITY_EFFECT_CONSTRAINT_INVALID",
+        rule,
+        "/effects/maximumBlocks",
+        "only WRITE_WORLD requires a non-null maximumBlocks limit",
+      ),
+    ];
+  }
+  if (effectCategory !== "READ" && confirmation["required"] !== true) {
+    return [
+      semanticError(
+        "CAPABILITY_CONFIRMATION_POLICY_INVALID",
+        rule,
+        "/confirmation/required",
+        "every non-READ effect requires confirmation",
+      ),
+    ];
+  }
+
+  return [];
+}
+
+function capabilityPluginKey(manifest: JsonRecord): string | undefined {
+  const requirements = manifest["requirements"];
+  if (!isRecord(requirements) || !Array.isArray(requirements["plugins"])) {
+    return undefined;
+  }
+  const entries: string[] = [];
+  for (const plugin of requirements["plugins"]) {
+    if (
+      !isRecord(plugin) ||
+      typeof plugin["name"] !== "string" ||
+      typeof plugin["version"] !== "string"
+    ) {
+      return undefined;
+    }
+    entries.push(`${plugin["name"].toLowerCase()}\u0000${plugin["version"]}`);
+  }
+  return entries.sort().join("\u0001");
+}
+
+export function validateCapabilityPack(value: unknown): SemanticValidationError[] {
+  const rule = "capability-pack-v1";
+  if (!isRecord(value) || !Array.isArray(value["capabilities"])) {
+    return [
+      semanticError(
+        "CAPABILITY_PACK_STRUCTURE_INVALID",
+        rule,
+        "",
+        "capability pack golden must contain a capabilities array",
+      ),
+    ];
+  }
+
+  const capabilities = value["capabilities"];
+  const byId = new Map<string, JsonRecord>();
+  for (let index = 0; index < capabilities.length; index += 1) {
+    const capability = capabilities[index];
+    const manifestErrors = validateCapabilityManifest(capability);
+    if (manifestErrors.length > 0) {
+      const first = manifestErrors[0]!;
+      return [
+        {
+          ...first,
+          rule,
+          instancePath: `/capabilities/${index}${first.instancePath}`,
+        },
+      ];
+    }
+    if (!isRecord(capability) || typeof capability["id"] !== "string") {
+      return [
+        semanticError(
+          "CAPABILITY_PACK_STRUCTURE_INVALID",
+          rule,
+          `/capabilities/${index}`,
+          "capability is missing its ID",
+        ),
+      ];
+    }
+    if (byId.has(capability["id"])) {
+      return [
+        semanticError(
+          "CAPABILITY_PACK_ID_DUPLICATE",
+          rule,
+          `/capabilities/${index}/id`,
+          `capability ID ${JSON.stringify(capability["id"])} is duplicated`,
+        ),
+      ];
+    }
+    byId.set(capability["id"], capability);
+  }
+
+  for (let index = 0; index < capabilities.length; index += 1) {
+    const capability = capabilities[index]! as JsonRecord;
+    const reversibility = capability["reversibility"] as JsonRecord;
+    if (reversibility["type"] !== "capability") {
+      continue;
+    }
+    const targetId = reversibility["capability"];
+    const target = typeof targetId === "string" ? byId.get(targetId) : undefined;
+    const sourceExecution = capability["execution"] as JsonRecord;
+    const sourceEffects = capability["effects"] as JsonRecord;
+    const targetExecution = target?.["execution"];
+    const targetEffects = target?.["effects"];
+    if (
+      target === undefined ||
+      target === capability ||
+      target["status"] !== undefined ||
+      !isRecord(targetExecution) ||
+      !isRecord(targetEffects) ||
+      targetExecution["source"] !== sourceExecution["source"] ||
+      targetEffects["category"] !== sourceEffects["category"] ||
+      targetEffects["scope"] !== sourceEffects["scope"] ||
+      capabilityPluginKey(target) !== capabilityPluginKey(capability)
+    ) {
+      return [
+        semanticError(
+          "CAPABILITY_REVERSIBILITY_TARGET_INVALID",
+          rule,
+          `/capabilities/${index}/reversibility/capability`,
+          "reversal target is missing, inactive, self-referential, or incompatible",
+        ),
+      ];
+    }
+  }
+  return [];
+}
+
+function parseCapabilityVersion(value: string): [bigint, bigint, bigint] | undefined {
+  if (value.length > 128 || !CAPABILITY_PLUGIN_VERSION.test(value)) {
+    return undefined;
+  }
+  const components = value.split(".").map((component) => BigInt(component));
+  return [components[0]!, components[1] ?? 0n, components[2] ?? 0n];
+}
+
+function compareCapabilityVersions(left: readonly bigint[], right: readonly bigint[]): number {
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index]! < right[index]!) {
+      return -1;
+    }
+    if (left[index]! > right[index]!) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+function capabilityVersionMatches(range: string, installed: readonly bigint[]): boolean {
+  return range.split(" ").every((token) => {
+    const comparison = CAPABILITY_PLUGIN_COMPARISON.exec(token);
+    if (comparison === null) {
+      return false;
+    }
+    const boundary = parseCapabilityVersion(comparison[2]!);
+    if (boundary === undefined) {
+      return false;
+    }
+    const order = compareCapabilityVersions(installed, boundary);
+    switch (comparison[1]) {
+      case "=":
+        return order === 0;
+      case ">":
+        return order > 0;
+      case ">=":
+        return order >= 0;
+      case "<":
+        return order < 0;
+      case "<=":
+        return order <= 0;
+      default:
+        return false;
+    }
+  });
+}
+
+export function validateCapabilityPluginVersion(value: unknown): SemanticValidationError[] {
+  const rule = "capability-plugin-version-v1";
+  if (
+    !isRecord(value) ||
+    !isRecord(value["manifest"]) ||
+    !Array.isArray(value["cases"]) ||
+    value["cases"].length === 0
+  ) {
+    return [
+      semanticError(
+        "CAPABILITY_PLUGIN_VERSION_GOLDEN_STRUCTURE_INVALID",
+        rule,
+        "",
+        "version golden must contain one manifest and a cases array",
+      ),
+    ];
+  }
+  const manifestErrors = validateCapabilityManifest(value["manifest"]);
+  if (manifestErrors.length > 0) {
+    return manifestErrors.map((error) => ({ ...error, rule }));
+  }
+  const requirements = value["manifest"]["requirements"];
+  const plugins = isRecord(requirements) ? requirements["plugins"] : undefined;
+  if (!Array.isArray(plugins) || plugins.length !== 1 || !isRecord(plugins[0])) {
+    return [
+      semanticError(
+        "CAPABILITY_PLUGIN_VERSION_GOLDEN_STRUCTURE_INVALID",
+        rule,
+        "/manifest/requirements/plugins",
+        "version golden manifest must contain exactly one plugin requirement",
+      ),
+    ];
+  }
+  const range = plugins[0]["version"];
+  if (typeof range !== "string") {
+    return [
+      semanticError(
+        "CAPABILITY_PLUGIN_VERSION_GOLDEN_STRUCTURE_INVALID",
+        rule,
+        "/manifest/requirements/plugins/0/version",
+        "version golden range is missing",
+      ),
+    ];
+  }
+
+  for (let index = 0; index < value["cases"].length; index += 1) {
+    const testCase = value["cases"][index];
+    if (
+      !isRecord(testCase) ||
+      typeof testCase["installedVersion"] !== "string" ||
+      !["match", "mismatch", "invalid"].includes(String(testCase["expected"]))
+    ) {
+      return [
+        semanticError(
+          "CAPABILITY_PLUGIN_VERSION_GOLDEN_STRUCTURE_INVALID",
+          rule,
+          `/cases/${index}`,
+          "version golden case is malformed",
+        ),
+      ];
+    }
+    const installed = parseCapabilityVersion(testCase["installedVersion"]);
+    const actual =
+      installed === undefined
+        ? "invalid"
+        : capabilityVersionMatches(range, installed)
+          ? "match"
+          : "mismatch";
+    if (actual !== testCase["expected"]) {
+      return [
+        semanticError(
+          "CAPABILITY_PLUGIN_VERSION_GOLDEN_MISMATCH",
+          rule,
+          `/cases/${index}`,
+          `expected ${String(testCase["expected"])} but computed ${actual}`,
+        ),
+      ];
+    }
+  }
   return [];
 }
 
@@ -1195,6 +1534,12 @@ export function runSemanticValidator(validator: string, value: unknown): Semanti
     case "capability-manifest-v1":
       errors = validateCapabilityManifest(value);
       break;
+    case "capability-pack-v1":
+      errors = validateCapabilityPack(value);
+      break;
+    case "capability-plugin-version-v1":
+      errors = validateCapabilityPluginVersion(value);
+      break;
     case "view-negotiation-v1":
       errors = validateViewNegotiation(value);
       break;
@@ -1268,6 +1613,16 @@ export function validateContractSemantics(
 
     if (rule === "capability-manifest-v1") {
       errors.push(...validateCapabilityManifest(value));
+      continue;
+    }
+
+    if (rule === "capability-pack-v1") {
+      errors.push(...validateCapabilityPack(value));
+      continue;
+    }
+
+    if (rule === "capability-plugin-version-v1") {
+      errors.push(...validateCapabilityPluginVersion(value));
       continue;
     }
 

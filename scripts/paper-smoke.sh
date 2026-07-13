@@ -382,6 +382,15 @@ assert_audit_storage() {
   fi
 }
 
+install_example_capability() {
+  local server_root=$1
+  local capability_directory="${server_root}/plugins/MinecraftAgent/capabilities"
+  mkdir -m 700 -p "$capability_directory"
+  install -m 600 \
+    "$ROOT/capability-packs/example-safe/server-version.example.json" \
+    "${capability_directory}/server-version.example.json"
+}
+
 run_offline_lifecycle_case() {
   local case_root=$1
   local server_root="${case_root}/server"
@@ -430,6 +439,7 @@ run_offline_lifecycle_case() {
   fi
   stop_paper
   assert_clean_plugin_disable "$first_log"
+  install_example_capability "$server_root"
 
   local audit_file="${server_root}/plugins/MinecraftAgent/state/audit/security-audit-v1.jsonl"
   chmod 640 "$audit_file"
@@ -452,6 +462,14 @@ run_offline_lifecycle_case() {
 
   launch_paper "$server_root" "$restart_log" "$TEST_TOKEN" "$input_fifo"
   wait_for_log "$restart_log" 'event=agent_offline reason=MANUAL' 20
+  wait_for_log \
+    "$restart_log" \
+    'event=capability_catalog status=PUBLISHED generation=1 added=- removed=- changed=- unchanged=-' \
+    20
+  wait_for_log \
+    "$restart_log" \
+    'event=capability_manifest_disabled code=EXAMPLE_ONLY count=1' \
+    20
   assert_audit_storage "$server_root"
   run_offline_command "$restart_log" 'agent'
   run_offline_command "$restart_log" 'minecraftagent:agent doctor'
@@ -466,6 +484,13 @@ run_offline_lifecycle_case() {
   wait_for_log_count "$restart_log" 'AI online$' $((online_count + 1)) 10
   printf 'agent\n' >&9
   wait_for_log "$restart_log" 'Minecraft Agent: ONLINE$' 10
+  run_console_command \
+    "$restart_log" 'agent doctor' 'Warning: CAPABILITY_PACK_DISABLED$' 10
+  if ! rg -q 'Minecraft Agent health: DEGRADED$' <<<"$LAST_COMMAND_OUTPUT"; then
+    printf 'Capability example did not keep doctor degraded\n' >&2
+    printf '%s\n' "$LAST_COMMAND_OUTPUT" >&2
+    return 1
+  fi
 
   stop_runtime
   wait_for_log "$restart_log" 'code=RUNTIME_CONNECTION_LOST' 20

@@ -34,6 +34,7 @@ class PaperConfigLoaderTest {
     assertEquals(Duration.ofSeconds(2), config.runtime().connectTimeout());
     assertEquals(temporaryDirectory.resolve("state"), config.stateDirectory());
     assertEquals(temporaryDirectory.resolve("capabilities"), config.optionalCapabilityDirectory());
+    assertEquals(Set.of(), config.capabilityApprovals());
     assertFalse(config.toString().contains(StartupTestFixture.TOKEN));
     assertFalse(config.runtime().toString().contains(StartupTestFixture.TOKEN));
     assertFalse(config.toString().contains(temporaryDirectory.toString()));
@@ -69,6 +70,65 @@ class PaperConfigLoaderTest {
     var config = loader.load(configPath, temporaryDirectory, StartupTestFixture.environment());
 
     assertEquals(Set.of(), config.owners());
+  }
+
+  @Test
+  void loadsOnlyExactCapabilityApprovalTriples() throws Exception {
+    var hash = "0123456789abcdef".repeat(4);
+    var source =
+        StartupTestFixture.validConfig()
+            .replace(
+                "  directory: capabilities",
+                "  directory: capabilities\n"
+                    + "  approvals:\n"
+                    + "    - id: example.server_version\n"
+                    + "      version: 2\n"
+                    + "      sha256: \""
+                    + hash
+                    + "\"");
+    var configPath = StartupTestFixture.writeConfig(temporaryDirectory, source);
+
+    var config = loader.load(configPath, temporaryDirectory, StartupTestFixture.environment());
+
+    assertEquals(
+        Set.of(
+            new dev.minecraftagent.paper.capability.model.CapabilityApproval(
+                "example.server_version", 2, hash)),
+        config.capabilityApprovals());
+    assertThrows(UnsupportedOperationException.class, () -> config.capabilityApprovals().clear());
+    assertTrue(config.toString().contains("capabilityApprovalsCount=1"));
+    assertFalse(config.toString().contains(hash));
+  }
+
+  @Test
+  void rejectsMalformedAndDuplicateCapabilityApprovals() throws Exception {
+    var hash = "0123456789abcdef".repeat(4);
+    var valid =
+        "  approvals:\n"
+            + "    - id: example.server_version\n"
+            + "      version: 1\n"
+            + "      sha256: \""
+            + hash
+            + "\"";
+    for (var approvals :
+        new String[] {
+          "  approvals: invalid",
+          valid.replace("version: 1", "version: 0"),
+          valid.replace("example.server_version", "Invalid"),
+          valid.replace(hash, "A".repeat(64)),
+          valid
+              + "\n    - id: example.server_version\n      version: 1\n      sha256: \""
+              + hash
+              + "\"",
+          valid + "\n      unknown: true"
+        }) {
+      var source =
+          StartupTestFixture.validConfig()
+              .replace("  directory: capabilities", "  directory: capabilities\n" + approvals);
+      var path = StartupTestFixture.writeConfig(temporaryDirectory, source);
+      assertFailure(
+          path, StartupTestFixture.environment(), StartupFailure.Code.PAPER_CONFIG_INVALID);
+    }
   }
 
   @Test

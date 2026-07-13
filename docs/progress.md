@@ -4,7 +4,8 @@ Last updated: 2026-07-13
 
 ## Current status
 
-Phase 0 through Phase 8 are complete. Phase 9 Capability Pack loading is next.
+Phase 0 through Phase 9 are complete. Phase 10 optional client Mod and rich
+display is next.
 
 ## Locked decisions
 
@@ -75,6 +76,18 @@ Phase 0 through Phase 8 are complete. Phase 9 Capability Pack loading is next.
 - Phase 8 deliberately publishes an empty production write catalog. The
   synchronous proposal domain has no production `create` caller, and proposal
   Runtime-Paper transport handlers remain unsupported.
+- Phase 9 capability arguments are closed and required-only. Templates contain
+  fixed trusted literals, each declared argument appears exactly once as a
+  standalone placeholder, and Brigadier is used only through `parse`.
+- Capability identity hashes the closed typed manifest with RFC 8785. Decimal
+  bounds must survive an exact IEEE-754/JCS round trip before an identity can
+  exist, so distinct source decimals cannot collapse to one approval hash.
+- Capability files marked `example` or `draft`, Console-source manifests,
+  plugin mismatches, and manifests without an exact Paper-owned
+  `(ID, version, SHA-256)` approval are permanently non-effective.
+- Phase 9 publishes immutable generation snapshots and diffs, but no registry
+  entry contains an executor. Catalog membership cannot authorize Bukkit or
+  command mutation.
 
 ## Phase 0: repository scaffold
 
@@ -347,9 +360,43 @@ Completed:
       are shared contracts. Runtime and Paper proposal transport dispatchers
       remain unsupported until an explicitly reviewed integration is added.
 
+## Phase 9: fail-closed Capability Packs
+
+Completed:
+
+- [x] The shared closed Capability Schema and semantic fixtures cover draft and
+      example status, required-only arguments, fixed command roots, numeric
+      plugin ranges, effect limits, confirmation policy, and reversal targets.
+- [x] Paper performs bounded JSON/YAML discovery with strict UTF-8,
+      `SafeConstructor`, a closed typed parser, private ownership/mode checks,
+      symlink and hard-link rejection, per-file and aggregate limits, and a
+      complete second discovery fingerprint before publication.
+- [x] Plugin requirements use a Paper-owned immutable inventory, case-insensitive
+      exact names, enabled state, and deterministic one-to-three-component
+      numeric version comparisons. Missing, disabled, ambiguous, invalid, or
+      mismatched plugins disable the manifest.
+- [x] Approval is an exact bounded Paper configuration tuple of capability ID,
+      positive manifest version, and lowercase SHA-256. Pack content cannot
+      approve itself, and changing hashed content invalidates the tuple.
+- [x] Typed codecs reject missing, undeclared, malformed, non-canonical, or
+      out-of-range arguments. A fixed template compiler prevents model output
+      from changing command literals or argument placement.
+- [x] The Brigadier preflight boundary requires a known exact root and complete
+      parse context, but calls only `parse`; it has no Bukkit dispatch or
+      Brigadier execution path.
+- [x] Risk, minimum permission, confirmation, maximum block count, and reversal
+      metadata are mapped into immutable effective entries. Console source is
+      locally denied, and unknown IDs resolve only as Proposal Only.
+- [x] Complete loads publish one immutable generation with deterministic
+      `added`, `removed`, `changed`, and `unchanged` sets. Global failures retain
+      the prior generation rather than publishing partial or empty state.
+- [x] Repository examples are explicitly `example` or `draft`, remain
+      non-effective when discovered, and the Paper smoke proves their degraded
+      diagnostic without enabling command execution.
+
 ## Verification
 
-Phase 8 was verified serially on 2026-07-13 with:
+Phase 9 was verified serially on 2026-07-13 with:
 
 ```bash
 cd agent-runtime
@@ -369,7 +416,7 @@ Results:
 - Runtime: 13 Vitest files, 102 tests passed; TypeScript build, ESLint, and
   Prettier passed; full and production-only npm audits reported 0
   vulnerabilities.
-- Paper: build and Spotless passed; 250 tests passed, including 73 shared dynamic
+- Paper: build and Spotless passed; 305 tests passed, including 85 shared dynamic
   Schema/HMAC/semantic cases plus strict desired-state parsing/atomic persistence,
   operational epoch invalidation, Owner/OP/console authorization, cancellable
   real-WebSocket handshake/application exchange, provider request correlation,
@@ -379,9 +426,12 @@ Results:
   live reauthorization, single-use and `EXECUTING` transitions, audit storage
   hardening/redaction, fixed Adventure actions, output-budget downgrade,
   command-map transactions, private reply gating, exact Offline output, doctor
-  output, and descriptor tests.
-- Fabric: remapped JAR build and Spotless passed; 74 tests passed, including the
-  same 73 shared protocol cases plus client metadata.
+  output, and descriptor tests. The 41 focused Capability tests cover typed
+  arguments, fixed templates, parse-only Brigadier, JSON/YAML loading, strict
+  filesystems, version matching, exact approvals, JCS number collisions,
+  reversal graphs, immutable diffs, CAS publication, and Proposal Only lookup.
+- Fabric: remapped JAR build and Spotless passed; 86 tests passed, including the
+  same 85 shared protocol cases plus client metadata.
 - Both JVM reports contain no remote Schema load, `UnknownHostException`,
   invalid-schema error, skipped test, or failed test.
 - Paper `1.21.11-132` JAR SHA-256
@@ -394,15 +444,18 @@ Results:
   `0600` DISABLED persistence, restart remaining Offline, successful on,
   Runtime-loss retention, failed on while Runtime was absent, successful on
   after Runtime restart, both command labels, Console `/agent say` isolation
-  from the provider, and exception-free plugin disable. No Paper, Runtime, or
-  Gradle process remained.
+  from the provider, example Capability publication as generation 1, permanent
+  `EXAMPLE_ONLY` disablement, degraded doctor output, and exception-free plugin
+  disable. No Paper, Runtime, or Gradle process remained.
 - Packaged Runtime preserved its compiled authenticated application endpoint,
   OpenAI tool-loop provider, migrations, session/message repository, context
   reducer, Module Manifest, fixed Tool Registry, configuration template, and
-  all shared read-tool/proposal schemas. The Paper JAR contains the fixed read
-  registry, Bukkit adapters, Paper-owned proposal/audit classes, embedded JCS
-  implementation, and the same schemas. The production write catalog remains
-  empty.
+  all shared read-tool/proposal/Capability schemas. The Paper JAR contains the
+  fixed read registry, Bukkit adapters, Paper-owned proposal/audit classes,
+  embedded JCS implementation, bounded Capability loader, exact approval and
+  immutable registry types, argument/template compiler, parse-only Brigadier
+  preflight, and the same schemas. The package includes only explicitly marked
+  Capability examples and drafts; the production write catalog remains empty.
 - All protocol JSON files parse successfully; Bash scripts pass `bash -n`.
 
 PowerShell scripts were reviewed for native exit-code propagation but were not
@@ -435,7 +488,9 @@ not suppressed.
   session selection. Runtime owns the conversation database exclusively.
 - Durable rate accounting, token/cost accounting, or monthly budget
   enforcement.
-- Capability Pack discovery, approval, reload, or command execution.
+- Online Capability Pack reload or any capability command execution. Phase 9
+  loads and atomically publishes startup/recovery metadata only; no executor,
+  Bukkit dispatch, proposal-creation route, or Runtime capability handler exists.
 - Client custom payload networking, overlay UI, item rendering, or preferences.
 - Structured recipe client views, locate/project/build behavior, world mutation,
   or Litematica behavior. The recipe tools expose server data only to the model.
@@ -495,6 +550,26 @@ path. A command-backed Capability remains disabled unless complete preflight
 parsing is demonstrated for the locked plugin version; otherwise use a typed
 adapter.
 
+### Capability filesystem and runtime binding
+
+Phase 9 detects ordinary concurrent changes with private ownership/mode checks,
+stable reads, and two complete discovery fingerprints. Path-based traversal
+cannot eliminate every intermediate symlink swap or restored ABA state by a
+hostile writer running as the same OS UID or root, so operators must stop Paper
+before changing packs or approvals. Production also relies on the previously
+validated single-owner `0700` plugin data ancestor; the loader does not compare
+the candidate root owner with the process effective UID. Execution, online
+reload, reuse outside that composition, or a stronger local threat model
+requires an explicit trusted-owner input and descriptor-relative
+`SecureDirectoryStream` traversal.
+
+Catalog publication currently precedes the authenticated Runtime handshake,
+and later plugin enable/disable events update only the inventory snapshot. This
+is safe while entries have no executor. Before any execution adapter is added,
+publication must bind the successful coordinator generation and every
+invocation must recheck catalog availability plus the required plugin's live
+enabled state and version; a retained catalog alone is not authority.
+
 ### Proposal integration coverage
 
 The pinned Paper smoke exercises startup, Offline, restart, Runtime loss, and
@@ -506,9 +581,9 @@ redaction; a real-player click remains a later integration lane.
 
 ## Next gates
 
-1. Implement Phase 9 Capability Pack discovery, approval, immutable catalog
-   publication, version matching, and typed argument rendering without enabling
-   an unsafe command-dispatch fallback.
+1. Implement Phase 10 optional Fabric networking and rich structured display
+   with vanilla private-text fallback, bounded payload framing, versioned views,
+   and no client-originated authority.
 2. Keep the production write catalog empty until the first fixed typed adapter
    has operation-specific validation, limits, rollback/partial-failure policy,
    and a real-player proposal integration test.
