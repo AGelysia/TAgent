@@ -677,13 +677,13 @@ Implemented automated scope:
       and payload fingerprints. The fake provider cannot be selected through
       production configuration and is excluded from `dist`.
 
-Pending manual scope:
+Manual and publication scope:
 
-- [ ] Run Vanilla, Agent Client, and the exact Litematica/MaLiLib client profiles
+- [x] Run Vanilla, Agent Client, and the exact Litematica/MaLiLib client profiles
       from a physical machine and record sanitized evidence for real handshake,
       private fallback, overlay/recipe graphics, native preview/material/remove,
       diagnostics, and disconnect recovery.
-- [ ] Resolve or record `BLOCKED` for graphical fixtures that cannot be reached
+- [x] Resolve or record `BLOCKED` for graphical fixtures that cannot be reached
       safely only where the manual gate explicitly allowlists it. Any failure,
       fingerprint mismatch, core blocker, or unlisted blocker rejects the
       candidate.
@@ -693,6 +693,35 @@ Pending manual scope:
 - [ ] Create the final commit/tag/GitHub Release only after the manual record is
       `ACCEPTED` under its mandatory-core/allowlisted-blocker rule and the final
       clean-build fingerprints match. No publication action is automated.
+
+Phase 13 manual acceptance recorded on 2026-07-15:
+
+- Maintainer-attested graphical sessions used two physical clients against the
+  migrated cloud-host harness. Vanilla, base Agent Client, and the exact
+  Litematica/MaLiLib profile passed every mandatory core lane, including private
+  ordinary-player commands, authoritative recipe presentation, explicit preview
+  load/material/remove, cleanup, and Runtime disconnect/recovery.
+- Bare `/agent` required OP as designed because it aliases the administrative
+  status query. Ordinary-player `/agent say`, `/agent module`, and `/agent ui`
+  remained available without OP.
+- The checklist's explicitly non-core processing/unsupported recipe, unknown
+  Item ID, multi-chunk, dependency/version, and controlled adapter/storage failure
+  fixtures remained `BLOCKED`; there were no mandatory blockers or unresolved
+  failures. Native Windows equivalence remains unclaimed.
+- The tested commit was `3735c5ef7fe55f04fff499b257e72e71707c47c0`.
+  Paper, Client, dist manifest, Runtime manifest, protocol manifest, and archive
+  SHA-256 values were respectively `468a54dba0cd1cbc79d68831b2e78290a38614fd58438241f2e9b1927f16629f`,
+  `44b3048e3cc2163008579485f5121e03b0ef78889f680f24f67a899a287d308a`,
+  `34fa1378a1cc46ca6e69332abe59d49cec5712016ed129e151aae2d734cb6a70`,
+  `17632450b6dfe9f7e8c3014a126753169c05ce0733971d6025f6e31d511b8915`,
+  `8911de23fd119adc6c424c27e6f1b598fd35948c32fa7ab1eb3629fc3bdb2f8e`,
+  and `4776c7a11d80a9558df82a620f21bcb7422a43fd91b60c0583413d1f7bd3f136`.
+  The values matched a fresh local fingerprint before this package-excluded
+  acceptance/progress evidence update.
+- Raw working files were not imported into this Git workspace. The sanitized
+  environment and fingerprint transcripts plus maintainer PASS/BLOCKED outcomes
+  form the retained development record. No tag or GitHub Release has been
+  created because provider expansion is planned before publication.
 
 ## Verification
 
