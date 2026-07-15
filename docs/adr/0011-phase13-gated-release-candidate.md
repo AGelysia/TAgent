@@ -24,8 +24,9 @@ The automated gate:
 
 - requires one clean commit at entry and confirms the worktree remains clean at
   exit;
-- pins external Gradle artifacts by SHA-256, including the resolved Paper API
-  snapshot;
+- pins downloaded Gradle artifacts by SHA-256, including the resolved Paper API
+  snapshot, while narrowly trusting the exact Loom-generated layered mappings JAR
+  whose local bytes are not reproducible; its POM and downloaded inputs stay pinned;
 - starts from clean TypeScript and JVM output and disables Gradle build caching;
 - runs Runtime, Paper, Fabric, shared contract, MockBukkit, deterministic
   Capability fuzz, formatting, pinned real-Paper smoke, and npm audit checks,

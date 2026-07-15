@@ -39,7 +39,9 @@ Implementation status is tracked in the repository-only
 Minecraft 1.21.11 is intentionally pinned because the product baseline requires Java 21. Paper
 26.x requires Java 25 and is outside this compatibility line. Paper publishes the 1.21.11 API only
 through a mutable snapshot coordinate. The checked-in Gradle dependency verification metadata pins
-the resolved snapshot and all other build artifacts by SHA-256; an upstream change fails closed.
+the resolved snapshot and every downloaded build artifact by SHA-256. One exact four-field trust
+rule covers only Fabric Loom's locally generated layered mappings JAR, whose bytes are not
+reproducible; its POM and all downloaded inputs remain verified. An upstream change fails closed.
 
 ## Repository layout
 
