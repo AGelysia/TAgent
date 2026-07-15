@@ -637,10 +637,12 @@ Implemented automated scope:
       Runtime/JVM output, selects exact-version JARs, disables Gradle build cache,
       normalizes archive timestamps/order, and emits complete installation and
       upload `SHA256SUMS` files.
-- [x] Gradle dependency verification records SHA-256 for the complete downloaded
-      graph, including the exact Paper API snapshot. One four-field trust rule
-      covers only Loom's locally generated `mappings-layered+hash.2198.jar`, whose
-      bytes are not reproducible; its POM and every downloaded input remain pinned.
+- [x] Gradle dependency verification records SHA-256 for the complete
+      Gradle-resolved downloaded graph, including the exact Paper API snapshot. One
+      four-field trust entry per current Loom-local generated JAR covers 48
+      non-reproducible artifacts: layered mappings, merged Minecraft, and remapped
+      Fabric API. Their POMs and Gradle-resolved inputs remain pinned; Loom verifies
+      direct Minecraft and mappings downloads against Mojang manifest SHA-1 values.
       Ordinary strict and offline builds validate the final metadata.
 - [x] `verify-dist.sh` requires the Phase 13 file set, 50 exact schemas, Runtime
       entry layout, matching non-SNAPSHOT component versions, expected JAR
@@ -713,8 +715,8 @@ MINECRAFT_AGENT_ALLOW_DIRTY_RELEASE_CHECK=I_UNDERSTAND_THIS_IS_NOT_A_RELEASE \
   Capability fuzz, Litematica, and shared-contract suites.
 - Strict offline, no-cache JVM reruns passed with JUnit/Jupiter/Platform `6.0.3`,
   MockBukkit `4.110.0`, and Byte Buddy core/agent `1.18.8`. Final Gradle metadata
-  contains the exact Paper snapshot; its only trusted-artifact rule is the exact
-  non-reproducible Loom-generated layered mappings JAR described above.
+  contains the exact Paper snapshot; its trusted-artifact entries are limited to
+  the 48 exact non-reproducible Loom-local generated JARs described above.
 - The pinned Paper `1.21.11-132` smoke retained SHA-256
   `5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba`
   and passed `offline-lifecycle`, `unavailable`, `wrong-token`, and

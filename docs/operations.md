@@ -1078,8 +1078,12 @@ real-Paper smoke, npm audit, and release-directory checks serially. Both package
 builds start from clean output with Gradle build caching disabled. It compares
 the complete `dist/SHA256SUMS` and the upload artifact checksums, extracts the
 archive, and audits the extracted tree again. `gradle/verification-metadata.xml`
-pins external artifacts, including the resolved Paper API snapshot. A changed or
-missing upstream artifact fails closed.
+pins Gradle-resolved external artifacts, including the resolved Paper API snapshot.
+Its only trust entries identify the 48 exact Loom-local generated JARs for the
+pinned client graph; their POMs and Gradle-resolved inputs remain checksummed. Loom
+verifies direct Minecraft and mappings downloads against Mojang manifest SHA-1
+values outside that metadata file. A changed or missing upstream artifact fails
+closed.
 
 `dist/` is the inspected installation tree. `release/` contains the two JARs,
 `MinecraftAgent-0.1.0.tar.gz`, and a separate `SHA256SUMS`. The archive has one

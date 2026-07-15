@@ -24,9 +24,11 @@ The automated gate:
 
 - requires one clean commit at entry and confirms the worktree remains clean at
   exit;
-- pins downloaded Gradle artifacts by SHA-256, including the resolved Paper API
-  snapshot, while narrowly trusting the exact Loom-generated layered mappings JAR
-  whose local bytes are not reproducible; its POM and downloaded inputs stay pinned;
+- pins Gradle-resolved downloaded artifacts by SHA-256, including the resolved
+  Paper API snapshot, while using one exact four-field trust entry for each of the
+  48 current Loom-local generated JARs whose bytes are not reproducible; their POMs
+  and Gradle-resolved inputs stay pinned, while Loom verifies direct Minecraft and
+  mappings downloads against Mojang manifest SHA-1 values;
 - starts from clean TypeScript and JVM output and disables Gradle build caching;
 - runs Runtime, Paper, Fabric, shared contract, MockBukkit, deterministic
   Capability fuzz, formatting, pinned real-Paper smoke, and npm audit checks,
