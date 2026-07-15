@@ -6,8 +6,10 @@ import { parseDocument } from "yaml";
 import { z, type ZodIssue } from "zod";
 
 import { RuntimeStartupError, type RuntimeConfigIssue } from "../bootstrap/startup-error.js";
+import { modelProviderIds } from "../providers/model-provider.js";
 
 const MAX_CONFIG_BYTES = 64 * 1024;
+const MAX_BASE_URL_LENGTH = 2048;
 const CURRENT_CONFIG_VERSION = 2;
 const ENVIRONMENT_REFERENCE = /^\$\{([A-Z_][A-Z0-9_]*)\}$/u;
 const PLACEHOLDER_SECRET = /^(?:change-?me|replace-with-|your[-_])/iu;
@@ -59,6 +61,56 @@ const secretSchema = z
     "must not contain control characters",
   );
 
+const baseUrlSchema = z
+  .string()
+  .min(1)
+  .max(MAX_BASE_URL_LENGTH)
+  .transform((value, context) => {
+    if (
+      value !== value.trim() ||
+      [...value].some((character) => {
+        const codePoint = character.codePointAt(0);
+        return codePoint === undefined || codePoint <= 0x1f || codePoint === 0x7f;
+      }) ||
+      !/^https?:\/\//iu.test(value)
+    ) {
+      context.addIssue({ code: "custom", message: "must be an absolute HTTP URL" });
+      return z.NEVER;
+    }
+
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      context.addIssue({ code: "custom", message: "must be a valid URL" });
+      return z.NEVER;
+    }
+
+    const isSecure = parsed.protocol === "https:";
+    const isLoopbackHttp =
+      parsed.protocol === "http:" &&
+      (parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]") &&
+      /^http:\/\/(?:127\.0\.0\.1|\[::1\])(?::[0-9]+)?(?:\/|$)/iu.test(value);
+    if (!isSecure && !isLoopbackHttp) {
+      context.addIssue({
+        code: "custom",
+        message: "must use HTTPS unless the host is an IP loopback address",
+      });
+      return z.NEVER;
+    }
+    if (parsed.username.length > 0 || parsed.password.length > 0) {
+      context.addIssue({ code: "custom", message: "must not contain credentials" });
+      return z.NEVER;
+    }
+    if (value.includes("?") || value.includes("#")) {
+      context.addIssue({ code: "custom", message: "must not contain a query or fragment" });
+      return z.NEVER;
+    }
+
+    const pathname = parsed.pathname.replace(/\/+$/u, "");
+    return pathname.length === 0 ? parsed.origin : `${parsed.origin}${pathname}`;
+  });
+
 const runtimeConfigSchema = z
   .object({
     configVersion: z.literal(CURRENT_CONFIG_VERSION),
@@ -83,7 +135,8 @@ const runtimeConfigSchema = z
       .strict(),
     model: z
       .object({
-        provider: z.literal("openai"),
+        provider: z.enum(modelProviderIds),
+        baseUrl: baseUrlSchema.optional(),
         apiKey: secretSchema,
         model: z
           .string()
@@ -94,7 +147,16 @@ const runtimeConfigSchema = z
         inputMicroUsdPerMillionTokens: z.number().int().min(0).max(1_000_000_000_000),
         outputMicroUsdPerMillionTokens: z.number().int().min(0).max(1_000_000_000_000),
       })
-      .strict(),
+      .strict()
+      .superRefine((model, context) => {
+        if (model.provider === "openai-compatible" && model.baseUrl === undefined) {
+          context.addIssue({
+            code: "custom",
+            path: ["baseUrl"],
+            message: "is required for the openai-compatible provider",
+          });
+        }
+      }),
     storage: z
       .object({
         sqlitePath: sqlitePathSchema,
@@ -180,6 +242,7 @@ export type KnowledgeRootKind = "server_rules" | "local_docs";
 export const runtimeConfigWarningCodes = [
   "CONFIG_INLINE_SECRET",
   "CONFIG_FILE_PERMISSIONS_WIDE",
+  "MODEL_CUSTOM_BASE_URL",
   "PRIVACY_MESSAGE_LOGGING_ENABLED",
 ] as const;
 
@@ -624,6 +687,9 @@ export async function loadRuntimeConfig(
   }
   for (const field of inlineSecretFields) {
     warnings.push({ code: "CONFIG_INLINE_SECRET", field });
+  }
+  if (result.data.model.baseUrl !== undefined) {
+    warnings.push({ code: "MODEL_CUSTOM_BASE_URL", field: "/model/baseUrl" });
   }
   if (result.data.privacy.logMessageContent) {
     warnings.push({ code: "PRIVACY_MESSAGE_LOGGING_ENABLED", field: "/privacy/logMessageContent" });

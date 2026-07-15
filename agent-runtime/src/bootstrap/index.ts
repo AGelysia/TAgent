@@ -17,7 +17,7 @@ import { loadMarkdownKnowledge } from "../knowledge/markdown-loader.js";
 import { RuntimeLogger } from "../observability/runtime-logger.js";
 import { SchemaRegistry } from "../protocol/schema-registry.js";
 import { UnsupportedModelProvider, type ModelProvider } from "../providers/model-provider.js";
-import { OpenAiResponsesProvider } from "../providers/openai-responses-provider.js";
+import { createProductionModelProvider } from "../providers/provider-factory.js";
 import { AgentRequestService } from "../requests/agent-request-service.js";
 import {
   DisabledConversationRepository,
@@ -201,7 +201,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
     const provider =
       options.modelProvider ??
       (options.modelProviderHealthCheck === undefined
-        ? new OpenAiResponsesProvider()
+        ? createProductionModelProvider(loaded.config.model)
         : new UnsupportedModelProvider());
     const providerHealthCheck = options.modelProviderHealthCheck ?? provider;
     await checkModelProvider(loaded.config, providerHealthCheck);

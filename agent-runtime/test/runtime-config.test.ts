@@ -68,6 +68,150 @@ describe("runtime configuration", () => {
     expect(loaded.warnings).toEqual([]);
   });
 
+  it.each(["openai", "anthropic", "deepseek", "gemini"] as const)(
+    "loads the %s provider without changing configVersion 2 defaults",
+    async (provider) => {
+      const directory = await fixtureDirectory();
+      const source = validRuntimeConfig().replace("provider: openai", `provider: ${provider}`);
+      const configPath = await writeRuntimeConfig(directory, source, `${provider}.yml`);
+
+      const loaded = await loadRuntimeConfig({ configPath, environment: runtimeEnvironment() });
+
+      expect(loaded.config.configVersion).toBe(2);
+      expect(loaded.config.model.provider).toBe(provider);
+      expect(loaded.config.model.baseUrl).toBeUndefined();
+    },
+  );
+
+  it.each(["openai", "anthropic", "deepseek", "gemini", "openai-compatible"] as const)(
+    "loads and normalizes an environment-provided base URL for the %s provider",
+    async (provider) => {
+      const directory = await fixtureDirectory();
+      const source = validRuntimeConfig().replace(
+        "provider: openai",
+        `provider: ${provider}\n  baseUrl: \${MODEL_BASE_URL}`,
+      );
+      const configPath = await writeRuntimeConfig(directory, source, `${provider}-base-url.yml`);
+
+      const loaded = await loadRuntimeConfig({
+        configPath,
+        environment: runtimeEnvironment({ MODEL_BASE_URL: "https://models.example.test/v1///" }),
+      });
+
+      expect(loaded.config.model.provider).toBe(provider);
+      expect(loaded.config.model.baseUrl).toBe("https://models.example.test/v1");
+      expect(loaded.warnings).toContainEqual({
+        code: "MODEL_CUSTOM_BASE_URL",
+        field: "/model/baseUrl",
+      });
+    },
+  );
+
+  it("requires an explicit base URL for the openai-compatible provider", async () => {
+    const directory = await fixtureDirectory();
+    const source = validRuntimeConfig().replace("provider: openai", "provider: openai-compatible");
+    const configPath = await writeRuntimeConfig(directory, source, "compatible-missing-url.yml");
+
+    await expectStartupError(
+      loadRuntimeConfig({ configPath, environment: runtimeEnvironment() }),
+      "CONFIG_SCHEMA_INVALID",
+      "/model/baseUrl",
+    );
+  });
+
+  it.each([
+    ["https://models.example.test/", "https://models.example.test"],
+    ["http://127.0.0.1:11434/v1/", "http://127.0.0.1:11434/v1"],
+    ["http://[::1]:11434/v1///", "http://[::1]:11434/v1"],
+  ])("accepts and canonicalizes base URL %s", async (baseUrl, expected) => {
+    const directory = await fixtureDirectory();
+    const source = validRuntimeConfig().replace(
+      "provider: openai",
+      `provider: openai-compatible\n  baseUrl: ${baseUrl}`,
+    );
+    const configPath = await writeRuntimeConfig(directory, source, "valid-base-url.yml");
+
+    const loaded = await loadRuntimeConfig({ configPath, environment: runtimeEnvironment() });
+    expect(loaded.config.model.baseUrl).toBe(expected);
+  });
+
+  it.each([
+    ["remote HTTP", "http://models.example.test/v1"],
+    ["localhost HTTP", "http://localhost:11434/v1"],
+    ["abbreviated IPv4", "http://127.1:11434/v1"],
+    ["expanded IPv6", "http://[0:0:0:0:0:0:0:1]:11434/v1"],
+    ["unsupported scheme", "ftp://models.example.test/v1"],
+    ["credentials", "https://user:password@models.example.test/v1"],
+    ["query", "https://models.example.test/v1?token=secret-query-value"],
+    ["fragment", "https://models.example.test/v1#secret-fragment-value"],
+    ["leading whitespace", " https://models.example.test/v1"],
+    ["malformed", "not-a-url"],
+  ])("rejects unsafe base URL syntax without exposing it: %s", async (_case, baseUrl) => {
+    const directory = await fixtureDirectory();
+    const source = validRuntimeConfig().replace(
+      "provider: openai",
+      "provider: openai-compatible\n  baseUrl: ${MODEL_BASE_URL}",
+    );
+    const configPath = await writeRuntimeConfig(directory, source, "unsafe-base-url.yml");
+
+    const error = await expectStartupError(
+      loadRuntimeConfig({
+        configPath,
+        environment: runtimeEnvironment({ MODEL_BASE_URL: baseUrl }),
+      }),
+      "CONFIG_SCHEMA_INVALID",
+      "/model/baseUrl",
+    );
+    expect(JSON.stringify(error.toSafeDiagnostic())).not.toContain(baseUrl);
+  });
+
+  it("bounds base URLs and keeps unknown model keys out of diagnostics", async () => {
+    const directory = await fixtureDirectory();
+    const oversizedUrl = `https://models.example.test/${"x".repeat(2049)}`;
+    const oversizedSource = validRuntimeConfig().replace(
+      "provider: openai",
+      `provider: openai-compatible\n  baseUrl: ${oversizedUrl}`,
+    );
+    const oversizedPath = await writeRuntimeConfig(
+      directory,
+      oversizedSource,
+      "oversized-base-url.yml",
+    );
+    const unknownSecretKey = `endpoint-${TEST_API_KEY}`;
+    const unknownSource = validRuntimeConfig().replace(
+      "  apiKey: ${OPENAI_API_KEY}",
+      `  apiKey: \${OPENAI_API_KEY}\n  ${unknownSecretKey}: true`,
+    );
+    const unknownPath = await writeRuntimeConfig(directory, unknownSource, "unknown-model-key.yml");
+
+    await expectStartupError(
+      loadRuntimeConfig({ configPath: oversizedPath, environment: runtimeEnvironment() }),
+      "CONFIG_SCHEMA_INVALID",
+      "/model/baseUrl",
+    );
+    const unknownError = await expectStartupError(
+      loadRuntimeConfig({ configPath: unknownPath, environment: runtimeEnvironment() }),
+      "CONFIG_SCHEMA_INVALID",
+      "/model",
+    );
+    expect(JSON.stringify(unknownError.toSafeDiagnostic())).not.toContain(unknownSecretKey);
+  });
+
+  it("uses a stable missing-environment diagnostic for base URLs", async () => {
+    const directory = await fixtureDirectory();
+    const source = validRuntimeConfig().replace(
+      "provider: openai",
+      "provider: openai-compatible\n  baseUrl: ${MODEL_BASE_URL}",
+    );
+    const configPath = await writeRuntimeConfig(directory, source, "missing-base-url-env.yml");
+
+    await expectStartupError(
+      loadRuntimeConfig({ configPath, environment: runtimeEnvironment() }),
+      "CONFIG_ENV_MISSING",
+      "/model/baseUrl",
+    );
+  });
+
   it("rejects legacy configVersion 1 with a stable upgrade diagnostic", async () => {
     const directory = await fixtureDirectory();
     const configPath = await writeRuntimeConfig(

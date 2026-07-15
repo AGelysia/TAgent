@@ -36,10 +36,58 @@ describe("OpenAI Responses provider", () => {
     expect(init.headers).toEqual({ Authorization: `Bearer ${API_KEY}` });
   });
 
+  it("uses a configured Responses-compatible base URL without following redirects", async () => {
+    const fetchImplementation = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ id: "vendor/model", object: "model" }));
+    const provider = new OpenAiResponsesProvider({
+      baseUrl: "https://models.example.test/openai/v1/",
+      fetch: fetchImplementation,
+    });
+
+    await expect(
+      provider.check({
+        provider: "openai",
+        model: "vendor/model",
+        apiKey: API_KEY,
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(fetchImplementation.mock.calls[0]?.[0]).toBe(
+      "https://models.example.test/openai/v1/models/vendor%2Fmodel",
+    );
+    expect((fetchImplementation.mock.calls[0]?.[1] as RequestInit).redirect).toBe("error");
+  });
+
+  it("keeps custom-endpoint HTTP failure billability conservative", async () => {
+    const provider = new OpenAiResponsesProvider({
+      baseUrl: "https://models.example.test/v1",
+      fetch: vi.fn().mockResolvedValue(new Response(null, { status: 500 })),
+    });
+
+    await expect(
+      provider.generate({
+        provider: "openai",
+        model: "gpt-test",
+        apiKey: API_KEY,
+        instructions: "trusted module prompt",
+        input: [{ role: "user", content: "private player prompt" }],
+        tools: [],
+        maxOutputTokens: 1024,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({
+      code: "PROVIDER_UNAVAILABLE",
+      accountingDisposition: "BILLABILITY_UNKNOWN",
+    });
+  });
+
   it("creates a non-stored text-only response and returns bounded fallback text", async () => {
     const fetchImplementation = vi.fn().mockResolvedValue(
       jsonResponse({
         id: "resp_test",
+        status: "completed",
         output: [
           {
             type: "message",
@@ -175,11 +223,67 @@ describe("OpenAI Responses provider", () => {
     await expect(operation).rejects.toThrow("cancelled by request owner");
   });
 
+  it("classifies malformed local continuation state as not billable before fetch", async () => {
+    const fetchImplementation = vi.fn();
+    const provider = new OpenAiResponsesProvider({ fetch: fetchImplementation });
+
+    await expect(
+      provider.generate({
+        provider: "openai",
+        model: "gpt-test",
+        apiKey: API_KEY,
+        instructions: "trusted module prompt",
+        input: [{ role: "user", content: "private player prompt" }],
+        tools: [],
+        continuation: { provider: "anthropic", items: [] },
+        toolOutput: { providerCallId: "call-1", output: "{}" },
+        maxOutputTokens: 1024,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({
+      code: "MODEL_RESPONSE_INVALID",
+      accountingDisposition: "NOT_BILLABLE",
+    });
+    await expect(
+      provider.generate({
+        provider: "openai",
+        model: "gpt-test",
+        apiKey: API_KEY,
+        instructions: "trusted module prompt",
+        input: [{ role: "user", content: "private player prompt" }],
+        tools: [],
+        continuation: {
+          provider: "openai",
+          items: [
+            {
+              type: "function_call",
+              call_id: "call-1",
+              name: "server_info_read",
+              arguments: "{}",
+              status: "completed",
+            },
+          ],
+        },
+        toolOutput: {
+          providerCallId: "call-1",
+          output: "x".repeat(1024 * 1024 + 1),
+        },
+        maxOutputTokens: 1024,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({
+      code: "MODEL_RESPONSE_INVALID",
+      accountingDisposition: "NOT_BILLABLE",
+    });
+    expect(fetchImplementation).not.toHaveBeenCalled();
+  });
+
   it("continues two strict function calls with bounded call outputs before the final text", async () => {
     const fetchImplementation = vi
       .fn()
       .mockResolvedValueOnce(
         jsonResponse({
+          status: "completed",
           output: [
             {
               id: "msg_before_call",
@@ -206,6 +310,7 @@ describe("OpenAI Responses provider", () => {
       )
       .mockResolvedValueOnce(
         jsonResponse({
+          status: "completed",
           output: [
             {
               id: "call_item_2",
@@ -220,6 +325,7 @@ describe("OpenAI Responses provider", () => {
       )
       .mockResolvedValueOnce(
         jsonResponse({
+          status: "completed",
           output: [
             {
               type: "message",
@@ -307,6 +413,7 @@ describe("OpenAI Responses provider", () => {
     const provider = new OpenAiResponsesProvider({
       fetch: vi.fn().mockResolvedValue(
         jsonResponse({
+          status: "completed",
           output: [
             {
               type: "function_call",
@@ -340,6 +447,37 @@ describe("OpenAI Responses provider", () => {
             },
           },
         ],
+        maxOutputTokens: 1024,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_RESPONSE_INVALID" });
+  });
+
+  it("does not publish partial text from an incomplete Responses result", async () => {
+    const provider = new OpenAiResponsesProvider({
+      fetch: vi.fn().mockResolvedValue(
+        jsonResponse({
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "partial answer" }],
+            },
+          ],
+        }),
+      ),
+    });
+
+    await expect(
+      provider.generate({
+        provider: "openai",
+        model: "gpt-test",
+        apiKey: API_KEY,
+        instructions: "trusted module prompt",
+        input: [{ role: "user", content: "private player prompt" }],
+        tools: [],
         maxOutputTokens: 1024,
         signal: new AbortController().signal,
       }),

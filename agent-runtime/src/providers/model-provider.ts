@@ -1,5 +1,15 @@
 import type { ModelProviderHealthCheck } from "../health/model-provider.js";
 
+export const modelProviderIds = [
+  "openai",
+  "anthropic",
+  "deepseek",
+  "gemini",
+  "openai-compatible",
+] as const;
+
+export type ModelProviderId = (typeof modelProviderIds)[number];
+
 export const modelGenerationFailureCodes = [
   "MODEL_AUTHENTICATION_FAILED",
   "MODEL_UNAVAILABLE",
@@ -28,12 +38,12 @@ export interface ModelToolOutput {
 }
 
 export interface ModelGenerationContinuation {
-  readonly provider: "openai";
+  readonly provider: ModelProviderId;
   readonly items: readonly Readonly<Record<string, unknown>>[];
 }
 
 export interface ModelGenerationRequest {
-  readonly provider: "openai";
+  readonly provider: ModelProviderId;
   readonly model: string;
   readonly apiKey: string;
   readonly instructions: string;

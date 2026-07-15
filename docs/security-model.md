@@ -27,6 +27,10 @@ Phase 11 adds bounded private Markdown retrieval, owner-scoped project revision
 storage, Paper-owned permission-filtered landmarks and build snapshots,
 authoritative recipe v2 presentation, and native local schematic generation.
 These remain read/presentation paths; the production write catalog stays empty.
+Phase 12 adds bounded management and durable cost admission, Phase 13 adds the
+gated release-candidate and physical-client evidence boundary, and Phase 14 adds
+five fixed production provider profiles plus controlled endpoint overrides.
+Provider expansion does not change Paper authority or create an execution path.
 
 The governing rule is:
 
@@ -42,6 +46,7 @@ The following inputs are untrusted:
 - Books, signs, chat, server documents, and retrieved document content.
 - Stored project text and landmark labels/tags.
 - Model output and every Runtime-originated tool call.
+- Provider HTTP responses, custom model endpoints, and compatibility claims.
 - Fabric client packets, capability claims, acknowledgements, and selections.
 - Litematica state, preview acknowledgements, and material counts.
 - External Capability Packs until explicitly approved and validated.
@@ -573,8 +578,9 @@ atomically to Runtime's private SQLite store; failed, timed-out, or cancelled
 work leaves no partial turn. Session lookup always uses the authenticated server
 ID and actual player UUID in the query, and absent or foreign sessions share one
 safe response. Disabling conversation storage writes no prompt or completion and
-disables resume. In both modes, the OpenAI request sets `store: false`, Runtime
-logs only fixed event/error metadata, and Paper renders the validated fallback as
+disables resume. In both modes, Runtime retains no provider conversation handle,
+requests provider-side storage off where the selected protocol exposes that
+control, logs only fixed event/error metadata, and Paper renders the validated fallback as
 literal text rather than parsing formatting or click events. Server operators
 must separately disable or protect Paper's global
 player-command logging if questions are sensitive: the server may log the full
@@ -618,15 +624,30 @@ databases, unsafe ownership/modes, and state directly in the configuration root
 are rejected. Created directories are `0700`; SQLite and probe files are `0600`.
 
 Startup logs serialize only fixed event names, stable codes, stages, and known
-field paths. Provider exceptions and configuration values are discarded. The
-loopback `/health` response is a cached readiness snapshot with no model name,
+field paths. Provider exceptions and configuration values are discarded. An
+explicit `model.baseUrl` emits `MODEL_CUSTOM_BASE_URL` with only the known
+`/model/baseUrl` field; the URL is not logged. Base URLs must use HTTPS except
+for literal `127.0.0.1` or `[::1]` HTTP, cannot contain user information, a
+query, or fragment, and cannot redirect. These syntax and routing controls do
+not establish endpoint trust. The selected adapter sends its configured API
+key, prompts, tool definitions, and tool results to that endpoint.
+
+The loopback `/health` response is a cached readiness snapshot with no model name,
 path, secret, raw error, or repeated external check. Phase 6's production
-provider performs a bounded model lookup during readiness and a bounded
-Responses request only for admitted player work.
+provider performs a bounded model lookup during readiness. Phase 14 selects one
+fixed OpenAI Responses, Anthropic Messages, DeepSeek Chat Completions, Gemini
+stateless `generateContent`, or OpenAI-compatible Chat Completions adapter for
+admitted player work. There is no provider fallback, rotation, or protocol
+autodetection. DeepSeek thinking is disabled so tool continuation does not
+depend on plaintext chain-of-thought; every response and continuation remains
+bounded and untrusted. DeepSeek input must use the higher cache-miss rate in the
+single-rate ledger; Gemini accounting includes tool-use prompt and thinking
+tokens. An HTTP failure from an explicit custom endpoint is
+`BILLABILITY_UNKNOWN` and conservatively consumes the active reservation.
 
 ## Current enforcement gap
 
-At the Phase 12 boundary, Paper-side startup, authenticated application channel,
+At the Phase 14 boundary, Paper-side startup, authenticated application channel,
 conditional registration, persistent Offline state, epoch gate, private
 conversation, request cancellation, Runtime-owned sessions, owner-filtered
 resume, one-shot modules, bounded context, Runtime provider limits, eight Paper
@@ -648,14 +669,21 @@ policy reload. Runtime SQLite v3-v5 durably enforces UTC daily admissions and
 applies monthly provider cost reservations/settlement as a conservative
 admission bound. The v5 process-owner row assumes one Linux PID namespace and a
 local database; operators must stop older v3/v4 Runtime binaries before upgrade.
+Runtime now has the five fixed Phase 14 provider profiles, controlled custom
+base URLs, bounded native health/generation parsers, and serial tool
+continuations. Automated tests use synthetic credentials and injected HTTP;
+sanitized live-key acceptance against each claimed official provider and a
+reviewed compatible endpoint remains pending before publication. No arbitrary
+endpoint or text-only model compatibility is implied.
 
 The production proposal catalog is still empty, the synchronous service has no
 production creation path, and no capability record has an executor. Proposal
 WebSocket handlers, write-operation producers, trusted third-party command
 adapters, a world apply/rollback adapter, and world mutation remain absent.
 Build preview publication is disabled by default and is
-read-only when explicitly enabled. A graphical client with the real supported
-Litematica/MaLiLib tuple has not been
-run on this host. Protocol schemas, a client ACK, an effective capability record,
+read-only when explicitly enabled. Phase 13 records a maintainer-attested
+physical-client run of the supported Litematica/MaLiLib tuple; allowlisted
+non-core fixtures and native Windows equivalence remain unclaimed. Protocol
+schemas, a client ACK, an effective capability record,
 or a locally loaded preview remain presentation/metadata facts, not evidence
 that execution is reachable.

@@ -1,32 +1,36 @@
-import { TextDecoder } from "node:util";
-
 import { z } from "zod";
 
 import type {
   ModelProviderHealthRequest,
   ModelProviderHealthResult,
 } from "../health/model-provider.js";
-import { parseStrictJson } from "../transport/strict-json.js";
 import {
   ModelGenerationError,
+  type ModelGenerationAccountingDisposition,
   type ModelGenerationRequest,
   type ModelGenerationResult,
   type ModelProvider,
 } from "./model-provider.js";
+import {
+  appendEndpoint,
+  bearerAuthorization,
+  boundedFallbackText,
+  discardBody,
+  type FetchImplementation,
+  MAXIMUM_PROVIDER_RESPONSE_BYTES,
+  MAXIMUM_TOOL_ARGUMENT_CHARACTERS,
+  PROVIDER_TOOL_NAME,
+  readBoundedJson,
+  serializeProviderRequest,
+  strictToolArguments,
+} from "./provider-http.js";
 
 const OPENAI_API_ROOT = "https://api.openai.com/v1";
-const MAXIMUM_PROVIDER_RESPONSE_BYTES = 1024 * 1024;
-const MAXIMUM_FALLBACK_TEXT_LENGTH = 8192;
-const MAXIMUM_TOOL_ARGUMENT_CHARACTERS = 16 * 1024;
-const PROVIDER_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/u;
-
-type FetchImplementation = (
-  input: string | URL | globalThis.Request,
-  init?: RequestInit,
-) => Promise<Response>;
+const MAXIMUM_CONTINUATION_ITEMS = 1024;
 
 export interface OpenAiResponsesProviderOptions {
   readonly fetch?: FetchImplementation;
+  readonly baseUrl?: string;
 }
 
 const healthResponseSchema = z
@@ -92,35 +96,19 @@ const continuationItemSchema = z.union([
 
 const providerResponseSchema = z
   .object({
+    status: z.literal("completed"),
     output: z
       .array(z.union([assistantMessageSchema, functionCallSchema, reasoningItemSchema]))
       .max(64),
     usage: z
       .object({
-        input_tokens: z.number().int().nonnegative(),
-        output_tokens: z.number().int().nonnegative(),
+        input_tokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+        output_tokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
       })
       .loose()
       .optional(),
   })
   .loose();
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function toolArguments(source: string): Readonly<Record<string, unknown>> {
-  let parsed: unknown;
-  try {
-    parsed = parseStrictJson(source, { maximumDepth: 16, maximumTokens: 2048 });
-  } catch {
-    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
-  }
-  if (!isRecord(parsed)) {
-    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
-  }
-  return parsed;
-}
 
 function continuationItems(
   request: ModelGenerationRequest,
@@ -128,28 +116,50 @@ function continuationItems(
   const continuation = request.continuation;
   const toolOutput = request.toolOutput;
   if ((continuation === undefined) !== (toolOutput === undefined)) {
-    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+    throw new ModelGenerationError("MODEL_RESPONSE_INVALID", "NOT_BILLABLE");
   }
   if (continuation === undefined || toolOutput === undefined) {
     return [];
   }
-  if (continuation.provider !== "openai") {
-    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+  if (
+    continuation.provider !== "openai" ||
+    continuation.items.length === 0 ||
+    continuation.items.length > MAXIMUM_CONTINUATION_ITEMS ||
+    toolOutput.output.length === 0 ||
+    Buffer.byteLength(toolOutput.output, "utf8") > MAXIMUM_PROVIDER_RESPONSE_BYTES
+  ) {
+    throw new ModelGenerationError("MODEL_RESPONSE_INVALID", "NOT_BILLABLE");
   }
 
   const parsedItems = continuation.items.map((item) => continuationItemSchema.safeParse(item));
   if (parsedItems.some((item) => !item.success)) {
-    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+    throw new ModelGenerationError("MODEL_RESPONSE_INVALID", "NOT_BILLABLE");
   }
-  const calls = parsedItems
-    .filter((item) => item.success && item.data.type === "function_call")
-    .map((item) => item.data);
+  const items = parsedItems.map((item) => {
+    if (!item.success) {
+      throw new ModelGenerationError("MODEL_RESPONSE_INVALID", "NOT_BILLABLE");
+    }
+    return item.data;
+  });
+  const calls = items.filter((item) => item.type === "function_call");
+  const outputs = items.filter((item) => item.type === "function_call_output");
+  const callIds = new Set(calls.map((call) => call.call_id));
+  const outputIds = new Set(outputs.map((output) => output.call_id));
   const pending = calls.at(-1);
-  if (pending?.call_id !== toolOutput.providerCallId) {
-    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+  if (
+    pending?.call_id !== toolOutput.providerCallId ||
+    callIds.size !== calls.length ||
+    outputIds.size !== outputs.length ||
+    calls.some((call) => call.status !== undefined && call.status !== "completed") ||
+    outputs.some((output) => !callIds.has(output.call_id)) ||
+    calls.some((call, index) =>
+      index === calls.length - 1 ? outputIds.has(call.call_id) : !outputIds.has(call.call_id),
+    )
+  ) {
+    throw new ModelGenerationError("MODEL_RESPONSE_INVALID", "NOT_BILLABLE");
   }
   return [
-    ...continuation.items,
+    ...items,
     {
       type: "function_call_output",
       call_id: toolOutput.providerCallId,
@@ -162,7 +172,7 @@ function providerTools(request: ModelGenerationRequest): readonly Record<string,
   const names = new Set<string>();
   return (request.tools ?? []).map((tool) => {
     if (!PROVIDER_TOOL_NAME.test(tool.providerName) || names.has(tool.providerName)) {
-      throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
+      throw new ModelGenerationError("MODEL_RESPONSE_INVALID", "NOT_BILLABLE");
     }
     names.add(tool.providerName);
     return {
@@ -173,68 +183,6 @@ function providerTools(request: ModelGenerationRequest): readonly Record<string,
       strict: true,
     };
   });
-}
-
-function authorization(apiKey: string): string {
-  return `Bearer ${apiKey}`;
-}
-
-async function discardBody(response: Response): Promise<void> {
-  await response.body?.cancel().catch(() => undefined);
-}
-
-async function readBoundedJson(response: Response): Promise<unknown> {
-  if (response.body === null) {
-    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
-  }
-
-  const declaredLength = response.headers.get("content-length");
-  if (
-    declaredLength !== null &&
-    Number.isFinite(Number(declaredLength)) &&
-    Number(declaredLength) > MAXIMUM_PROVIDER_RESPONSE_BYTES
-  ) {
-    await discardBody(response);
-    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
-  }
-
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let byteLength = 0;
-  try {
-    while (true) {
-      const result = await reader.read();
-      if (result.done) {
-        break;
-      }
-      byteLength += result.value.byteLength;
-      if (byteLength > MAXIMUM_PROVIDER_RESPONSE_BYTES) {
-        await reader.cancel();
-        throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
-      }
-      chunks.push(result.value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const bytes = new Uint8Array(byteLength);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-
-  let source: string;
-  try {
-    source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    return parseStrictJson(source);
-  } catch (error) {
-    if (error instanceof ModelGenerationError) {
-      throw error;
-    }
-    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
-  }
 }
 
 function healthFailure(status: number): ModelProviderHealthResult {
@@ -250,72 +198,47 @@ function healthFailure(status: number): ModelProviderHealthResult {
   return { ok: false, code: "MODEL_HEALTH_FAILED" };
 }
 
-function generationFailure(status: number): ModelGenerationError {
+function generationFailure(
+  status: number,
+  disposition: ModelGenerationAccountingDisposition,
+): ModelGenerationError {
   if (status === 401 || status === 403) {
-    return new ModelGenerationError("MODEL_AUTHENTICATION_FAILED", "NOT_BILLABLE");
+    return new ModelGenerationError("MODEL_AUTHENTICATION_FAILED", disposition);
   }
   if (status === 404) {
-    return new ModelGenerationError("MODEL_UNAVAILABLE", "NOT_BILLABLE");
+    return new ModelGenerationError("MODEL_UNAVAILABLE", disposition);
   }
   if (status === 429) {
-    return new ModelGenerationError("MODEL_RATE_LIMITED", "NOT_BILLABLE");
+    return new ModelGenerationError("MODEL_RATE_LIMITED", disposition);
   }
   if (status === 408 || status >= 500) {
-    return new ModelGenerationError("PROVIDER_UNAVAILABLE", "NOT_BILLABLE");
+    return new ModelGenerationError("PROVIDER_UNAVAILABLE", disposition);
   }
-  return new ModelGenerationError("MODEL_RESPONSE_INVALID", "NOT_BILLABLE");
-}
-
-function hasUnpairedSurrogate(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const unit = value.charCodeAt(index);
-    if (unit >= 0xd800 && unit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (index + 1 >= value.length || next < 0xdc00 || next > 0xdfff) {
-        return true;
-      }
-      index += 1;
-    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function boundedFallbackText(value: string): string {
-  let text = value.trim();
-  if (hasUnpairedSurrogate(text)) {
-    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
-  }
-  if (text.length > MAXIMUM_FALLBACK_TEXT_LENGTH) {
-    text = text.slice(0, MAXIMUM_FALLBACK_TEXT_LENGTH);
-    const last = text.charCodeAt(text.length - 1);
-    if (last >= 0xd800 && last <= 0xdbff) {
-      text = text.slice(0, -1);
-    }
-    text = text.trimEnd();
-  }
-  if (text.length === 0) {
-    throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
-  }
-  return text;
+  return new ModelGenerationError("MODEL_RESPONSE_INVALID", disposition);
 }
 
 export class OpenAiResponsesProvider implements ModelProvider {
   readonly #fetch: FetchImplementation;
+  readonly #baseUrl: string;
+  readonly #officialEndpoint: boolean;
 
   public constructor(options: OpenAiResponsesProviderOptions = {}) {
     this.#fetch = options.fetch ?? globalThis.fetch;
+    this.#baseUrl = options.baseUrl ?? OPENAI_API_ROOT;
+    this.#officialEndpoint = options.baseUrl === undefined;
   }
 
   public async check(request: ModelProviderHealthRequest): Promise<ModelProviderHealthResult> {
+    if (request.provider !== "openai") {
+      return { ok: false, code: "PROVIDER_UNSUPPORTED" };
+    }
     let response: Response;
     try {
       response = await this.#fetch(
-        `${OPENAI_API_ROOT}/models/${encodeURIComponent(request.model)}`,
+        appendEndpoint(this.#baseUrl, `models/${encodeURIComponent(request.model)}`),
         {
           method: "GET",
-          headers: { Authorization: authorization(request.apiKey) },
+          headers: { Authorization: bearerAuthorization(request.apiKey) },
           redirect: "error",
           signal: request.signal,
         },
@@ -333,39 +256,48 @@ export class OpenAiResponsesProvider implements ModelProvider {
     }
 
     try {
-      const parsed = healthResponseSchema.safeParse(await readBoundedJson(response));
+      const parsed = healthResponseSchema.safeParse(
+        await readBoundedJson(response, request.signal),
+      );
       return parsed.success && parsed.data.id === request.model
         ? { ok: true }
         : { ok: false, code: "MODEL_HEALTH_FAILED" };
     } catch {
+      if (request.signal.aborted) {
+        throw request.signal.reason;
+      }
       return { ok: false, code: "MODEL_HEALTH_FAILED" };
     }
   }
 
   public async generate(request: ModelGenerationRequest): Promise<ModelGenerationResult> {
+    if (request.provider !== "openai") {
+      throw new ModelGenerationError("MODEL_RESPONSE_INVALID", "NOT_BILLABLE");
+    }
     let response: Response;
     const priorItems = continuationItems(request);
     const tools = providerTools(request);
+    const body = serializeProviderRequest({
+      model: request.model,
+      instructions: request.instructions,
+      input: [...request.input, ...priorItems],
+      max_output_tokens: request.maxOutputTokens,
+      store: false,
+      tools,
+      tool_choice: tools.length === 0 ? "none" : "auto",
+      parallel_tool_calls: false,
+      include: ["reasoning.encrypted_content"],
+    });
     try {
-      response = await this.#fetch(`${OPENAI_API_ROOT}/responses`, {
+      response = await this.#fetch(appendEndpoint(this.#baseUrl, "responses"), {
         method: "POST",
         headers: {
-          Authorization: authorization(request.apiKey),
+          Authorization: bearerAuthorization(request.apiKey),
           "Content-Type": "application/json",
         },
         redirect: "error",
         signal: request.signal,
-        body: JSON.stringify({
-          model: request.model,
-          instructions: request.instructions,
-          input: [...request.input, ...priorItems],
-          max_output_tokens: request.maxOutputTokens,
-          store: false,
-          tools,
-          tool_choice: tools.length === 0 ? "none" : "auto",
-          parallel_tool_calls: false,
-          include: ["reasoning.encrypted_content"],
-        }),
+        body,
       });
     } catch {
       if (request.signal.aborted) {
@@ -376,10 +308,15 @@ export class OpenAiResponsesProvider implements ModelProvider {
 
     if (!response.ok) {
       await discardBody(response);
-      throw generationFailure(response.status);
+      throw generationFailure(
+        response.status,
+        this.#officialEndpoint ? "NOT_BILLABLE" : "BILLABILITY_UNKNOWN",
+      );
     }
 
-    const parsed = providerResponseSchema.safeParse(await readBoundedJson(response));
+    const parsed = providerResponseSchema.safeParse(
+      await readBoundedJson(response, request.signal),
+    );
     if (!parsed.success) {
       throw new ModelGenerationError("MODEL_RESPONSE_INVALID");
     }
@@ -442,7 +379,7 @@ export class OpenAiResponsesProvider implements ModelProvider {
         type: "tool_call",
         providerCallId: call.call_id,
         providerName: call.name,
-        arguments: toolArguments(call.arguments),
+        arguments: strictToolArguments(call.arguments),
         continuation: {
           provider: "openai",
           items: [...priorItems, ...currentContinuation],

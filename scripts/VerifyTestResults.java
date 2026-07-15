@@ -14,7 +14,14 @@ import org.xml.sax.SAXException;
 
 final class VerifyTestResults {
   private static final Set<String> RUNTIME_REQUIRED =
-      Set.of("test/phase13-manual-runtime.test.ts", "test/usage-accounting.test.ts");
+      Set.of(
+          "test/anthropic-messages-provider.test.ts",
+          "test/gemini-generate-content-provider.test.ts",
+          "test/openai-chat-completions-provider.test.ts",
+          "test/openai-responses-provider.test.ts",
+          "test/phase13-manual-runtime.test.ts",
+          "test/provider-factory.test.ts",
+          "test/usage-accounting.test.ts");
   private static final Set<String> PAPER_REQUIRED =
       Set.of(
           "dev.minecraftagent.paper.capability.load.CapabilityDeterministicFuzzTest",
@@ -38,7 +45,7 @@ final class VerifyTestResults {
     }
 
     verify(
-        new Lane("Runtime", 20, 167, RUNTIME_REQUIRED),
+        new Lane("Runtime", 24, 275, RUNTIME_REQUIRED),
         suitesFromDocument(Path.of(args[0])));
     verify(
         new Lane("Paper", 59, 463, PAPER_REQUIRED),

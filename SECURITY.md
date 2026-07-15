@@ -51,6 +51,11 @@ Runtime authenticate with the same high-entropy
 Neither secret belongs in Git, a JAR, `.env.example`, a Minecraft command, a
 screen capture, or a support bundle.
 
+Runtime sends the configured provider key, prompts, tool definitions, and tool
+results to the selected official service or explicit `model.baseUrl`. Treat a
+custom base URL as a credential and private-data trust decision. Do not point it
+at an endpoint merely because it advertises OpenAI compatibility.
+
 For any networked test or deployment:
 
 - keep `online-mode=true`, enable the whitelist, and whitelist only intended
@@ -83,6 +88,30 @@ configured model price and use limits before allowing players to submit requests
 The monthly value is a conservative reservation-based admission bound, not a
 provider billing cap.
 
+Supported production profiles are fixed to OpenAI Responses, Anthropic
+Messages, DeepSeek Chat Completions, Gemini stateless `generateContent`, and a
+reviewed OpenAI-compatible Chat Completions endpoint. Official profiles have
+documented defaults and may use an explicit `model.baseUrl`;
+`openai-compatible` requires one. The URL must be HTTPS except for literal
+loopback HTTP, cannot contain credentials, a query, or fragment, and redirects
+are rejected. Runtime emits `MODEL_CUSTOM_BASE_URL` with only the field
+`/model/baseUrl`; it deliberately does not log the URL.
+
+Those checks do not authenticate the operator's choice of destination or prove
+its tool-call, privacy, retention, regional, or billing behavior. Review the
+endpoint and certificate independently, use a key scoped for that destination,
+and configure prices and reservations from the actual account. Runtime does not
+automatically fall back, retry on another provider, rotate keys, or download
+pricing. Every selected model must support its adapter's serial tool-call
+contract.
+
+For DeepSeek, use the higher cache-miss input price rather than its cache-hit or
+average price because Runtime stores one aggregate prompt-token rate. Gemini
+accounting includes tool-use prompt and thinking tokens. Any HTTP failure from
+an explicit custom endpoint has unknown billability and conservatively consumes
+the configured round reservation; do not weaken that behavior to make a gateway
+appear cheaper.
+
 Build preview publication is disabled by default. Enable
 `MINECRAFT_AGENT_BUILD_PREVIEW_ENABLED=true` only for an isolated test using the
 exact supported Fabric/Litematica tuple. Disable it again after testing until the
@@ -102,6 +131,8 @@ has recorded acceptable evidence.
   proposal or authorize execution.
 - Model output can call only the fixed typed tool catalog. It cannot create an
   arbitrary Bukkit command, shell command, script, URL fetch, or path.
+- Provider responses and continuation objects remain untrusted and bounded. A
+  custom endpoint cannot add tools, raise limits, or change Paper authorization.
 - Status, doctor, capabilities, costs, reload, toggle, and proposal responses
   retain their independent Paper permissions and owner checks.
 - Capability examples and drafts are non-effective. A manifest cannot approve

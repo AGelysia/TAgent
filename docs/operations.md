@@ -1,6 +1,6 @@
 # Operations
 
-## Phase 0-12 purpose
+## Phase 0-14 purpose
 
 The repository remains a development implementation, not a deployable Minecraft
 Agent service. Its useful operations are build, format, contract, readiness,
@@ -25,9 +25,12 @@ Litematica adapter. Phase 11 adds private Markdown retrieval, player-owned
 projects, permission-filtered landmarks, authoritative recipe v2 presentation,
 Paper-owned build snapshots, and native Litematica generation. It remains
 presentation-only; the production write catalog is still empty.
+Phase 14 adds five production provider profiles with fixed native protocol
+adapters and controlled optional base URLs. It does not add provider fallback,
+key rotation, remote pricing, or a generic HTTP adapter.
 
 No real API key, production server token, model account, or Litematica
-installation is required for automated Phase 0-11 checks. Tests use temporary
+installation is required for automated Phase 0-14 checks. Tests use temporary
 secrets, private temporary directories, ephemeral loopback ports, fake provider
 adapters, and a fake incompatible Runtime. The exact Paper `1.21.11-132` server
 is used by the Phase 3 decision smoke; successful and token-mismatch cases use
@@ -139,18 +142,19 @@ npm run build
 npm test
 ```
 
-`npm start` executes the startup gate and uses the production OpenAI Responses
-adapter. Readiness performs `GET /v1/models/{model}` with the configured timeout;
-only a successful result permits the final loopback bind. Tests inject a fake
-provider through code only; there is no configuration switch for one.
+`npm start` executes the startup gate and selects the fixed production adapter
+named by `model.provider`. Readiness performs that adapter's bounded model lookup
+with the configured timeout; only a successful result permits the final loopback
+bind. Tests inject fake HTTP or provider implementations through code only;
+there is no production configuration switch for a fake provider.
 
 ## Runtime configuration
 
 Copy `agent-runtime/config.example.yml` to the ignored
-`agent-runtime/config.local.yml`, set it to mode `0600`, and inject
-`OPENAI_API_KEY` and `MINECRAFT_AGENT_SERVER_TOKEN` through the invoking shell or
-service manager. `.env.example` is not loaded automatically. Environment
-references must occupy an entire YAML scalar, for example `${OPENAI_API_KEY}`;
+`agent-runtime/config.local.yml`, set it to mode `0600`, and inject the key for
+the selected provider plus `MINECRAFT_AGENT_SERVER_TOKEN` through the invoking
+shell or service manager. `.env.example` is not loaded automatically. Environment
+references must occupy an entire YAML scalar, for example `${ANTHROPIC_API_KEY}`;
 there is no interpolation, default-value syntax, command substitution, or
 recursive expansion.
 
@@ -198,6 +202,109 @@ Startup failures emit one JSON diagnostic with a stable code, stage, and known
 field path. They never include received configuration values, provider response
 bodies, API keys, server tokens, or unknown YAML key text.
 
+### Provider profiles and endpoints
+
+`configVersion: 2` remains current. An existing `provider: openai` configuration
+without `baseUrl` continues to use the OpenAI Responses API at
+`https://api.openai.com/v1`. Select exactly one of these profiles in the complete
+`model` block; retain and review `timeoutSeconds` and both pricing fields from
+the example configuration:
+
+```yaml
+# OpenAI Responses; default base URL: https://api.openai.com/v1
+model:
+  provider: openai
+  # baseUrl: ${OPENAI_BASE_URL}
+  apiKey: ${OPENAI_API_KEY}
+  model: configured-openai-model-name
+```
+
+```yaml
+# Anthropic Messages; default base URL: https://api.anthropic.com/v1
+model:
+  provider: anthropic
+  # baseUrl: ${ANTHROPIC_BASE_URL}
+  apiKey: ${ANTHROPIC_API_KEY}
+  model: configured-claude-model-name
+```
+
+```yaml
+# DeepSeek Chat Completions; default base URL: https://api.deepseek.com
+model:
+  provider: deepseek
+  # baseUrl: ${DEEPSEEK_BASE_URL}
+  apiKey: ${DEEPSEEK_API_KEY}
+  model: configured-deepseek-model-name
+```
+
+```yaml
+# Gemini stateless generateContent
+# Default base URL: https://generativelanguage.googleapis.com/v1beta
+model:
+  provider: gemini
+  # baseUrl: ${GEMINI_BASE_URL}
+  apiKey: ${GEMINI_API_KEY}
+  model: configured-gemini-model-name
+```
+
+```yaml
+# Reviewed OpenAI-compatible Chat Completions service; baseUrl is mandatory.
+model:
+  provider: openai-compatible
+  baseUrl: ${OPENAI_COMPATIBLE_BASE_URL}
+  apiKey: ${OPENAI_COMPATIBLE_API_KEY}
+  model: configured-compatible-model-name
+```
+
+The native contracts are not interchangeable. OpenAI uses Responses; Anthropic
+uses Messages; DeepSeek and `openai-compatible` use Chat Completions; Gemini uses
+`generateContent` without a server-side conversation handle. DeepSeek thinking
+is explicitly disabled so serial tool continuation does not replay plaintext
+chain-of-thought. Every selected model must support that adapter's tool/function
+calling when its module exposes tools. Runtime does not retry, rotate, or fall
+back to another provider or model.
+
+Provider-relative paths and authentication are fixed:
+
+| Provider | Readiness | Generation | API key header |
+| --- | --- | --- | --- |
+| `openai` | `GET models/{model}` | `POST responses` | `Authorization: Bearer` |
+| `anthropic` | `GET models/{model}` | `POST messages` | `x-api-key` |
+| `deepseek` | `GET models` | `POST chat/completions` | `Authorization: Bearer` |
+| `gemini` | `GET models/{model}` | `POST models/{model}:generateContent` | `x-goog-api-key` |
+| `openai-compatible` | `GET models` | `POST chat/completions` | `Authorization: Bearer` |
+
+Runtime appends these paths to the configured base URL, URL-encodes model path
+segments, and never puts an API key in a query string. Anthropic also sends the
+fixed adapter API-version header.
+
+All four official profiles may omit `baseUrl` for the default above or set it to
+a reviewed protocol-compatible gateway. `openai-compatible` has no default and
+requires it. A custom Chat Completions service must provide a bounded `GET /models`
+response containing the configured model and `POST /chat/completions`
+with the documented serial function-call behavior. A custom URL for an official
+profile must instead implement that profile's native health and generation
+paths. The project does not claim that arbitrary compatible endpoints or
+text-only models will work.
+
+Before a Phase 14 public candidate, run isolated live-key checks for every
+official profile being claimed and one reviewed `openai-compatible` fixture.
+Then run the clean release-candidate lane, record the resulting fingerprints,
+and repeat the complete physical-client graphical checklist against those exact
+hashes. The Phase 13 acceptance bound to commit `3735c5e` is historical only:
+its own candidate rule requires a new graphical run after any Runtime, dist, or
+archive fingerprint changes.
+
+`baseUrl` accepts at most 2048 characters and is normalized by removing trailing
+slashes. It must use HTTPS, except for plain HTTP on literal `127.0.0.1` or
+`[::1]`; user information, queries, fragments, control characters, and redirects
+are rejected. Any explicit value emits `runtime.config.warning` with code
+`MODEL_CUSTOM_BASE_URL` and field `/model/baseUrl`; the URL itself is not logged.
+This warning is an operator review signal, not a denial. Runtime sends the
+configured API key, prompts, tool definitions, and tool results to that endpoint
+using the selected adapter's authentication header. Review its ownership,
+certificate, protocol, retention, and billing policy before startup.
+
 ### Usage pricing and monthly budget
 
 Runtime does not infer a price from `model.model`. Configure rates from the
@@ -221,10 +328,21 @@ response that reports usage, Runtime records one event at:
 ceil((inputTokens * inputRate + outputTokens * outputRate) / 1,000,000)
 ```
 
+For DeepSeek, Runtime maps the aggregate `prompt_tokens` value to input tokens.
+DeepSeek cache-hit and cache-miss input can have different prices, but the
+current ledger intentionally has one input rate and does not persist that split.
+Set `inputMicroUsdPerMillionTokens` to the higher cache-miss rate. A cache-hit
+rate or blended/average rate would under-reserve the conservative local bound.
+
+For Gemini, Runtime records input as `promptTokenCount +
+toolUsePromptTokenCount` and output as `candidatesTokenCount +
+thoughtsTokenCount`; absent optional counts are zero. This includes tool prompt
+and thinking usage rather than charging only visible candidate text.
+
 All arithmetic and persisted costs use integer micro-USD; `monthlyBudgetUsd`
 accepts at most six decimal places and is converted exactly to the same unit.
-The example rates and reservation are illustrative, not a built-in OpenAI price
-table.
+The example rates and reservation are illustrative, not a built-in provider
+price table.
 
 Before each provider round, Runtime atomically reserves
 `providerRoundReservationMicroUsd` against the current UTC month's settled cost
@@ -236,6 +354,9 @@ replaces its reservation with calculated cost. A response without usage is
 recorded as `ESTIMATED` at the full reservation. Only a provider failure
 classified `NOT_BILLABLE` releases a started reservation; a failure with unknown
 billability settles it immediately as `ESTIMATED`.
+In particular, an HTTP failure returned by any explicit custom `baseUrl` is
+`BILLABILITY_UNKNOWN` and consumes the reservation conservatively. Runtime does
+not assume that a gateway declined or reversed a charge.
 
 Cancellation and shutdown release reservations for rounds that never started.
 A `STARTED` round is instead settled immediately as `ESTIMATED`, so a provider
@@ -774,10 +895,11 @@ disable removes the live request and sends a best-effort cancellation. Replies
 are scheduled on the primary thread, look up the online player again by UUID,
 and use literal text. They are never broadcast.
 
-The provider request is non-streaming, disables provider storage, exposes only
-the current fixed module/read-tool intersection, caps the response body, and
-never places prompt, completion, API key, or provider error body in Runtime
-logs. Paper's global player-command logging may
+The provider request is non-streaming, requests storage off where that protocol
+exposes the control, retains no provider conversation handle, exposes only the
+current fixed module/read-tool intersection, caps the response body, and never
+places prompt, completion, API key, or provider error body in Runtime logs.
+Provider-side retention policy still applies. Paper's global player-command logging may
 still record the complete `/agent say` command before the plugin runs. Review
 and disable that server-level facility when player questions are sensitive;
 the plugin cannot reliably redact only one command from an upstream log.
@@ -1159,7 +1281,7 @@ then write sanitized outcomes to the package-excluded
 and [`progress.md`](https://github.com/AGelysia/TAgent/blob/main/docs/progress.md).
 Do not turn a missing graphical fixture into a pass.
 
-## Troubleshooting Phase 0-12
+## Troubleshooting Phase 0-14
 
 ### Dependency resolution fails
 
@@ -1254,10 +1376,14 @@ loosen the loader or paste document content into logs to diagnose prompt injecti
 
 ### Runtime exits during provider health
 
-Phase 5 and later require the configured API key and model to pass the production
-model lookup. Use the stable `PROVIDER_AUTH_FAILED`, `MODEL_UNAVAILABLE`,
+Phase 5 and later require the configured API key and model to pass the selected
+production adapter's model lookup. Confirm that `model.provider`, model name,
+and optional `baseUrl` implement the same protocol; a successful text-only API
+does not prove tool-call compatibility. Use the stable `PROVIDER_AUTH_FAILED`, `MODEL_UNAVAILABLE`,
 `PROVIDER_UNAVAILABLE`, `MODEL_HEALTH_FAILED`, or `PROVIDER_TIMEOUT` diagnostic.
-Do not log the key or upstream response body while debugging.
+Do not log the key, custom URL, or upstream response body while debugging. A
+`MODEL_CUSTOM_BASE_URL` warning identifies only `/model/baseUrl` and is expected
+for every explicit override.
 
 ### Runtime exits before provider health
 

@@ -33,6 +33,7 @@ AI offline
 16. 客户端 Mod 只负责展示、交互和本地投影，不是权限或执行边界；客户端回传内容一律按不可信数据处理。
 17. 检测到兼容的 Litematica 时，`build` 必须优先使用其投影和原生 Material List HUD；不得用聊天文本冒充投影或材料清单。
 18. 无客户端 Mod 或 Litematica 不兼容时必须明确降级，不得影响 `/agent`、只读查询及服务端安全能力。
+19. Runtime 只支持显式列出的固定 Provider 协议适配器；自定义 URL 是服主对凭据和请求数据的信任决定，不自动回退、轮换或猜测协议。
 
 ---
 
@@ -1133,6 +1134,8 @@ timestamp
 ## 17.1 Runtime `config.yml`
 
 ```yaml
+configVersion: 2
+
 server:
   id: survival-main
 
@@ -1143,20 +1146,31 @@ transport:
 
 model:
   provider: openai
+  # 可选；省略时使用 https://api.openai.com/v1
+  # baseUrl: ${OPENAI_BASE_URL}
   apiKey: ${OPENAI_API_KEY}
   model: configured-model-name
   timeoutSeconds: 60
+  inputMicroUsdPerMillionTokens: 1000000
+  outputMicroUsdPerMillionTokens: 4000000
 
 storage:
   sqlitePath: ./data/agent.db
+
+logging:
+  directory: ./logs
+  level: info
 
 limits:
   maxConcurrentRequests: 4
   maxQueuedRequests: 32
   maxToolRounds: 8
+  maxContextMessages: 30
+  maxContextCharacters: 32768
   perPlayerCooldownSeconds: 3
   dailyRequestsPerPlayer: 100
   monthlyBudgetUsd: 50
+  providerRoundReservationMicroUsd: 50000
 
 privacy:
   storeConversations: true
@@ -1164,6 +1178,50 @@ privacy:
   logMessageContent: false
   logToolCalls: true
 ```
+
+Phase 14 保持 `configVersion: 2`，旧的 OpenAI v2 配置无需增加 `baseUrl`。选择其他 Provider 时，用下面对应字段替换完整 `model` 块中的同名字段，并保留超时与服主核定的价格字段：
+
+```yaml
+# Anthropic Messages；默认 https://api.anthropic.com/v1
+model:
+  provider: anthropic
+  # baseUrl: ${ANTHROPIC_BASE_URL}
+  apiKey: ${ANTHROPIC_API_KEY}
+  model: configured-claude-model-name
+```
+
+```yaml
+# DeepSeek Chat Completions；默认 https://api.deepseek.com
+model:
+  provider: deepseek
+  # baseUrl: ${DEEPSEEK_BASE_URL}
+  apiKey: ${DEEPSEEK_API_KEY}
+  model: configured-deepseek-model-name
+```
+
+```yaml
+# Gemini 无状态 generateContent；默认 https://generativelanguage.googleapis.com/v1beta
+model:
+  provider: gemini
+  # baseUrl: ${GEMINI_BASE_URL}
+  apiKey: ${GEMINI_API_KEY}
+  model: configured-gemini-model-name
+```
+
+```yaml
+# 经审查的 OpenAI-compatible Chat Completions；baseUrl 必填
+model:
+  provider: openai-compatible
+  baseUrl: ${OPENAI_COMPATIBLE_BASE_URL}
+  apiKey: ${OPENAI_COMPATIBLE_API_KEY}
+  model: configured-compatible-model-name
+```
+
+四种官方 Profile 也都允许覆盖 `baseUrl`，但 URL 不会改变适配器协议。
+自定义端点必须使用 HTTPS，只有字面量 `127.0.0.1` 或 `[::1]` 可使用 HTTP；禁止 userinfo、query、fragment 和 redirect。
+Runtime 会把所选 API Key、Prompt、Tool 定义和 Tool Result 发送给该端点。
+配置该字段时只记录安全告警 `MODEL_CUSTOM_BASE_URL` 和字段 `/model/baseUrl`，不记录 URL 值。
+`.env.example` 仅作变量名示例，不会被 Runtime 自动加载。
 
 ## 17.2 Paper `config.yml`
 
@@ -1711,11 +1769,57 @@ CLIENT-COMPATIBILITY.md
 
 ---
 
+## Phase 14：多模型 Provider 与受控自定义端点
+
+### 目标
+
+在不改变 Paper 权限边界、Runtime-Paper 协议和有界 Tool Loop 的前提下，支持服主选择 OpenAI、Anthropic Claude、DeepSeek、Gemini 或经审查的 OpenAI-compatible Chat Completions 服务。
+
+### 固定协议
+
+| `provider` | 协议 | 默认 Base URL |
+|---|---|---|
+| `openai` | Responses | `https://api.openai.com/v1` |
+| `anthropic` | Messages | `https://api.anthropic.com/v1` |
+| `deepseek` | Chat Completions | `https://api.deepseek.com` |
+| `gemini` | 无状态 `generateContent` | `https://generativelanguage.googleapis.com/v1beta` |
+| `openai-compatible` | Chat Completions | 无，必须显式配置 |
+
+### Codex 任务
+
+1. 保持 `configVersion: 2` 兼容，增加严格 Provider 枚举和可选 `model.baseUrl`；`openai-compatible` 必须提供 URL。
+2. 为四个原生协议分别实现 Health、鉴权、非流式生成、Usage 映射、严格响应解析和单个串行 Tool Call 续传。
+3. DeepSeek 显式关闭 Thinking，禁止依赖或续传明文思维链；Gemini 每轮重建有界 `contents`，不依赖服务端会话 ID。
+4. Base URL 只允许 HTTPS 或字面量回环 HTTP，拒绝 userinfo、query、fragment、控制字符与 redirect，并以不含 URL 值的 `MODEL_CUSTOM_BASE_URL` 告警提示服主复核。
+5. 不实现自动 Provider 回退、模型/Key 轮换、协议探测、自动重试或在线价格抓取。
+6. 延续服主配置的输入/输出 micro-USD 价格和每轮 Reservation；DeepSeek 单一输入价必须使用较高的 cache-miss 费率，Gemini 输入计入 Tool Use Prompt、输出计入 Thinking Token，自定义端点 HTTP 失败按 `BILLABILITY_UNKNOWN` 保守结算；
+   不把本地预算描述为 Provider 账单上限。
+7. 为 Provider Factory、各协议请求/响应、Health 状态、Tool 续传、Usage、异常映射、响应大小和自定义 URL 安全规则增加离线测试。
+8. 更新配置示例、运维、安全、架构、ADR 和进度文档，不在仓库或测试日志中使用真实 API Key。
+
+### 验收
+
+- [x] 五个生产 Profile 只能选择固定协议适配器，测试注入仍只能通过代码进行。
+- [x] 所有 Provider 均复用同一个有界超时/取消、串行 Tool Loop 和 Paper 最终授权边界。
+- [x] 自定义 URL 规则、禁止 Redirect、安全告警与诊断脱敏有自动化覆盖。
+- [x] 不支持 Tool Call、返回多并行 Tool Call、返回畸形/超大 JSON 或错误续传的模型会失败关闭。
+- [ ] 使用隔离的真实 Key 分别验证准备态、私密文本、至少一次 Tool Call 续传、Usage、取消/超时和脱敏失败；只保留净化结果。
+- [ ] 使用经审查的 HTTPS 或回环 `openai-compatible` 测试端点验证 `GET models` 与 `POST chat/completions` 合同；不得把任意兼容服务记为通过。
+- [ ] 在最终 Phase 14 Commit 上重新运行干净候选流程并固定新指纹；随后对这些精确指纹重新完成 Phase 13 的双物理客户端图形清单。旧 `3735c5e` 验收不能绑定改变后的 Runtime、dist 或归档。
+- [ ] 按实际 Provider、模型、账号与网关价格复核 micro-USD 字段和 Reservation 后，才允许创建公开 Release。
+
+---
+
 # 19. 关键测试矩阵
 
 | 场景 | 预期 |
 |---|---|
 | API Key 缺失 | Runtime 拒绝启动 |
+| Provider 与模型 Tool Call 协议不兼容 | Health 或首个有界请求失败关闭，不切换 Provider |
+| `baseUrl` 含远程 HTTP、userinfo、query 或 fragment | 配置拒绝且诊断不回显 URL |
+| 自定义端点返回 Redirect | 拒绝，不把 API Key 转发到跳转目标 |
+| 自定义端点 HTTP 失败 | 按 `BILLABILITY_UNKNOWN` 结算本轮 Reservation |
+| DeepSeek 输入价格配置 | 使用较高 cache-miss 费率，不用 hit 或平均价 |
 | Runtime 未启动 | Paper 不注册 `/agent` |
 | token 错误 | Paper 不注册 `/agent` |
 | 协议版本不匹配 | Paper 不注册 `/agent` |
@@ -1814,6 +1918,7 @@ Phase 8
  -> Phase 11
  -> Phase 12
  -> Phase 13
+ -> Phase 14
 ```
 
 Phase 10 先固定客户端协议和 Litematica Adapter，再实现 Phase 11 的 recipe/build，避免业务模块依赖未定义的 UI。不要一开始就做 WorldEdit、领地或其他复杂插件适配；建筑世界写入先使用最小有界 Typed Tool，并保持 proposal 和区域哈希校验。

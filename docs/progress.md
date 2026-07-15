@@ -9,8 +9,11 @@ Phase 12 bounded management surface are complete. Management now includes the
 universal Offline gate, independently authorized status/doctor/capability/cost
 queries, anonymous client/Litematica diagnostics, owner-only atomic policy
 reload, and Runtime-owned durable usage/budget accounting. Phase 13 automated
-release-candidate infrastructure is implemented; its real graphical client lane
-and public release remain pending. The plan's world apply/rollback acceptance is
+release-candidate infrastructure and mandatory physical-client lane are accepted;
+public release remains pending. Phase 14 implements fixed OpenAI, Anthropic,
+DeepSeek, Gemini, and OpenAI-compatible production adapters with controlled
+endpoint overrides. Its offline contract tests are implemented; sanitized
+live-key provider acceptance remains pending. The plan's world apply/rollback acceptance is
 deliberately not claimed: the production write catalog remains empty pending the
 existing typed asynchronous proposal and real-player safety gate.
 
@@ -30,8 +33,9 @@ existing typed asynchronous proposal and real-player safety gate.
   semantic validation treats reassembly as a separate validation layer.
 - The optional Fabric client must load without Litematica or MaLiLib.
 - Gradle and npm work is run serially on this constrained host.
-- Provider injection is code-only for tests and smoke. Production uses the
-  OpenAI Responses adapter; no configuration value can select a fake provider.
+- Provider injection is code-only for tests and smoke. Production selects one
+  fixed `openai`, `anthropic`, `deepseek`, `gemini`, or `openai-compatible`
+  adapter; no configuration value can select a fake provider.
 - Phase 3 uses `paper.hello` followed by `runtime.hello`; the Runtime echoes
   Paper's challenge and selects exact protocol `1.0`. Both sides enforce the
   shared HMAC golden transcript and a cross-connection replay window.
@@ -142,6 +146,16 @@ existing typed asynchronous proposal and real-player safety gate.
   Pricing and reservations are explicit integer micro-USD configuration; Paper
   queries only the bounded aggregate through the authenticated management-cost
   exchange.
+- Phase 14 keeps strict `configVersion: 2`. Official provider profiles retain
+  fixed default URLs and may set a reviewed native-protocol `baseUrl`;
+  `openai-compatible` requires a reviewed Chat Completions base URL.
+- Explicit base URLs allow HTTPS or literal loopback HTTP only, reject
+  userinfo/query/fragment/redirects, and emit only `MODEL_CUSTOM_BASE_URL` plus
+  `/model/baseUrl`. The selected API key and model request are still disclosed
+  to that endpoint.
+- Provider selection is static. Runtime does not automatically retry, fall back,
+  rotate models/keys, autodetect protocol, or fetch pricing. The selected model
+  must support the adapter's serial tool-call contract.
 
 ## Phase 0: repository scaffold
 
@@ -721,9 +735,97 @@ Phase 13 manual acceptance recorded on 2026-07-15:
 - Raw working files were not imported into this Git workspace. The sanitized
   environment and fingerprint transcripts plus maintainer PASS/BLOCKED outcomes
   form the retained development record. No tag or GitHub Release has been
-  created because provider expansion is planned before publication.
+  created because the then-planned Phase 14 provider expansion and a new final
+  candidate gate remained before publication.
+
+## Phase 14: multi-provider and controlled endpoints
+
+Implemented scope:
+
+- [x] Strict `configVersion: 2` accepts `openai`, `anthropic`, `deepseek`,
+      `gemini`, and `openai-compatible`. Existing OpenAI configuration remains
+      valid; only `openai-compatible` requires `model.baseUrl`.
+- [x] The production factory selects OpenAI Responses, Anthropic Messages,
+      DeepSeek Chat Completions, Gemini stateless `generateContent`, or
+      OpenAI-compatible Chat Completions without provider fallback or protocol
+      autodetection.
+- [x] Native adapters implement bounded model health, authentication,
+      non-streaming strict-JSON generation, usage mapping, serial tool calls,
+      correlated continuation, timeout/cancellation, and safe status mapping.
+      DeepSeek thinking is explicitly disabled; Gemini reconstructs its bounded
+      content sequence without a provider session handle.
+- [x] DeepSeek aggregate prompt usage retains the single configured input rate,
+      whose documented safe value is the higher cache-miss rate. Gemini usage
+      sums prompt plus tool-use prompt input and candidate plus thinking output.
+      HTTP failures from explicit custom endpoints remain
+      `BILLABILITY_UNKNOWN` and settle the active reservation conservatively.
+- [x] Every official profile may override its base URL. Configuration accepts
+      HTTPS or literal `127.0.0.1`/`[::1]` HTTP only, rejects credentials,
+      query, fragment, control characters, and redirects, and canonicalizes the
+      retained path. Explicit URLs emit `MODEL_CUSTOM_BASE_URL` with only the
+      known field, never the configured value.
+- [x] Provider factory, configuration, endpoint safety, health, generation,
+      tool continuation, malformed/oversized response, usage, abort, and safe
+      failure cases have focused offline tests using synthetic credentials and
+      injected HTTP implementations.
+- [x] ADR 0012, configuration/environment examples, and architecture,
+      operations, security, README, and plan documentation define the provider
+      and custom-endpoint trust boundary.
+
+Pre-publication acceptance still pending:
+
+- [ ] Run the complete clean Phase 13 release-candidate lane again against the
+      final Phase 14 commit and record its new fingerprints. The accepted Phase
+      13 fingerprint remains historical evidence for commit `3735c5e`, not a
+      fingerprint for the changed Runtime.
+- [ ] After those new fingerprints are fixed, repeat the complete Phase 13
+      physical-client graphical checklist against that exact candidate. The
+      existing acceptance record requires a new graphical run whenever any
+      payload or archive hash changes, including this Phase 14 Runtime change.
+- [ ] With isolated real credentials, verify readiness, private text, at least
+      one serial tool call/continuation, usage accounting, cancellation/timeout,
+      and sanitized errors for each official provider profile intended to be
+      claimed publicly.
+- [ ] Verify one reviewed HTTPS or literal-loopback `openai-compatible` fixture
+      implements exact `GET models` and `POST chat/completions` behavior. Do not
+      generalize that result to arbitrary compatible endpoints.
+- [ ] Recalculate both configured micro-USD rates and the conservative
+      per-round reservation from the actual provider/model/account price sheet;
+      no example value is publication evidence or a billing cap.
 
 ## Verification
+
+Phase 14 automated development verification recorded on 2026-07-15:
+
+```bash
+MINECRAFT_AGENT_ALLOW_DIRTY_RELEASE_CHECK=I_UNDERSTAND_THIS_IS_NOT_A_RELEASE \
+  ./scripts/release-check.sh
+```
+
+- This was deliberately a dirty-worktree development check before the Phase 14
+  implementation commit. It is not release evidence and does not replace the
+  pending live-provider or physical-client acceptance gates.
+- Runtime passed Prettier, ESLint, TypeScript build, and all 24 Vitest files
+  with 275 tests. Paper passed 59 suites and 463 tests; Client passed 17 suites
+  and 210 tests. Every inventory lane reported zero failures, errors, or skips,
+  including the four native/compatible provider suites and provider factory.
+- Both uncached package builds passed the exact 50-schema distribution audit and
+  produced identical complete checksums. The Runtime manifest hashes to
+  `90034d533f4e7ee8e989317c01621474f642982aed74e3c275d0d5ac8f47c7cd`,
+  the dist manifest hashes to
+  `ca59f5a5ebfadfe06a2514c030baf054d2f105b4736755777469198f1ddb811f`,
+  and the protocol manifest remains
+  `8911de23fd119adc6c424c27e6f1b598fd35948c32fa7ab1eb3629fc3bdb2f8e`.
+- The pinned Paper `1.21.11-132` smoke passed `offline-lifecycle`,
+  `unavailable`, `wrong-token`, and `incompatible`; `npm audit` inspected 251
+  packages and reported zero vulnerabilities.
+- Paper and Client payloads remain respectively
+  `468a54dba0cd1cbc79d68831b2e78290a38614fd58438241f2e9b1927f16629f`
+  and `44b3048e3cc2163008579485f5121e03b0ef78889f680f24f67a899a287d308a`.
+  The changed `MinecraftAgent-0.1.0.tar.gz` hashes to
+  `6b0b88da70893e3dcf16a9e52cca78d7ed83a1d3678fa02eeba3b8fc168afe2c`.
+- No real provider credential or external compatible endpoint was used. Those
+  checks remain explicit pre-publication gaps rather than inferred passes.
 
 Phase 13 automated development verification recorded on 2026-07-15:
 
@@ -967,10 +1069,10 @@ not suppressed.
 - Live knowledge, landmark, or Capability reload. Their validated snapshots are
   installed only through startup/recovery paths; do not edit the trees while
   their owning process is running.
-- A graphical Fabric client, real server/player handshake, or the exact
-  Litematica/MaLiLib tuple has not been launched on this constrained headless
-  host. Phase 10/11 presentation and Phase 12 diagnostic reporting are covered
-  by focused protocol/domain/client tests.
+- Native Windows equivalence and the Phase 13 allowlisted non-core graphical
+  fixtures remain unverified. The mandatory physical-client lanes were
+  maintainer-attested on the migrated cloud harness; raw working files were not
+  imported into this Git workspace.
 
 The presence of a schema or proposal domain object does not mark a write tool
 implemented.
@@ -979,16 +1081,21 @@ implemented.
 
 ### Provider boundary
 
-Phase 7 supplies one fixed OpenAI Responses adapter with safe status mapping,
-bounded bodies, a serial strict-function loop, timeout/cancellation, and no
-prompt/completion logging. It does not retry, stream, rotate providers, or fetch
-pricing. Phase 12 persists provider-round usage and applies the configured
+Phase 14 supplies five fixed profiles using OpenAI Responses, Anthropic Messages,
+DeepSeek/OpenAI-compatible Chat Completions, or Gemini `generateContent`, with
+safe status mapping, bounded bodies, a serial strict-function loop,
+timeout/cancellation, and no prompt/completion logging. It does not retry,
+stream, fall back, rotate providers, or fetch pricing. A custom base URL is an
+operator trust decision: URL validation and redirect refusal do not prove the
+endpoint is private, honest, tool-compatible, or compliant with the native
+protocol. Phase 12 persists provider-round usage and applies the configured
 monthly reservation-based conservative admission bound from operator-supplied
 micro-USD rates and reservations. It is not a provider billing cap: post-paid
 reported cost can exceed both a round reservation and the local bound before
 later calls are blocked. Provider
 account-side pricing, retention, and policy remain operator responsibilities
-even though requests set `store: false`.
+even though Runtime requests storage off where the selected protocol supports it
+and retains no provider conversation handle.
 
 ### Node SQLite stability
 
@@ -1066,20 +1173,24 @@ redaction; a real-player click remains a later integration lane.
 
 ## Next gates
 
-1. Complete Phase 13's physical-client checklist against the exact candidate and
-   record sanitized PASS/FAIL/BLOCKED evidence. Phase 13 remains incomplete even
-   when the automated release lane is green.
-2. Keep the production write catalog empty until the first fixed typed adapter
+1. Complete Phase 14 live-key acceptance for every official provider profile
+   intended to be claimed, plus one reviewed `openai-compatible` fixture. Record
+   only sanitized PASS/FAIL evidence and never commit credentials or response
+   bodies.
+2. Run the clean release-candidate lane on the final Phase 14 commit, bind new
+   fingerprints to that commit, then repeat the full physical-client graphical
+   checklist for that exact candidate. Recheck operator-supplied prices and
+   round reservations before any tag or public Release.
+3. Keep the production write catalog empty until the first fixed typed adapter
    has operation-specific validation, limits, rollback/partial-failure policy,
    confirmation-time region revalidation, off-thread durable audit/rollback
    persistence, and a real-player proposal integration test.
-3. Run the prepared real graphical Fabric/Litematica lane for recipe v2 paging/choices,
-   Registry icons/tooltips, preview non-auto-load, explicit placement/remove,
-   origin, and native Material List before enabling preview publication in
-   production.
-4. Add a real online-player integration lane for private `/agent say` delivery,
+4. Resolve only the explicitly allowlisted Phase 13 graphical fixtures when safe
+   deterministic inputs become available; do not relabel a missing fixture as a
+   pass.
+5. Add a real online-player integration lane for private `/agent say` delivery,
    proposal confirmation, and late dynamic command-tree refresh without
    increasing routine weak-host resource usage.
-5. Do not generalize the same-lane uncached checksum match into a cross-platform
+6. Do not generalize the same-lane uncached checksum match into a cross-platform
    byte-for-byte reproducibility claim. Native Windows and an independently
    pinned host image remain unverified.

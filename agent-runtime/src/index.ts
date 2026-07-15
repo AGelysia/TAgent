@@ -38,6 +38,7 @@ export {
 export {
   ModelGenerationError,
   modelGenerationFailureCodes,
+  modelProviderIds,
   UnsupportedModelProvider,
   type ModelGenerationFailureCode,
   type ModelGenerationAccountingDisposition,
@@ -48,14 +49,28 @@ export {
   type ModelGenerationResult,
   type ModelGenerationUsage,
   type ModelProvider,
+  type ModelProviderId,
   type ModelToolCallResult,
   type ModelToolDefinition,
   type ModelToolOutput,
 } from "./providers/model-provider.js";
 export {
+  AnthropicMessagesProvider,
+  type AnthropicMessagesProviderOptions,
+} from "./providers/anthropic-messages-provider.js";
+export {
+  GeminiGenerateContentProvider,
+  type GeminiGenerateContentProviderOptions,
+} from "./providers/gemini-generate-content-provider.js";
+export {
+  OpenAiChatCompletionsProvider,
+  type OpenAiChatCompletionsProviderOptions,
+} from "./providers/openai-chat-completions-provider.js";
+export {
   OpenAiResponsesProvider,
   type OpenAiResponsesProviderOptions,
 } from "./providers/openai-responses-provider.js";
+export { createProductionModelProvider } from "./providers/provider-factory.js";
 export {
   AgentRequestService,
   type AgentCompletionPayload,

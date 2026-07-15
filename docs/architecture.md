@@ -2,8 +2,8 @@
 
 ## Status and scope
 
-This document records the target architecture and decisions through the Phase 13
-release-candidate gate.
+This document records the target architecture and decisions through the Phase 14
+multi-provider boundary.
 The repository contains build scaffolding, protocol contracts, the Runtime
 configuration/readiness boundary, Paper-side authenticated startup and Offline
 recovery, private conversations, Runtime-owned sessions, one-shot module
@@ -25,6 +25,10 @@ artifact verification, deterministic uncached packaging, supplemental MockBukkit
 and Capability fuzz coverage, an explicit preview-remove control, and a
 repository-only deterministic graphical harness. That harness is not a fourth
 deployable component and is excluded from the release package.
+Phase 14 adds native OpenAI Responses, Anthropic Messages, DeepSeek Chat
+Completions, and Gemini `generateContent` adapters plus a bounded
+`openai-compatible` Chat Completions profile. It changes only the Runtime's
+provider edge; Paper authority and the Runtime-Paper protocol remain unchanged.
 The conditional command and Offline recovery paths have
 been validated on the pinned Paper `1.21.11-132` server artifact.
 
@@ -183,16 +187,17 @@ health port. The final loopback `listen()` is the port check; no pre-bind probe 
 used. Only a successful final bind changes local health from `STARTING` to
 `READY`.
 
-Phase 5 supplies the production OpenAI Responses adapter. Startup checks the
-configured model without generating an answer, and accepted requests use a
-bounded non-streaming text call with provider storage disabled. Runtime owns a
+Phase 5 supplied the initial production OpenAI Responses adapter. Phase 14 keeps
+that profile and adds a provider factory selecting one of five fixed adapters.
+Startup checks the configured model without generating an answer, and accepted
+requests use bounded non-streaming generation. Runtime owns a
 FIFO queue, a concurrency cap, one outstanding request per player, cooldown,
 an in-memory daily request limit, provider timeout, and cooperative abort. That
 phase left monthly budget and durable accounting for later work; Phase 12 adds
 the Runtime-owned durable implementation described below.
 
-Phase 7 extends that adapter with strict registered functions and a Runtime-
-owned serial loop. Provider-safe function schemas are deliberately smaller than
+Phase 7's strict registered-function loop now sits above every production
+adapter. Provider-safe function schemas are deliberately smaller than
 the full shared schemas; Runtime applies the complete argument contract before
 emitting `tool.call` and validates correlation, provenance, trust, and the
 tool-specific result contract after `tool.result`. Provider call IDs never
@@ -770,3 +775,55 @@ rejects changed restart-only fields instead of rebasing them. Reload publication
 is additionally bound to the Online operational epoch. Final permit validation
 and policy CAS share the gate transition lock, so an older attempt cannot
 publish after an Offline/Online transition.
+
+## Phase 14 multi-provider boundary
+
+[ADR 0012](adr/0012-phase14-multi-provider-and-controlled-endpoints.md) keeps
+provider protocols explicit rather than hiding them behind one nominally
+compatible DTO:
+
+| Configuration ID | Adapter contract | Default base URL |
+| --- | --- | --- |
+| `openai` | Responses | `https://api.openai.com/v1` |
+| `anthropic` | Messages | `https://api.anthropic.com/v1` |
+| `deepseek` | Chat Completions | `https://api.deepseek.com` |
+| `gemini` | stateless `generateContent` | `https://generativelanguage.googleapis.com/v1beta` |
+| `openai-compatible` | Chat Completions | configured, mandatory |
+
+The factory creates exactly one adapter at startup. There is no cross-provider
+retry, fallback, rotation, or protocol autodetection. Health checks use each
+adapter's model endpoint before the listener binds. Every generation adapter
+uses the existing timeout/abort signal, non-streaming bounded strict-JSON
+response reader, one serial tool call, and provider-specific continuation
+validation. The model therefore must support that adapter's tool-call contract;
+provider selection alone cannot make a text-only model usable for tool modules.
+
+OpenAI continuation retains only bounded validated Responses items. Anthropic
+retains bounded assistant content blocks and correlated tool results. DeepSeek
+uses Chat Completions messages and explicitly disables thinking so Runtime does
+not need plaintext chain-of-thought for continuation. Gemini does not hold a
+provider session ID: each `generateContent` round reconstructs the bounded input,
+model function call, and function response sequence. Its function declarations
+use the official `parametersJsonSchema` field, preserving closed nullable types
+and numeric enums. Provider continuation data never crosses into Paper authority
+or changes the shared protocol.
+
+`model.baseUrl` is additive within strict `configVersion: 2`. It is optional for
+the four native profiles and required for `openai-compatible`. Configuration
+accepts HTTPS or literal loopback HTTP only, rejects credentials/query/fragment,
+and every fetch rejects redirects. An explicit value emits only
+`MODEL_CUSTOM_BASE_URL` and the known `/model/baseUrl` field, never the URL. The
+selected adapter still sends its API key and request content to that endpoint;
+the warning records an operator trust decision rather than making the endpoint
+trusted.
+
+Usage events retain the configured provider/model identity. Pricing remains an
+operator-owned pair of integer micro-USD rates plus a conservative round
+reservation; neither the factory nor an endpoint response can replace that
+policy. DeepSeek's aggregate prompt count is charged at the configured
+cache-miss input rate, never a lower hit or blended rate. Gemini input includes
+prompt plus tool-use prompt tokens; output includes candidate plus thinking
+tokens. Any HTTP failure from an explicit custom endpoint has unknown
+billability and conservatively settles the active reservation. Provider-specific
+storage, billing, retention, and regional behavior remain outside the Runtime
+trust boundary.

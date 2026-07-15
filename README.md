@@ -2,7 +2,7 @@
 
 Minecraft Agent is a security-first Minecraft assistant composed of a Paper plugin, a local
 TypeScript runtime, and an optional Fabric client mod. This repository currently implements the
-Phase 0-12 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
+Phase 0-14 development line: shared protocol contracts, fail-closed readiness checks, an authenticated
 loopback Runtime-Paper channel, conditional `/agent` registration, persistent emergency Offline
 controls, private model replies, Runtime-owned sessions, resume, explicit one-shot modules, a
 bounded closed-tool model loop, and Paper-owned proposal authorization and audit
@@ -14,7 +14,10 @@ permission-filtered landmarks, authoritative recipe v2 views, and bounded Paper-
 previews that the client can convert to native Litematica schematics. The production write catalog
 is still empty: there is no production proposal creator, generic execution surface, or Minecraft
 state mutation. Phase 12 adds redacted management diagnostics, a restricted atomic policy reload,
-and durable aggregate usage/cost accounting.
+and durable aggregate usage/cost accounting. Phase 13 adds the gated deterministic candidate and
+recorded physical-client acceptance. Phase 14 adds fixed production adapters for OpenAI, Anthropic
+Claude, DeepSeek, Gemini, and reviewed OpenAI-compatible Chat Completions endpoints. Public release
+remains a separate maintainer action.
 
 The product and delivery baseline is recorded in
 the repository-only
@@ -106,7 +109,7 @@ release evidence. This proves deterministic output within the recorded pinned la
 future operating-system or JDK builds are byte-for-byte identical. GitHub's manual release-candidate
 workflow uploads an artifact only; it does not create a tag or Release.
 
-## Phase 2-12 Runtime
+## Phase 2-14 Runtime
 
 ```bash
 cd agent-runtime
@@ -125,12 +128,32 @@ npm start -- --config config.local.yml
 ```
 
 Startup checks the configuration, private log and configured knowledge directories, shared
-Capability Schema, Runtime-owned SQLite file, and the configured OpenAI model before binding
+Capability Schema, Runtime-owned SQLite file, and the configured provider model before binding
 `127.0.0.1`. `/health`
 returns a cached minimal readiness view and does not repeat provider or database work.
 
-The Runtime uses the OpenAI Responses API for bounded, non-streaming answers and serial function
-calls with provider storage disabled. It applies per-player outstanding/cooldown/durable UTC-daily
+Runtime selects one fixed native protocol from the strict `model.provider` value:
+
+| Provider | Protocol | Default base URL |
+| --- | --- | --- |
+| `openai` | Responses | `https://api.openai.com/v1` |
+| `anthropic` | Messages | `https://api.anthropic.com/v1` |
+| `deepseek` | Chat Completions | `https://api.deepseek.com` |
+| `gemini` | stateless `generateContent` | `https://generativelanguage.googleapis.com/v1beta` |
+| `openai-compatible` | Chat Completions | explicit `baseUrl` required |
+
+All adapters use bounded, non-streaming answers and a serial function-call loop. The selected model
+must support the adapter's tool-call contract. Existing `configVersion: 2` OpenAI configurations
+remain valid; all four official profiles may optionally set a protocol-compatible `baseUrl`.
+Explicit endpoints must use HTTPS except for literal loopback HTTP, cannot contain user information,
+queries, or fragments, and cannot redirect. Runtime logs only `MODEL_CUSTOM_BASE_URL` plus the known
+field, but sends the selected API key and request content to that endpoint. Review it before startup.
+There is no automatic provider fallback, key/model rotation, protocol discovery, or price lookup, and
+arbitrary compatible endpoints are not guaranteed to work. DeepSeek thinking is explicitly disabled
+for safe serial continuation; Gemini reconstructs each stateless `generateContent` round locally.
+See [`docs/operations.md`](docs/operations.md) for complete profiles and endpoint requirements.
+
+Runtime applies per-player outstanding/cooldown/durable UTC-daily
 limits plus global concurrency, queue, and a monthly reservation-based admission bound. Pricing is explicit rather than
 inferred from the model name: configure integer
 `model.inputMicroUsdPerMillionTokens`, `model.outputMicroUsdPerMillionTokens`, and
@@ -176,6 +199,10 @@ state. The management payload never contains player UUIDs or per-player usage. S
 [`docs/operations.md`](docs/operations.md) before selecting a reservation value. The monthly setting
 is a reservation-based conservative admission bound, not a provider billing cap; reported cost can
 exceed both a round's reservation and the configured local bound.
+For DeepSeek, configure the single input rate from the higher cache-miss price,
+not a cache-hit or average price. Gemini accounting includes tool-use prompt and
+thinking token counts. An HTTP failure from an explicit custom endpoint is
+billability-unknown and conservatively settles the active round at its reservation.
 
 ## Phase 3-12 Paper
 
@@ -429,3 +456,6 @@ production write catalog remains the final barrier against world mutation. Phase
 same Offline gate for every management query, exposes no per-player cost or client identity, and
 publishes a reload policy only after complete validation; config values outside the supported local
 policy snapshot require restart.
+Phase 14 keeps all provider responses and continuation state inside the bounded Runtime adapter.
+Custom endpoints cannot add tools or alter Paper permissions, and endpoint format validation does not
+make the destination trustworthy.
