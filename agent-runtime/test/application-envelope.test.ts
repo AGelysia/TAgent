@@ -8,6 +8,7 @@ import type {
 import {
   APPLICATION_MAXIMUM_BYTES,
   ApplicationEnvelopeProtocol,
+  type ManagementCostsPayload,
 } from "../src/transport/application-envelope.js";
 import { HandshakeReplayCache } from "../src/transport/replay-cache.js";
 
@@ -135,5 +136,81 @@ describe("Application response envelope limits", () => {
       structuredViews: [],
     });
     expect(encodedByteLength(fallbackEnvelope)).toBeLessThan(APPLICATION_MAXIMUM_BYTES);
+  });
+});
+
+describe("Management costs application envelopes", () => {
+  it("parses a correlated empty management request", () => {
+    const request = {
+      protocolVersion: "1.0",
+      messageId: REQUEST_ID,
+      requestId: REQUEST_ID,
+      serverId: "test-server",
+      type: "management.costs.request",
+      timestamp: NOW.toISOString(),
+      nonce: NONCE,
+      payload: {},
+    };
+
+    expect(protocol().parse(JSON.stringify(request))).toEqual({
+      type: "management.costs.request",
+      requestId: REQUEST_ID,
+    });
+    expect(schemas.validate("envelope.schema.json", request).valid).toBe(true);
+    expect(schemas.validate("management-costs-request.schema.json", request.payload).valid).toBe(
+      true,
+    );
+  });
+
+  it("creates a bounded correlated management response", () => {
+    const costs: ManagementCostsPayload = {
+      currentDay: {
+        period: "2026-07-13",
+        admittedRequests: 3,
+        providerCalls: 4,
+        reportedProviderCalls: 3,
+        estimatedProviderCalls: 1,
+        inputTokens: 100,
+        outputTokens: 20,
+        costMicroUsd: 180,
+      },
+      currentMonth: {
+        period: "2026-07",
+        admittedRequests: 30,
+        providerCalls: 40,
+        reportedProviderCalls: 39,
+        estimatedProviderCalls: 1,
+        inputTokens: 1_000,
+        outputTokens: 200,
+        costMicroUsd: 1_800,
+      },
+      budget: {
+        month: "2026-07",
+        limitMicroUsd: 10_000_000,
+        settledMicroUsd: 1_800,
+        activeReservationsMicroUsd: 50_000,
+        remainingMicroUsd: 9_948_200,
+        exhausted: false,
+      },
+    };
+
+    const envelope = protocol().createResponse(REQUEST_ID, {
+      type: "management.costs.response",
+      payload: costs,
+    });
+
+    expect(envelope).toEqual({
+      protocolVersion: "1.0",
+      messageId: MESSAGE_ID,
+      requestId: REQUEST_ID,
+      serverId: "test-server",
+      type: "management.costs.response",
+      timestamp: NOW.toISOString(),
+      nonce: NONCE,
+      payload: costs,
+    });
+    expect(encodedByteLength(envelope)).toBeLessThanOrEqual(APPLICATION_MAXIMUM_BYTES);
+    expect(schemas.validate("envelope.schema.json", envelope).valid).toBe(true);
+    expect(schemas.validate("management-costs-response.schema.json", costs).valid).toBe(true);
   });
 });

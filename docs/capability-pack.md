@@ -276,11 +276,11 @@ code and are not double-counted as disabled manifests. When the optional root is
 unavailable before loading, Paper emits `RETAINED` and keeps the current
 generation rather than interpreting unreadable state as an empty replacement.
 
-Catalog refresh occurs only after the desired-state store and private proposal
-audit path pass their local safety checks. The authenticated Runtime handshake
-comes afterward, so a failed handshake can still leave a newly published,
-non-executable metadata generation. This is intentional: catalog publication
-does not register a command, create a proposal, or grant execution authority.
+Catalog loading occurs only after the desired-state store and private proposal
+audit path pass their local safety checks, but the result remains an unpublished
+candidate. The coordinator publishes it only after the authenticated Runtime
+handshake, application attachment, connection revalidation, and current-attempt
+validation. A failed or stale attempt cannot replace the active catalog.
 
 An effective registry entry currently contains validated and approved data but
 no invocation operation. Registry membership is neither command-execution

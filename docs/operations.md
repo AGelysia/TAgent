@@ -1,6 +1,6 @@
 # Operations
 
-## Phase 0-11 purpose
+## Phase 0-12 purpose
 
 The repository remains a development implementation, not a deployable Minecraft
 Agent service. Its useful operations are build, format, contract, readiness,
@@ -154,6 +154,12 @@ references must occupy an entire YAML scalar, for example `${OPENAI_API_KEY}`;
 there is no interpolation, default-value syntax, command substitution, or
 recursive expansion.
 
+The current strict format is `configVersion: 2`. Runtime rejects a legacy v1
+file with `CONFIG_VERSION_UNSUPPORTED` and an upgrade diagnostic. Start from the
+current example when upgrading, retain the deployment-specific identity,
+transport, model, storage, logging, and privacy values, and explicitly configure
+the new model pricing and usage-limit fields rather than relying on defaults.
+
 The default configuration path is `config.local.yml` in the Runtime working
 directory. Override it explicitly with either:
 
@@ -191,6 +197,88 @@ cached pass states. Requests do not touch SQLite or the provider again.
 Startup failures emit one JSON diagnostic with a stable code, stage, and known
 field path. They never include received configuration values, provider response
 bodies, API keys, server tokens, or unknown YAML key text.
+
+### Usage pricing and monthly budget
+
+Runtime does not infer a price from `model.model`. Configure rates from the
+selected provider model's current price sheet and update them whenever the model
+or its price changes:
+
+```yaml
+model:
+  inputMicroUsdPerMillionTokens: 1000000
+  outputMicroUsdPerMillionTokens: 4000000
+
+limits:
+  monthlyBudgetUsd: 50
+  providerRoundReservationMicroUsd: 50000
+```
+
+The two model rates are integer micro-USD per one million tokens. For a provider
+response that reports usage, Runtime records one event at:
+
+```text
+ceil((inputTokens * inputRate + outputTokens * outputRate) / 1,000,000)
+```
+
+All arithmetic and persisted costs use integer micro-USD; `monthlyBudgetUsd`
+accepts at most six decimal places and is converted exactly to the same unit.
+The example rates and reservation are illustrative, not a built-in OpenAI price
+table.
+
+Before each provider round, Runtime atomically reserves
+`providerRoundReservationMicroUsd` against the current UTC month's settled cost
+plus all active reservations. The first round is reserved with durable request
+admission, and each Tool-loop continuation obtains a separate reservation.
+The round starts only when settled cost plus active reservations plus the new
+reservation remains within the configured monthly amount. A reported response
+replaces its reservation with calculated cost. A response without usage is
+recorded as `ESTIMATED` at the full reservation. Only a provider failure
+classified `NOT_BILLABLE` releases a started reservation; a failure with unknown
+billability settles it immediately as `ESTIMATED`.
+
+Cancellation and shutdown release reservations for rounds that never started.
+A `STARTED` round is instead settled immediately as `ESTIMATED`, so a provider
+that ignores cancellation cannot leave active exposure behind. If that provider
+later returns reported tokens, Runtime idempotently replaces the estimate with
+the reported token count and calculated cost.
+
+Choose the reservation as a conservative upper estimate for one complete
+provider round, including input context and maximum output, and leave operating
+headroom below the account-side limit. `monthlyBudgetUsd` is therefore a
+reservation-based conservative admission bound, not a provider billing cap.
+Provider billing is post-paid, and reported cost can exceed the reservation
+and the configured local bound. Runtime blocks subsequent rounds but cannot undo
+that provider charge. A zero monthly budget acts as a kill switch for new model
+rounds. Too small a reservation weakens concurrent budget protection; too large
+a reservation can reject otherwise affordable concurrent requests.
+
+SQLite migration v3 persists request admissions, provider-round reservations,
+idempotent usage events, per-player UTC-daily request counts, and server-wide UTC
+daily/monthly aggregates. Migration v4 adds the durable provider-round
+`STARTED` marker. Startup settles abandoned started rounds as `ESTIMATED`,
+releases only not-started reservations, and retains admitted-request counts and
+settled events, so daily and monthly admission do not reset with Runtime. When
+upgrading an existing intermediate v3 database, v4 conservatively marks every
+ACTIVE reservation as started because v3 could not prove that a provider call
+was never sent. The bounded
+management snapshot used by `/agent costs` exposes only current-day and
+current-month aggregate counts, tokens, cost, active reservation, remaining
+budget, and whether it is exhausted. It contains no player identity or
+per-player breakdown. Back up the private Runtime SQLite file as the accounting
+authority; Paper does not write it.
+
+Migration v5 adds a singleton Runtime process-owner row. Startup acquires it in
+`BEGIN IMMEDIATE` before abandoned-work recovery and rejects a second live owner.
+PID plus the Linux process-start token distinguish a live process from a reused
+PID; a dead owner is replaced inside the same serialized SQLite transaction.
+Do not edit this row while Runtime is running. Stop every v3/v4 Runtime process
+before the first v5 upgrade because older binaries do not know this row. The
+database is local state and must not be shared across hosts or PID namespaces.
+On Paper disconnect or Runtime
+shutdown, queued requests are cancelled before active requests so queue draining
+cannot start a new provider round. Only already-started active rounds receive
+the conservative close-time estimate.
 
 ### Phase 11 knowledge and projects
 
@@ -659,9 +747,9 @@ cannot supply a UUID. `module list` is a non-conversation query and may be used
 by any permitted sender. Paper does not listen to ordinary chat. A player may
 have only one live request, Paper caps all live correlations at 64, and Runtime
 additionally enforces `limits.maxConcurrentRequests`, `maxQueuedRequests`,
-`perPlayerCooldownSeconds`, and `dailyRequestsPerPlayer`. The daily counter is
-memory-only in Phase 5 and resets with the Runtime; monthly budget enforcement
-is not yet active. `minecraftagent.module` is also granted by default and
+`perPlayerCooldownSeconds`, and `dailyRequestsPerPlayer`. Phase 12 persists the
+UTC daily admission count and monthly provider cost in Runtime SQLite, so both
+survive Runtime restart. `minecraftagent.module` is also granted by default and
 controls the two module forms.
 
 A successful stored reply selects its session for later `/agent say` requests.
@@ -694,6 +782,67 @@ still record the complete `/agent say` command before the plugin runs. Review
 and disable that server-level facility when player questions are sensitive;
 the plugin cannot reliably redact only one command from an upstream log.
 
+## Paper Phase 12 management commands
+
+While the Agent is ONLINE, the management surface is:
+
+| Command                       | Permission/authority                   | Default    |
+| ----------------------------- | -------------------------------------- | ---------- |
+| `/agent status`               | `minecraftagent.admin.status`          | OP         |
+| `/agent doctor`               | `minecraftagent.admin.doctor`          | OP         |
+| `/agent capabilities`         | `minecraftagent.admin.capabilities`    | OP         |
+| `/agent costs`                | `minecraftagent.admin.costs`           | OP         |
+| `/agent reload`               | local Console or configured Owner UUID | restricted |
+| `/agent ui pin\|unpin\|clear` | `minecraftagent.ui`, player only       | player     |
+
+`minecraftagent.command.agent` remains a legacy OP aggregate for the four
+read-only management permissions. It deliberately does not grant reload.
+`minecraftagent.admin.reload` names that operation in the descriptor, but OP or
+permission status alone never replaces the configured Owner/Console check.
+
+The Offline check runs before permission lookup, argument handling, Runtime
+query, or reload authorization. In every state other than ONLINE, all commands
+above return exactly `AI offline`; only exact one-argument `on` and `off` forms
+reach toggle authorization.
+
+`status` reports operational state, desired mode, health, Runtime connectivity,
+protocol version, and the number of active Paper requests. `capabilities`
+reports the immutable registry generation, effective ID/version/hash entries,
+disabled count, and stable diagnostic counts. `doctor` adds the Paper version,
+anonymous current client-protocol/feature distributions, and grouped Litematica
+status plus Minecraft/Fabric/Litematica/MaLiLib/adapter versions. Client groups
+are bounded and may report an omitted-group count. These outputs contain no
+player UUID, player name, manifest source, server path, or client-local path.
+
+`costs` sends one bounded single-flight query over the authenticated Runtime
+connection and times out after five seconds. It renders server-wide current UTC
+day/month periods, admitted requests, reported/estimated provider-call counts,
+token totals, and integer micro-USD-derived USD totals. The budget line separates
+settled cost, active reservations, and remaining/exhausted state, so in-flight
+exposure is visible without exposing a request or player identity. Runtime SQLite
+remains authoritative; a disconnected Runtime makes the query unavailable
+without changing any stored accounting row.
+
+`reload` loads the complete strict Paper config on the I/O worker, validates it,
+and publishes one immutable policy generation with compare-and-set. Only the
+Owner set and complete `security` policy are hot-reloadable. Changes to server
+ID, Runtime endpoint/token/timeouts, state directory, Capability directory, or
+Capability approvals return restart-required. Knowledge, landmark, and
+Capability contents are not live-reloaded. Invalid input, an unavailable
+worker, concurrent reload, generation exhaustion, close, or stale completion
+cannot replace the previous policy snapshot. Stable result/log codes contain no
+raw value, token, or path.
+
+The trusted reload manager is installed only after the initial Runtime has
+authenticated and is retained across `off`, Runtime loss, and `on` recovery.
+Recovery rechecks restart-only fields against that original baseline instead of
+creating a new baseline or resetting the policy generation. Each reload attempt
+also carries the current operational epoch; final epoch validation and policy
+CAS execute under one gate commit lock. An `off`, reconnect, or plugin disable
+before that commit makes the completion stale. Asynchronous cost/reload
+replies repeat the Online and command-authority checks on the main thread before
+rendering any result.
+
 ## Paper/Fabric Phase 10-11 client presentation
 
 The Fabric client is optional. A player without the mod sends no
@@ -702,8 +851,15 @@ The Fabric client is optional. A player without the mod sends no
 protocol error. Install the matching client JAR only in the player's Fabric
 `mods/` directory. It is client-side and does not replace the Paper plugin.
 
-On join, the client sends a closed `client.hello` with protocol `1.0`, its mod
-version, independent feature versions, and nullable Litematica/MaLiLib versions.
+On join, the current client sends a closed `client.hello` with protocol `1.1`,
+its mod version, independent feature versions, nullable Litematica/MaLiLib
+versions, and a path-free Litematica adapter diagnostic. The diagnostic status
+is one of
+`READY`, `NOT_INSTALLED`, `MISSING_DEPENDENCY`, `UNSUPPORTED_VERSION`,
+`ADAPTER_LINKAGE_FAILED`, or `PREVIEW_STORAGE_UNAVAILABLE`; status and nullable
+version fields must be coherent. Paper also accepts the diagnostic-free legacy
+hello `1.0`, preserves its features, and reports only an anonymous internal
+`LEGACY_UNREPORTED` diagnostic. The outer `clientPayloadVersion` remains `1.0`.
 Paper binds it to the actual player connection, records a positive generation,
 and selects only exact server-supported view version `1.0`. An old or partial
 feature set receives only compatible views; otherwise Paper uses private text.
@@ -853,9 +1009,9 @@ warning for plan compatibility and should not be used. A group/world-writable
 configuration is always rejected. Inline secrets additionally require a private
 configuration file; inline secrets and broad read permissions may not be combined.
 
-## Phase 3-11 Paper and client validation
+## Phase 3-12 Paper and client validation
 
-[ADR 0001](adr/0001-phase3-conditional-command-registration.md) records the
+[repository ADR 0001](https://github.com/AGelysia/TAgent/blob/main/docs/adr/0001-phase3-conditional-command-registration.md) records the
 selected public `Server#getCommandMap` late-registration design. API-level unit
 tests are necessary but not sufficient. `scripts/paper-smoke.sh` uses the real
 Paper `1.21.11-132` server JAR under Java 21 in an ignored, isolated directory,
@@ -879,6 +1035,11 @@ case. Its real-server matrix is:
 - Offline lifecycle: manual off persists a `0600` DISABLED state, restart remains
   Offline with both labels registered, explicit on recovers, Runtime loss retains
   the command, and a second on recovers against a restarted Runtime.
+- Phase 12 management: the live Console receives bounded status and Capability
+  snapshots, a correlated authenticated aggregate cost response, and an
+  unchanged atomic reload result. While Offline, explicit status, doctor,
+  capabilities, costs, reload, and UI forms each return exactly one `AI offline`
+  response before their normal authority or transport path.
 - Dynamic identity mappings are removed through Paper's supported map removal
   path, and both server stops must disable the plugin without an exception.
 - Online-player `updateCommands()` invocation and stale completion are verified
@@ -904,7 +1065,97 @@ The exact commands, artifact hash, and outcomes are recorded in
 `docs/progress.md`. An initial core failure has no command recovery path; fix it
 externally and restart.
 
-## Troubleshooting Phase 0-11
+## Phase 13 release candidate
+
+The canonical candidate is assembled on Linux:
+
+```bash
+./scripts/release-check.sh
+```
+
+The lane runs the Runtime, Paper, Fabric, shared contract, formatting, pinned
+real-Paper smoke, npm audit, and release-directory checks serially. Both package
+builds start from clean output with Gradle build caching disabled. It compares
+the complete `dist/SHA256SUMS` and the upload artifact checksums, extracts the
+archive, and audits the extracted tree again. `gradle/verification-metadata.xml`
+pins external artifacts, including the resolved Paper API snapshot. A changed or
+missing upstream artifact fails closed.
+
+`dist/` is the inspected installation tree. `release/` contains the two JARs,
+`MinecraftAgent-0.1.0.tar.gz`, and a separate `SHA256SUMS`. The archive has one
+top-level `MinecraftAgent-0.1.0/` directory. `scripts/package.ps1` can assemble a
+developer `dist/` tree but is not the canonical release path and does not prove
+native Windows runtime behavior.
+
+The GitHub `Verify` workflow runs both Bash and PowerShell test orchestration on
+the POSIX security boundary. The manual `Release candidate` workflow has only
+read access and uploads a 14-day Actions artifact. It never creates a tag,
+GitHub Release, or mutable package. Final publication remains blocked on the
+manual client record.
+
+### Manual graphical harness
+
+The deterministic manual provider is repository-only and is deliberately not
+copied into `dist/`. It accepts only four fixed player messages and injects
+through the test-only `startRuntime({ modelProvider })` port. It never selects a
+fake provider through production configuration. This is a source-checkout
+maintainer lane; the packaged copy of this document does not ship the launcher
+or provider.
+
+Commit the candidate and keep the worktree clean. Keep screenshots and working
+notes outside the repository until all sessions finish. Then start the isolated
+Paper/Runtime pair with a legitimate whitelisted account:
+
+```bash
+PHASE13_PLAYER_NAMES=YourMinecraftName \
+  ./scripts/phase13-manual-server.sh
+```
+
+The default binds Paper to `127.0.0.1` and cannot be reached from another
+machine. For a physical client, first configure a private host-only/bridged/VPN
+address or a source-restricted firewall rule, then bind one explicit interface:
+
+```bash
+PHASE13_PLAYER_NAMES=YourMinecraftName \
+PHASE13_BIND_ADDRESS=192.168.56.10 \
+PHASE13_CONFIRM_NETWORK_EXPOSURE=I_HAVE_RESTRICTED_THE_FIREWALL \
+  ./scripts/phase13-manual-server.sh
+```
+
+The launcher first reruns the canonical release check against the clean commit.
+It creates a fresh private session, copies the complete verified candidate tree,
+installs production dependencies from its lockfile with
+install scripts disabled, and only then injects the repository-only deterministic
+provider beside the copied entry point. It verifies that installation did not
+change the copied Runtime code, package manifest, or lockfile. Paper uses the
+candidate JAR from the same `dist/` tree. The launcher also enforces
+`online-mode=true`, a whitelist, no RCON/query, a loopback Runtime, fresh
+temporary Runtime storage, private files, and the pinned Paper JAR. It does not
+configure the host firewall. The whole session, including its fresh world,
+config, whitelist, empty initial operator list, logs, and Runtime state, is
+deleted on exit. Use these exact in-game triggers:
+
+```text
+/agent say phase13 text
+/agent module recipe phase13 recipe
+/agent module project save phase13 acceptance project
+/agent module build phase13 build preview
+```
+
+Run the Vanilla and base Agent-client lanes in one fresh session with the default
+preview flag. Stop it, then launch a new disposable session from the same clean
+commit for the exact Litematica lane with `PHASE13_PREVIEW_ENABLED=true`. The
+build fallback contains the preview UUID
+needed by `/agent ui preview`, `/agent ui materials`, and `/agent ui remove`.
+The harness console also accepts `:runtime-stop` and `:runtime-start` for the
+controlled recovery check.
+Use [`phase13-manual-test.md`](phase13-manual-test.md) as the immutable template,
+then write sanitized outcomes to the package-excluded
+[`phase13-acceptance-record.md`](https://github.com/AGelysia/TAgent/blob/main/docs/phase13-acceptance-record.md)
+and [`progress.md`](https://github.com/AGelysia/TAgent/blob/main/docs/progress.md).
+Do not turn a missing graphical fixture into a pass.
+
+## Troubleshooting Phase 0-12
 
 ### Dependency resolution fails
 
@@ -966,7 +1217,8 @@ Do not delete or loosen permissions on the state file as a recovery shortcut.
 ### The Fabric client stays on fallback text
 
 Fallback is expected when the mod is absent, the server channel is unavailable,
-protocol `1.0` was not accepted, or the required feature/view versions do not
+neither supported hello protocol (`1.0` or `1.1`) was accepted, or the required
+feature/view versions do not
 intersect exactly. Confirm the Paper plugin and matching client JAR are both
 matching builds and inspect only stable `CLIENT_*` codes. For recipe v2, confirm
 the client advertised `recipeView: 2`; for build preview, confirm Paper has the

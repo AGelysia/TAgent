@@ -50,6 +50,7 @@ interface ChunkCollection {
 }
 
 const INDEX_FIELDS = ["chunkIndex", "index"] as const;
+const SUPPORTED_CLIENT_PROTOCOL_VERSIONS = new Set(["1.0", "1.1"]);
 const DATA_FIELDS = ["data", "dataBase64", "chunkData", "payloadBase64"] as const;
 const CHUNK_COUNT_FIELDS = ["chunkCount", "totalChunks"] as const;
 const CHUNK_BYTES_FIELDS = ["chunkBytes", "byteLength"] as const;
@@ -988,10 +989,12 @@ export function validateProtocolVersion(
 
     for (const [name, nested] of Object.entries(candidate)) {
       const nestedPath = childPath(path, name);
-      if (
-        (name === "protocolVersion" || name === "clientProtocolVersion") &&
-        nested !== supportedVersion
-      ) {
+      const versionSupported =
+        name === "clientProtocolVersion"
+          ? nested === null ||
+            (typeof nested === "string" && SUPPORTED_CLIENT_PROTOCOL_VERSIONS.has(nested))
+          : nested === supportedVersion;
+      if ((name === "protocolVersion" || name === "clientProtocolVersion") && !versionSupported) {
         errors.push(
           semanticError(
             "PROTOCOL_VERSION_UNSUPPORTED",
@@ -2254,7 +2257,7 @@ export function validateViewNegotiation(value: unknown): SemanticValidationError
 
   const client = value["client"];
   const view = value["view"];
-  if (client["clientProtocolVersion"] !== SUPPORTED_PROTOCOL_VERSION) {
+  if (!SUPPORTED_CLIENT_PROTOCOL_VERSIONS.has(client["clientProtocolVersion"] as string)) {
     return [
       semanticError(
         "VIEW_PROTOCOL_UNSUPPORTED",

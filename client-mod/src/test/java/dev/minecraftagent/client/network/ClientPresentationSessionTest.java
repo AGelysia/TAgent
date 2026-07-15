@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import dev.minecraftagent.client.litematica.LitematicaAdapterDiagnostic;
 import dev.minecraftagent.client.transfer.ViewTransferAccumulator;
 import dev.minecraftagent.client.ui.OverlayController;
 import dev.minecraftagent.client.ui.OverlayPreferences;
@@ -323,7 +324,21 @@ class ClientPresentationSessionTest {
 
   private static ClientHandshakeAdvertisement advertisement() {
     return new ClientHandshakeAdvertisement(
-        "0.1.0", 1, 1, 1, 0, 0, Optional.empty(), Optional.empty());
+        "0.1.0",
+        1,
+        1,
+        1,
+        0,
+        0,
+        Optional.empty(),
+        Optional.empty(),
+        new LitematicaAdapterDiagnostic(
+            LitematicaAdapterDiagnostic.Status.NOT_INSTALLED,
+            "1.21.11",
+            "0.19.3",
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty()));
   }
 
   private static byte[] textView(String text, UUID viewId, UUID requestId) {

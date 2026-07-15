@@ -1,15 +1,18 @@
 # Progress
 
-Last updated: 2026-07-13
+Last updated: 2026-07-15
 
 ## Current status
 
-Phase 0 through Phase 10 are complete. Phase 11's read/preview delivery is
-complete: knowledge, project, landmark, authoritative recipe, deterministic
-build-preview, and native client schematic scope is implemented and verified.
-The plan's world apply/rollback acceptance is deliberately not claimed: the
-production write catalog remains empty pending the existing typed asynchronous
-proposal and real-player safety gate.
+Phase 0 through Phase 10 are complete. Phase 11's read/preview delivery and the
+Phase 12 bounded management surface are complete. Management now includes the
+universal Offline gate, independently authorized status/doctor/capability/cost
+queries, anonymous client/Litematica diagnostics, owner-only atomic policy
+reload, and Runtime-owned durable usage/budget accounting. Phase 13 automated
+release-candidate infrastructure is implemented; its real graphical client lane
+and public release remain pending. The plan's world apply/rollback acceptance is
+deliberately not claimed: the production write catalog remains empty pending the
+existing typed asynchronous proposal and real-player safety gate.
 
 ## Locked decisions
 
@@ -43,8 +46,9 @@ proposal and real-player safety gate.
 - Toggle authorization is local console, a configured Owner UUID, or a live OP
   with `minecraftagent.admin.toggle` when `allow-op-toggle` is explicitly enabled.
 - Phase 5 keeps one live Paper request per player and 64 globally. Runtime
-  independently enforces configured concurrency, FIFO queue, per-player
-  cooldown, and an in-memory daily request limit.
+  independently enforces configured concurrency, FIFO queue, and per-player
+  cooldown. Phase 12 supersedes its in-memory daily counter with durable
+  UTC-daily admission and monthly cost accounting.
 - Phase 5 replies are literal private text. Paper installs no ordinary-chat
   listener and revalidates the request epoch and connection at final delivery.
 - Phase 6 sessions are owned by Runtime and queried with the complete
@@ -121,6 +125,23 @@ proposal and real-player safety gate.
 - A valid preview and native `.litematica` are presentation artifacts. Receipt
   does not auto-load a placement, and load/Material List/ACK state is never
   proposal or world-write authority.
+- Phase 12 keeps the universal command Offline gate: every non-toggle form
+  returns exactly `AI offline` before permission or management work. Online
+  status, doctor, capabilities, and costs use independent permissions.
+- Reload is Console/Owner-only. The strict complete candidate is loaded on the
+  worker; only owners plus the complete `SecurityPolicy` publish as one CAS
+  generation. Every transport, storage, identity, and Capability configuration
+  change is restart-required, and any failed or stale attempt retains the old
+  snapshot.
+- Doctor client diagnostics are anonymous aggregates of negotiated protocol and
+  feature versions plus Litematica status/dependency/adapter-version groups.
+  They contain no player UUID, connection generation, or local path and remain
+  diagnostic rather than authorization input.
+- Runtime SQLite schema v3 persists idempotent provider-round usage, UTC
+  day/month aggregates, per-player daily admission, and budget reservations.
+  Pricing and reservations are explicit integer micro-USD configuration; Paper
+  queries only the bounded aggregate through the authenticated management-cost
+  exchange.
 
 ## Phase 0: repository scaffold
 
@@ -527,7 +548,9 @@ Implemented read/preview scope:
       preview origin, and delegates material display to Litematica's native HUD.
       Disconnect removes connection-scoped managed artifacts. Paper exposes
       explicit `/agent ui preview <view-id>` and
-      `/agent ui materials <view-id>` presentation commands.
+      `/agent ui materials <view-id>` presentation commands. Phase 13 adds
+      `/agent ui remove <view-id>` for explicit Agent-owned placement/artifact
+      removal under the same Online and UI-permission gate.
 
 Deliberately deferred safety scope:
 
@@ -538,7 +561,222 @@ Deliberately deferred safety scope:
       remains empty until this complete gate and a real-player integration test
       pass.
 
+## Phase 12: bounded management and durable cost control
+
+Implemented management scope:
+
+- [x] The universal Offline gate precedes command permissions, reload
+      authorization, snapshots, and Runtime queries. Only exact `on`/`off`
+      bypass it; every other form returns exactly `AI offline`.
+- [x] `status`, `doctor`, `capabilities`, and `costs` use independent OP-default
+      query permissions. Reload is separately restricted to Console or a player
+      in the current Owner UUID snapshot; OP or the named reload permission alone
+      cannot authorize it.
+- [x] Status and doctor render bounded immutable component, Runtime, request,
+      Capability, and client snapshots. Client diagnostics aggregate protocol
+      versions, every feature-version distribution, Litematica adapter states,
+      and bounded compatibility version groups without UUIDs, names, connection
+      generations, credentials, or paths.
+- [x] Fabric reports one closed Litematica diagnostic state with bounded
+      Minecraft, Fabric Loader, Litematica, MaLiLib, and adapter versions.
+      Missing, unsupported, linkage-failed, and preview-storage failure states
+      remain presentation diagnostics and cannot raise a client capability.
+- [x] Reload reuses the complete strict Paper loader on the worker, validates
+      `SecurityPolicy`, and publishes owners plus the full security policy as one
+      monotonically versioned CAS snapshot. Admin/toggle and proposal policy
+      readers consume that same current generation. Startup candidates publish
+      only after Runtime authentication; recovery retains the original trusted
+      manager/generation and cannot rebase restart-only fields.
+- [x] Server ID, Runtime endpoint/token/timeouts, state directory, Capability
+      directory, and approvals are restart-only. Invalid candidates,
+      restart-required changes, concurrent attempts, worker rejection, manager
+      close, and stale completion retain the previous snapshot and expose only
+      stable redacted outcomes.
+- [x] Runtime SQLite migrations v3-v5 persist request admissions,
+      per-provider-round reservations, idempotent reported/estimated usage
+      events, per-player UTC-daily counts, and server-wide UTC daily/monthly
+      aggregates. Migration v4 records provider-round start state; startup
+      estimates abandoned started rounds and releases not-started reservations
+      while preserving settled events and admission counts. Existing v3 ACTIVE
+      rows are conservatively marked started during upgrade.
+- [x] Migration v5 adds a singleton process-owner row. `BEGIN IMMEDIATE`
+      serializes live-owner validation and dead-owner replacement before
+      recovery. Disconnect/shutdown cancels queued work before active slots so
+      bulk cancellation cannot drain the queue into provider calls.
+- [x] Explicit integer micro-USD input/output rates calculate reported cost;
+      every provider round reserves budget before the call, a response or
+      unknown-billability failure without usage settles at its reservation,
+      `NOT_BILLABLE` releases it, and cancellation immediately estimates a
+      `STARTED` round while permitting a late reported correction.
+- [x] The authenticated application channel accepts the closed
+      `management.costs.request` and returns a correlated bounded
+      `management.costs.response`. `/agent costs` renders only current UTC
+      day/month periods, aggregate requests, reported/estimated provider calls,
+      tokens, cost, settled/active reservation exposure, remaining amount, and
+      exhaustion; no player identity or per-player breakdown crosses the wire.
+- [x] Reload attempts carry an Online operational epoch; final permit validation
+      and policy CAS share one gate transition lock and cannot publish after
+      `off`, reconnect, or disable. Asynchronous cost/reload replies repeat the
+      Online and authority checks at the final main-thread rendering boundary.
+
+Deliberately bounded scope:
+
+- [x] Online reload changes only owners and `SecurityPolicy`; it does not reload
+      Runtime configuration, transport/storage, landmarks, knowledge roots, or
+      Capability catalog content. Those changes require their existing stopped
+      maintenance/restart path.
+- [x] The production write catalog remains empty. No management command,
+      diagnostic, reload generation, cost record, Capability entry, or client
+      declaration can create a proposal or mutate Minecraft state.
+
+## Phase 13: gated release candidate
+
+Implemented automated scope:
+
+- [x] All components use candidate version `0.1.0`. Packaging removes stale
+      Runtime/JVM output, selects exact-version JARs, disables Gradle build cache,
+      normalizes archive timestamps/order, and emits complete installation and
+      upload `SHA256SUMS` files.
+- [x] Gradle dependency verification records SHA-256 for the complete resolved
+      graph, including the exact Paper API snapshot. The Gradle writer's duplicate
+      SNAPSHOT-key defect was handled without retaining a trusted-coordinate
+      bypass; ordinary strict and offline builds validate the final metadata.
+- [x] `verify-dist.sh` requires the Phase 13 file set, 50 exact schemas, Runtime
+      entry layout, matching non-SNAPSHOT component versions, expected JAR
+      descriptors/classes/schemas, an exact installation surface, canonical and
+      duplicate-free nested JAR entries, bounded extraction, safe paths/modes, no
+      private state or credential patterns, and a complete valid checksum manifest.
+- [x] `release-check.sh` runs the full serial test lane, pinned real Paper smoke,
+      npm audit, archive extraction/re-audit, and a second uncached clean build,
+      then compares complete dist and release checksums. Required suites and the
+      Phase 13 minimum test inventory fail closed before reports are preserved.
+- [x] Read-only GitHub workflows run Bash and PowerShell orchestration and can
+      upload a temporary commit-bound candidate. They never create a tag or
+      GitHub Release.
+- [x] `SECURITY.md`, `CLIENT-COMPATIBILITY.md`, ADR 0011, and the manual client
+      checklist define the preview-only release, compatibility tuple, disclosure,
+      network, and evidence boundaries. GitHub private vulnerability reporting is
+      enabled for `AGelysia/TAgent`.
+- [x] MockBukkit `4.110.0` supplements the real Paper smoke with a live Bukkit
+      player permission and request-identity submission boundary. Its supported
+      JUnit `6.0.3` extension owns the mock lifecycle. Deterministic Capability
+      mutation tests cover malformed manifests, paths, types, sizes, numeric/JCS
+      edges, templates, descriptors, and runtime arguments.
+- [x] `/agent ui remove <view-id>` maps to the existing client preview-remove
+      action with canonical UUID parsing, `minecraftagent.ui`, universal Offline
+      gating, usage, completion, and focused tests.
+- [x] A repository-only deterministic Runtime provider and isolated manual server
+      launcher drive fixed text, authoritative recipe, project, live context, and
+      3-by-2-by-2 build-preview flows. Each run rebuilds one clean commit, stages
+      the complete verified candidate in a fresh private session, installs from
+      its candidate lockfile, and injects the test provider beside the staged
+      Runtime. It requires exact authenticated access lists, explicit shutdown,
+      and payload fingerprints. The fake provider cannot be selected through
+      production configuration and is excluded from `dist`.
+
+Pending manual scope:
+
+- [ ] Run Vanilla, Agent Client, and the exact Litematica/MaLiLib client profiles
+      from a physical machine and record sanitized evidence for real handshake,
+      private fallback, overlay/recipe graphics, native preview/material/remove,
+      diagnostics, and disconnect recovery.
+- [ ] Resolve or record `BLOCKED` for graphical fixtures that cannot be reached
+      safely only where the manual gate explicitly allowlists it. Any failure,
+      fingerprint mismatch, core blocker, or unlisted blocker rejects the
+      candidate.
+- [ ] Run native Windows packaging/runtime acceptance if Windows support is to be
+      claimed. PowerShell CI currently validates orchestration on the POSIX
+      security boundary only.
+- [ ] Create the final commit/tag/GitHub Release only after the manual record is
+      `ACCEPTED` under its mandatory-core/allowlisted-blocker rule and the final
+      clean-build fingerprints match. No publication action is automated.
+
 ## Verification
+
+Phase 13 automated development verification recorded on 2026-07-15:
+
+```bash
+JAVA_HOME=/home/elysia/.local/share/jdks/temurin-21 \
+MINECRAFT_AGENT_ALLOW_DIRTY_RELEASE_CHECK=I_UNDERSTAND_THIS_IS_NOT_A_RELEASE \
+  ./scripts/release-check.sh
+```
+
+- This was deliberately a dirty-worktree development check because the Phase 12
+  and Phase 13 implementation has not yet been committed. The canonical manual
+  and release lanes still require a clean commit at entry and exit; these results
+  are not publication evidence.
+- Runtime passed Prettier, ESLint, TypeScript build, and all 20 Vitest files with
+  167 tests. Paper passed 59 suites and 463 tests; Client passed 17 suites and 210
+  tests. Every lane had zero failures, errors, or skips, and the inventory gate
+  found the required manual-provider, usage-accounting, MockBukkit, deterministic
+  Capability fuzz, Litematica, and shared-contract suites.
+- Strict offline, no-cache JVM reruns passed with JUnit/Jupiter/Platform `6.0.3`,
+  MockBukkit `4.110.0`, and Byte Buddy core/agent `1.18.8`. Final Gradle metadata
+  contains the exact Paper snapshot and no trusted-artifact bypass.
+- The pinned Paper `1.21.11-132` smoke retained SHA-256
+  `5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba`
+  and passed `offline-lifecycle`, `unavailable`, `wrong-token`, and
+  `incompatible`. Every Paper instance used a random loopback-only port verified
+  from both startup log and `ss`; Runtime remained at `127.0.0.1:38127`. No test
+  process or listener remained afterward.
+- `npm audit` inspected 251 packages and reported zero vulnerabilities. GitHub
+  private vulnerability reporting was enabled and read back as `enabled=true`.
+- Both uncached builds produced identical 215-file installation trees (214
+  manifest entries) and release artifacts. `dist/SHA256SUMS` hashes to
+  `1106467025d933190cab44c8662ff1f171804100b929526ba3f34b38e612bb67`;
+  the Runtime subset hashes to
+  `17632450b6dfe9f7e8c3014a126753169c05ce0733971d6025f6e31d511b8915`,
+  and the protocol subset hashes to
+  `8911de23fd119adc6c424c27e6f1b598fd35948c32fa7ab1eb3629fc3bdb2f8e`.
+- `MinecraftAgent-Paper.jar` is 752,660 bytes with SHA-256
+  `468a54dba0cd1cbc79d68831b2e78290a38614fd58438241f2e9b1927f16629f`;
+  `MinecraftAgent-Client-Fabric.jar` is 330,677 bytes with SHA-256
+  `44b3048e3cc2163008579485f5121e03b0ef78889f680f24f67a899a287d308a`;
+  and the 1,255,633-byte `MinecraftAgent-0.1.0.tar.gz` hashes to
+  `de7ed8c4d486f4b1ffb6be01ac5a567b418f5aa998f0e2c510459587f254409f`.
+- Native PowerShell/Windows behavior was not run on this Linux VM because `pwsh`
+  is not installed. The pinned GitHub workflows provide the POSIX PowerShell
+  orchestration lane, but Phase 13 makes no native Windows equivalence claim.
+
+Phase 12 full implementation verification recorded on 2026-07-14:
+
+```bash
+./scripts/test.sh
+./scripts/paper-smoke.sh
+./scripts/package.sh
+```
+
+- Runtime passed Prettier, ESLint, TypeScript build, and all 19 Vitest files with
+  166 tests. New coverage includes SQLite v3-v5 migration, exact micro-USD
+  calculation, UTC/restart-stable admission, concurrent reservation,
+  reported/estimated idempotent settlement, cancellation/error/late response,
+  queue-safe bulk cancellation, transactional process ownership, Tool-loop
+  accounting, and the authenticated management-cost exchange.
+- The full Paper build passed Spotless and 457 tests with no failure, error, or
+  skip. Coverage includes the universal Offline gate, independent management
+  permissions, Console/Owner-only reload, complete candidate validation,
+  restart-required fields, epoch-atomic CAS publication and stale/failure retention,
+  redacted management snapshots, aggregate costs, and Runtime correlation.
+- The full Fabric build passed Spotless and 210 tests with no failure, error, or
+  skip. Coverage includes the closed client diagnostic states, dependency and
+  adapter versions, safe metadata fallback, generation replacement/cleanup, and
+  proof that diagnostics do not raise negotiated capabilities or authority.
+- The pinned Paper `1.21.11-132` smoke verified SHA-256
+  `5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba`
+  and passed `offline-lifecycle`, `unavailable`, `wrong-token`, and
+  `incompatible`. The lifecycle case exercised real Console status,
+  capabilities, authenticated aggregate costs, unchanged atomic reload, and
+  exact `AI offline` short-circuiting for every new management command.
+- Packaging produced 209 files (2.7 MiB) with private-safe deterministic modes.
+  `MinecraftAgent-Paper.jar` is 752,539 bytes with SHA-256
+  `279f0f2faa5b370e67ebd5dea84e61bdeb1bf30f736551d9d4da29ccfc52412c`;
+  `MinecraftAgent-Client-Fabric.jar` is 330,685 bytes with SHA-256
+  `7a4cf0b8c07d4f1f58d0b50c09fed43da3972b248eca83e9a7cdfbbb3be05c10`.
+- This automated lane used no graphical Fabric client, real Litematica/MaLiLib
+  UI, or real online player and makes no claim for those manual integrations.
+  Phase 13 release completion is also not claimed here.
+
+### Phase 11 completion lane
 
 Phase 11 verification recorded in the final serial completion lane:
 
@@ -682,10 +920,9 @@ not suppressed.
   dispatch still rejects those message types as unsupported.
 - Paper conversation repositories; Paper retains only a transient current
   session selection. Runtime owns the conversation database exclusively.
-- Durable rate accounting, token/cost accounting, or monthly budget
-  enforcement.
-- Online Capability Pack reload or any capability command execution. Phase 9
-  loads and atomically publishes startup/recovery metadata only; no executor,
+- Online Capability Pack content reload or any capability command execution.
+  Phase 12 `/agent reload` publishes only owners plus `SecurityPolicy`; Phase 9
+  still loads Capability metadata only through startup/recovery, and no executor,
   Bukkit dispatch, proposal-creation route, or Runtime capability handler exists.
 - A production build write proposal, confirmation-time region re-read, bounded
   world apply, partial-failure/rollback policy, or durable rollback reference.
@@ -699,7 +936,8 @@ not suppressed.
   their owning process is running.
 - A graphical Fabric client, real server/player handshake, or the exact
   Litematica/MaLiLib tuple has not been launched on this constrained headless
-  host. Phase 10/11 behavior is covered by focused protocol/domain/client tests.
+  host. Phase 10/11 presentation and Phase 12 diagnostic reporting are covered
+  by focused protocol/domain/client tests.
 
 The presence of a schema or proposal domain object does not mark a write tool
 implemented.
@@ -710,19 +948,24 @@ implemented.
 
 Phase 7 supplies one fixed OpenAI Responses adapter with safe status mapping,
 bounded bodies, a serial strict-function loop, timeout/cancellation, and no
-prompt/completion logging. It does not retry, stream, rotate providers, persist
-usage, or enforce the configured monthly budget. Provider account-side
-retention and policy remain an operator responsibility even though requests set
-`store: false`.
+prompt/completion logging. It does not retry, stream, rotate providers, or fetch
+pricing. Phase 12 persists provider-round usage and applies the configured
+monthly reservation-based conservative admission bound from operator-supplied
+micro-USD rates and reservations. It is not a provider billing cap: post-paid
+reported cost can exceed both a round reservation and the local bound before
+later calls are blocked. Provider
+account-side pricing, retention, and policy remain operator responsibilities
+even though requests set `store: false`.
 
 ### Node SQLite stability
 
 Node 22's built-in synchronous SQLite API avoids a native addon on this small
 host, but Node still labels it active development and emits an ExperimentalWarning.
 Phase 6 uses it for indexed, hard-limited context reads and short atomic
-exchange writes. No transaction spans provider I/O. The driver remains
-experimental and should be reassessed before higher-volume deployment or
-unbounded data features.
+exchange writes; Phase 12 adds short admission, reservation, event, and aggregate
+transactions. No transaction spans provider I/O. The driver remains experimental
+and should be reassessed before higher-volume deployment or unbounded data
+features.
 
 ### Conditional command registration
 
@@ -771,12 +1014,13 @@ reload, reuse outside that composition, or a stronger local threat model
 requires an explicit trusted-owner input and descriptor-relative
 `SecureDirectoryStream` traversal.
 
-Catalog publication currently precedes the authenticated Runtime handshake,
-and later plugin enable/disable events update only the inventory snapshot. This
-is safe while entries have no executor. Before any execution adapter is added,
-publication must bind the successful coordinator generation and every
-invocation must recheck catalog availability plus the required plugin's live
-enabled state and version; a retained catalog alone is not authority.
+Catalog loading produces an unpublished candidate. Phase 12 binds publication
+to the authenticated Runtime application and current coordinator attempt, so a
+failed or stale handshake retains the active generation. Later plugin
+enable/disable events update only the inventory snapshot. Before any execution
+adapter is added, every invocation must still recheck catalog availability plus
+the required plugin's live enabled state and version; a retained catalog alone
+is not authority.
 
 ### Proposal integration coverage
 
@@ -789,22 +1033,20 @@ redaction; a real-player click remains a later integration lane.
 
 ## Next gates
 
-1. Proceed to the Phase 12 management surface: complete `status`, `doctor`,
-   atomic `reload`, `capabilities`, `costs`, and client-capability diagnostics
-   without weakening the universal Offline response rule.
+1. Complete Phase 13's physical-client checklist against the exact candidate and
+   record sanitized PASS/FAIL/BLOCKED evidence. Phase 13 remains incomplete even
+   when the automated release lane is green.
 2. Keep the production write catalog empty until the first fixed typed adapter
    has operation-specific validation, limits, rollback/partial-failure policy,
    confirmation-time region revalidation, off-thread durable audit/rollback
    persistence, and a real-player proposal integration test.
-3. Run a real graphical Fabric/Litematica lane for recipe v2 paging/choices,
+3. Run the prepared real graphical Fabric/Litematica lane for recipe v2 paging/choices,
    Registry icons/tooltips, preview non-auto-load, explicit placement/remove,
    origin, and native Material List before enabling preview publication in
    production.
-4. Add durable usage/cost accounting before treating daily/monthly limits as
-   restart-stable budgets.
-5. Add a real online-player integration lane for private `/agent say` delivery,
+4. Add a real online-player integration lane for private `/agent say` delivery,
    proposal confirmation, and late dynamic command-tree refresh without
    increasing routine weak-host resource usage.
-6. Add Gradle dependency-verification metadata before calling a release
-   byte-for-byte reproducible; Paper 1.21.11 is available only through an
-   upstream mutable snapshot coordinate.
+5. Do not generalize the same-lane uncached checksum match into a cross-platform
+   byte-for-byte reproducibility claim. Native Windows and an independently
+   pinned host image remain unverified.

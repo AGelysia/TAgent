@@ -57,10 +57,16 @@ class AgentCommandTest {
     assertTrue(command.execute(sender, "agent", new String[] {"ui", "clear"}));
     assertTrue(
         command.execute(
+            sender,
+            "agent",
+            new String[] {"ui", "remove", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}));
+    assertTrue(
+        command.execute(
             sender, "agent", new String[] {"confirm", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}));
 
     assertEquals(
         List.of(
+            "AI offline",
             "AI offline",
             "AI offline",
             "AI offline",
@@ -178,7 +184,17 @@ class AgentCommandTest {
     var healthyMessages = new ArrayList<String>();
     command(healthy(), new RecordingControl(), ignored -> false, Runnable::run)
         .execute(sender(healthyMessages, true), "agent", new String[] {"doctor"});
-    assertEquals(List.of("Minecraft Agent health: ONLINE"), healthyMessages);
+    assertEquals(
+        List.of(
+            "Minecraft Agent health: ONLINE",
+            "Paper component: unknown",
+            "Runtime protocol: 1.0",
+            "Clients: online=0 negotiated=0",
+            "Client protocols: none",
+            "Client features: none",
+            "Litematica adapters: none",
+            "Capabilities: generation=0 effective=0 disabled=0"),
+        healthyMessages);
 
     var degradedMessages = new ArrayList<String>();
     var degraded =
@@ -193,7 +209,16 @@ class AgentCommandTest {
         .execute(sender(degradedMessages, true), "agent", new String[] {"doctor"});
 
     assertEquals(
-        List.of("Minecraft Agent health: DEGRADED", "Warning: OPTIONAL_CAPABILITY_UNAVAILABLE"),
+        List.of(
+            "Minecraft Agent health: DEGRADED",
+            "Paper component: unknown",
+            "Runtime protocol: 1.0",
+            "Clients: online=0 negotiated=0",
+            "Client protocols: none",
+            "Client features: none",
+            "Litematica adapters: none",
+            "Capabilities: generation=0 effective=0 disabled=0",
+            "Warning: OPTIONAL_CAPABILITY_UNAVAILABLE"),
         degradedMessages);
   }
 
@@ -208,10 +233,13 @@ class AgentCommandTest {
 
     assertEquals(
         List.of(
-            "Minecraft Agent: ONLINE",
-            "/agent [say <message>|resume [session]|module list|module <name> <message>|ui"
-                + " <pin|unpin|clear>|ui <preview|materials> <view-id>|confirm"
-                + " <proposal>|reject <proposal>|doctor|off|on]"),
+            "Minecraft Agent status: ONLINE",
+            "Desired mode: ENABLED",
+            "Health: ONLINE",
+            "Runtime: DISCONNECTED",
+            "Protocol: 1.0",
+            "Active requests: 0",
+            usage()),
         messages);
   }
 
@@ -258,12 +286,7 @@ class AgentCommandTest {
         player(emptyMessages, UUID.randomUUID(), Set.of(AgentCommand.USE_PERMISSION)),
         "agent",
         new String[] {"say"});
-    assertEquals(
-        List.of(
-            "/agent [say <message>|resume [session]|module list|module <name> <message>|ui"
-                + " <pin|unpin|clear>|ui <preview|materials> <view-id>|confirm"
-                + " <proposal>|reject <proposal>|doctor|off|on]"),
-        emptyMessages);
+    assertEquals(List.of(usage()), emptyMessages);
   }
 
   @Test
@@ -358,12 +381,13 @@ class AgentCommandTest {
             ui,
             ignored -> false,
             Runnable::run);
-    var player = player(messages, playerId, Set.of(AgentCommand.USE_PERMISSION));
+    var player = player(messages, playerId, Set.of(AgentCommand.UI_PERMISSION));
 
     command.execute(player, "agent", new String[] {"ui", "PIN"});
     command.execute(player, "agent", new String[] {"ui", "unpin"});
     command.execute(player, "agent", new String[] {"ui", "clear"});
     command.execute(player, "agent", new String[] {"ui", "preview", viewId.toString()});
+    command.execute(player, "agent", new String[] {"ui", "remove", viewId.toString()});
     command.execute(player, "agent", new String[] {"ui", "materials", viewId.toString()});
 
     assertEquals(
@@ -372,6 +396,7 @@ class AgentCommandTest {
             playerId + ":UNPIN:null",
             playerId + ":CLEAR:null",
             playerId + ":PREVIEW:" + viewId,
+            playerId + ":REMOVE:" + viewId,
             playerId + ":MATERIALS:" + viewId),
         invocations);
     assertEquals(
@@ -380,12 +405,13 @@ class AgentCommandTest {
             "AI client UI updated.",
             "AI client Mod is unavailable.",
             "AI client UI updated.",
+            "AI client UI updated.",
             "AI client UI updated."),
         messages);
   }
 
   @Test
-  void uiPreviewActionsRequireUsePermissionAndCanonicalTarget() {
+  void uiPreviewActionsRequireUiPermissionAndCanonicalTarget() {
     var messages = new ArrayList<String>();
     var invocations = new ArrayList<String>();
     AgentUiControl ui =
@@ -409,9 +435,9 @@ class AgentCommandTest {
         "agent",
         new String[] {"ui", "preview", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"});
     command.execute(
-        player(messages, UUID.randomUUID(), Set.of(AgentCommand.USE_PERMISSION)),
+        player(messages, UUID.randomUUID(), Set.of(AgentCommand.UI_PERMISSION)),
         "agent",
-        new String[] {"ui", "materials", "not-a-uuid"});
+        new String[] {"ui", "remove", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"});
 
     assertTrue(invocations.isEmpty());
     assertEquals(
@@ -440,7 +466,7 @@ class AgentCommandTest {
             Runnable::run);
 
     command.execute(
-        player(messages, playerId, Set.of(AgentCommand.USE_PERMISSION)),
+        player(messages, playerId, Set.of(AgentCommand.UI_PERMISSION)),
         "agent",
         new String[] {"ui", "pin"});
 
@@ -544,13 +570,7 @@ class AgentCommandTest {
         "agent",
         new String[] {"confirm", proposalId.toUpperCase(java.util.Locale.ROOT)});
     command.execute(permitted, "agent", new String[] {"reject"});
-    assertEquals(
-        List.of(
-            "Proposal ID must be a canonical UUID.",
-            "/agent [say <message>|resume [session]|module list|module <name> <message>|ui"
-                + " <pin|unpin|clear>|ui <preview|materials> <view-id>|confirm"
-                + " <proposal>|reject <proposal>|doctor|off|on]"),
-        invalidMessages);
+    assertEquals(List.of("Proposal ID must be a canonical UUID.", usage()), invalidMessages);
     assertNull(proposals.operation);
   }
 
@@ -632,7 +652,8 @@ class AgentCommandTest {
     var onlineAuthorized =
         command(healthy(), new RecordingControl(), ignored -> true, Runnable::run);
     assertEquals(
-        List.of("say", "resume", "ui", "module", "doctor", "off"),
+        List.of(
+            "say", "resume", "ui", "module", "status", "doctor", "capabilities", "costs", "off"),
         onlineAuthorized.tabComplete(permitted, "agent", new String[] {""}));
     assertEquals(
         List.of("list", "general", "recipe", "guide", "locate", "build", "project"),
@@ -641,7 +662,7 @@ class AgentCommandTest {
         List.of("recipe"),
         onlineAuthorized.tabComplete(permitted, "agent", new String[] {"module", "re"}));
     assertEquals(
-        List.of("pin", "unpin", "clear", "preview", "materials"),
+        List.of("pin", "unpin", "clear", "preview", "remove", "materials"),
         onlineAuthorized.tabComplete(permitted, "agent", new String[] {"ui", ""}));
     assertEquals(
         List.of("unpin"),
@@ -713,6 +734,12 @@ class AgentCommandTest {
   private static AgentStatus healthy() {
     return new AgentStatus(
         AgentState.ONLINE, DesiredMode.ENABLED, AgentHealth.HEALTHY, null, null, List.of());
+  }
+
+  private static String usage() {
+    return "/agent [say <message>|resume [session]|module list|module <name> <message>|ui"
+        + " <pin|unpin|clear>|ui <preview|remove|materials> <view-id>|confirm"
+        + " <proposal>|reject <proposal>|status|doctor|reload|capabilities|costs|off|on]";
   }
 
   private static AgentStatus offline() {

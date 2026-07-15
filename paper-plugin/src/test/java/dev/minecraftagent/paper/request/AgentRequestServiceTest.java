@@ -94,7 +94,7 @@ class AgentRequestServiceTest {
       capabilities.put(feature, feature == ClientFeature.OVERLAY ? 1 : 0);
     }
     var snapshot =
-        new ClientCapabilitySnapshot(true, "1.0", new ClientCapabilities(capabilities), 7L);
+        new ClientCapabilitySnapshot(true, "1.1", new ClientCapabilities(capabilities), 7L);
     var fixture =
         new Fixture(
             unavailableTools(),
@@ -111,7 +111,7 @@ class AgentRequestServiceTest {
     var request = object(fixture.connection.sent.getFirst());
     var advertised = request.getAsJsonObject("payload").getAsJsonObject("clientCapabilities");
     assertTrue(advertised.get("connected").getAsBoolean());
-    assertEquals("1.0", advertised.get("clientProtocolVersion").getAsString());
+    assertEquals("1.1", advertised.get("clientProtocolVersion").getAsString());
     assertEquals(1, advertised.getAsJsonObject("features").get("overlay").getAsInt());
     fixture.connection.deliver(
         completionWithTextView(
@@ -503,6 +503,143 @@ class AgentRequestServiceTest {
   }
 
   @Test
+  void costsQueriesAreSingleFlightAndCallerCancellationDoesNotCancelTheWireRequest() {
+    var fixture = new Fixture();
+
+    var cancelledCaller = fixture.service.queryCosts().toCompletableFuture();
+    var activeCaller = fixture.service.queryCosts().toCompletableFuture();
+
+    assertEquals(1, fixture.connection.sent.size());
+    var request = fixture.connection.sent.getFirst();
+    var envelope = object(request);
+    assertEquals("management.costs.request", envelope.get("type").getAsString());
+    assertEquals(envelope.get("messageId"), envelope.get("requestId"));
+    assertEquals(0, envelope.getAsJsonObject("payload").size());
+    assertTrue(cancelledCaller.cancel(false));
+
+    fixture.connection.deliver(costsResponse(request));
+
+    var result = activeCaller.join();
+    assertEquals(AgentRequestService.CostsQueryStatus.AVAILABLE, result.status());
+    assertEquals(3, result.costs().currentDay().admittedRequests());
+    assertEquals(18_000, result.costs().currentMonth().costMicroUsd());
+    assertEquals(49_980_000, result.costs().budget().remainingMicroUsd());
+    assertTrue(cancelledCaller.isCancelled());
+    assertTrue(fixture.replies.isEmpty());
+  }
+
+  @Test
+  void costsQueryAndPlayerRequestRemainIndependent() {
+    var fixture = new Fixture();
+    var playerId = UUID.randomUUID();
+    fixture.service.submit(playerId, "Keep player behavior unchanged");
+    var playerRequest = fixture.connection.sent.getFirst();
+
+    var costs = fixture.service.queryCosts().toCompletableFuture();
+    var costsRequest = fixture.connection.sent.get(1);
+    fixture.connection.deliver(costsResponse(costsRequest));
+
+    assertEquals(AgentRequestService.CostsQueryStatus.AVAILABLE, costs.join().status());
+    assertEquals(1, fixture.service.activeRequestCount());
+    assertTrue(fixture.replies.isEmpty());
+
+    fixture.connection.deliver(
+        completion(playerRequest, playerId, "Unchanged private reply", UUID.randomUUID()));
+    fixture.main.drain();
+
+    assertEquals(List.of(playerId + ":Unchanged private reply"), fixture.replies);
+  }
+
+  @Test
+  void costsTimeoutDropsLateResponseAndAllowsFreshQuery() {
+    var fixture = new Fixture();
+    var first = fixture.service.queryCosts().toCompletableFuture();
+    var firstRequest = fixture.connection.sent.getFirst();
+
+    fixture.timeouts.fire();
+
+    assertEquals(AgentRequestService.CostsQueryStatus.TIMED_OUT, first.join().status());
+    assertEquals(1, fixture.connection.sent.size());
+    var second = fixture.service.queryCosts().toCompletableFuture();
+    assertEquals(2, fixture.connection.sent.size());
+    fixture.connection.deliver(costsResponse(firstRequest));
+    assertFalse(second.isDone());
+    fixture.connection.deliver(costsResponse(fixture.connection.sent.get(1)));
+
+    assertEquals(AgentRequestService.CostsQueryStatus.AVAILABLE, second.join().status());
+    assertTrue(fixture.connection.isOpen());
+    assertTrue(fixture.replies.isEmpty());
+  }
+
+  @Test
+  void costsQueryIsClearedByDetachSocketCloseQuiesceAndServiceClose() {
+    var detached = new Fixture();
+    var detachedResult = detached.service.queryCosts().toCompletableFuture();
+    detached.service.detach(detached.connection);
+    assertEquals(AgentRequestService.CostsQueryStatus.UNAVAILABLE, detachedResult.join().status());
+
+    var disconnected = new Fixture();
+    var disconnectedResult = disconnected.service.queryCosts().toCompletableFuture();
+    disconnected.connection.close();
+    assertEquals(
+        AgentRequestService.CostsQueryStatus.UNAVAILABLE, disconnectedResult.join().status());
+
+    var quiesced = new Fixture();
+    var quiescedResult = quiesced.service.queryCosts().toCompletableFuture();
+    quiesced.gate.transitionTo(AgentState.STOPPING);
+    quiesced.service.quiesce(quiesced.gate.epoch(), OfflineReason.MANUAL);
+    assertEquals(AgentRequestService.CostsQueryStatus.UNAVAILABLE, quiescedResult.join().status());
+
+    var closed = new Fixture();
+    var closedResult = closed.service.queryCosts().toCompletableFuture();
+    closed.service.close();
+    assertEquals(AgentRequestService.CostsQueryStatus.UNAVAILABLE, closedResult.join().status());
+    assertEquals(
+        AgentRequestService.CostsQueryStatus.UNAVAILABLE,
+        closed.service.queryCosts().toCompletableFuture().join().status());
+    assertTrue(closed.replies.isEmpty());
+  }
+
+  @Test
+  void costsSendFailuresAreContainedWithoutPlayerMessages() {
+    var asynchronous = new Fixture();
+    asynchronous.connection.nextSend =
+        CompletableFuture.failedFuture(new IllegalStateException("send failed"));
+
+    var asyncResult = asynchronous.service.queryCosts().toCompletableFuture().join();
+
+    assertEquals(AgentRequestService.CostsQueryStatus.FAILED, asyncResult.status());
+    assertEquals(List.of("RUNTIME_MANAGEMENT_COSTS_SEND_FAILED"), asynchronous.events);
+    assertFalse(asynchronous.connection.isOpen());
+    assertTrue(asynchronous.replies.isEmpty());
+
+    var synchronous = new Fixture();
+    synchronous.connection.throwOnSend = true;
+
+    var syncResult = synchronous.service.queryCosts().toCompletableFuture().join();
+
+    assertEquals(AgentRequestService.CostsQueryStatus.FAILED, syncResult.status());
+    assertEquals(List.of("RUNTIME_MANAGEMENT_COSTS_SEND_FAILED"), synchronous.events);
+    assertFalse(synchronous.connection.isOpen());
+    assertTrue(synchronous.replies.isEmpty());
+  }
+
+  @Test
+  void malformedCostsResponseFailsQueryAndRejectsProtocolConnection() {
+    var fixture = new Fixture();
+    var result = fixture.service.queryCosts().toCompletableFuture();
+    var malformed = costsResponse(fixture.connection.sent.getFirst());
+    malformed.getAsJsonObject("payload").addProperty("unknown", true);
+
+    fixture.connection.deliver(malformed);
+
+    assertEquals(AgentRequestService.CostsQueryStatus.FAILED, result.join().status());
+    assertEquals(List.of("RUNTIME_APPLICATION_MESSAGE_REJECTED"), fixture.events);
+    assertFalse(fixture.connection.isOpen());
+    assertTrue(fixture.replies.isEmpty());
+  }
+
+  @Test
   void timeoutCancelsRuntimeReleasesPlayerAndDropsLateCompletion() {
     var fixture = new Fixture();
     var playerId = UUID.randomUUID();
@@ -720,6 +857,42 @@ class AgentRequestServiceTest {
                 UUID.randomUUID().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8)));
     response.add("payload", payload);
     return response;
+  }
+
+  private static JsonObject costsResponse(String requestEnvelope) {
+    var currentDay = new JsonObject();
+    currentDay.addProperty("period", "2026-07-14");
+    currentDay.addProperty("admittedRequests", 3);
+    currentDay.addProperty("providerCalls", 5);
+    currentDay.addProperty("reportedProviderCalls", 4);
+    currentDay.addProperty("estimatedProviderCalls", 1);
+    currentDay.addProperty("inputTokens", 1200);
+    currentDay.addProperty("outputTokens", 300);
+    currentDay.addProperty("costMicroUsd", 1800);
+
+    var currentMonth = new JsonObject();
+    currentMonth.addProperty("period", "2026-07");
+    currentMonth.addProperty("admittedRequests", 30);
+    currentMonth.addProperty("providerCalls", 42);
+    currentMonth.addProperty("reportedProviderCalls", 40);
+    currentMonth.addProperty("estimatedProviderCalls", 2);
+    currentMonth.addProperty("inputTokens", 12_000);
+    currentMonth.addProperty("outputTokens", 3000);
+    currentMonth.addProperty("costMicroUsd", 18_000);
+
+    var budget = new JsonObject();
+    budget.addProperty("month", "2026-07");
+    budget.addProperty("limitMicroUsd", 50_000_000);
+    budget.addProperty("settledMicroUsd", 18_000);
+    budget.addProperty("activeReservationsMicroUsd", 2000);
+    budget.addProperty("remainingMicroUsd", 49_980_000);
+    budget.addProperty("exhausted", false);
+
+    var payload = new JsonObject();
+    payload.add("currentDay", currentDay);
+    payload.add("currentMonth", currentMonth);
+    payload.add("budget", budget);
+    return response(requestEnvelope, "management.costs.response", payload);
   }
 
   private static ClientStructuredView preview(UUID requestId) {

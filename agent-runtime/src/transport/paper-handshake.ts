@@ -8,6 +8,7 @@ import type { RawData, WebSocket } from "ws";
 import type { RuntimeHealthState } from "../health/runtime-health.js";
 import type { SchemaRegistry } from "../protocol/schema-registry.js";
 import type { AgentRequestService } from "../requests/agent-request-service.js";
+import type { UsageAccounting } from "../usage/usage-accounting.js";
 import { runtimeIdentity, SUPPORTED_PROTOCOL_VERSION } from "../version.js";
 import {
   APPLICATION_MAXIMUM_BYTES,
@@ -73,6 +74,7 @@ export interface PaperHandshakeServiceOptions {
   readonly schemaRegistry: SchemaRegistry;
   readonly health: RuntimeHealthState;
   readonly agentRequests: AgentRequestService;
+  readonly usage: UsageAccounting;
   readonly now?: () => Date;
   readonly randomBytes?: (size: number) => Buffer;
   readonly randomUuid?: () => string;
@@ -136,6 +138,7 @@ export class PaperHandshakeService {
   readonly #randomUuid: () => string;
   readonly #replayCache: HandshakeReplayCache;
   readonly #agentRequests: AgentRequestService;
+  readonly #usage: UsageAccounting;
   readonly #applicationProtocol: ApplicationEnvelopeProtocol;
   readonly #connections = new Set<WebSocket>();
   #authenticatedSocket: WebSocket | undefined;
@@ -156,6 +159,7 @@ export class PaperHandshakeService {
         maximumEntries: REPLAY_CACHE_MAXIMUM_ENTRIES,
       });
     this.#agentRequests = options.agentRequests;
+    this.#usage = options.usage;
     this.#applicationProtocol = new ApplicationEnvelopeProtocol({
       serverId: options.serverId,
       schemaRegistry: options.schemaRegistry,
@@ -260,6 +264,18 @@ export class PaperHandshakeService {
       }
 
       const message = this.#applicationProtocol.parse(source);
+      if (message.type === "management.costs.request") {
+        const snapshot = this.#usage.snapshot(this.#now().getTime());
+        this.#sendApplicationResponse(socket, message.requestId, {
+          type: "management.costs.response",
+          payload: {
+            currentDay: snapshot.currentDay,
+            currentMonth: snapshot.currentMonth,
+            budget: snapshot.budget,
+          },
+        });
+        return;
+      }
       if (message.type === "agent.cancel") {
         this.#agentRequests.cancel(message.cancellation.requestId, message.cancellation.playerUuid);
         return;
@@ -274,25 +290,7 @@ export class PaperHandshakeService {
       const requestId =
         message.type === "session.resume" ? message.resume.requestId : message.request.requestId;
       const respond = (terminal: Parameters<ApplicationEnvelopeProtocol["createResponse"]>[1]) => {
-        if (this.#authenticatedSocket !== socket || socket.readyState !== socket.OPEN) {
-          return;
-        }
-        let response: Record<string, unknown>;
-        try {
-          response = this.#applicationProtocol.createResponse(requestId, terminal);
-        } catch {
-          socket.terminate();
-          return;
-        }
-        try {
-          socket.send(JSON.stringify(response), (error) => {
-            if (error !== undefined && error !== null) {
-              socket.terminate();
-            }
-          });
-        } catch {
-          socket.terminate();
-        }
+        this.#sendApplicationResponse(socket, requestId, terminal);
       };
       if (message.type === "session.resume") {
         this.#agentRequests.resume(message.resume, respond);
@@ -304,6 +302,32 @@ export class PaperHandshakeService {
         socket,
         error instanceof ApplicationProtocolFailure ? error.code : "APPLICATION_MESSAGE_INVALID",
       );
+    }
+  }
+
+  #sendApplicationResponse(
+    socket: WebSocket,
+    requestId: string,
+    terminal: Parameters<ApplicationEnvelopeProtocol["createResponse"]>[1],
+  ): void {
+    if (this.#authenticatedSocket !== socket || socket.readyState !== socket.OPEN) {
+      return;
+    }
+    let response: Record<string, unknown>;
+    try {
+      response = this.#applicationProtocol.createResponse(requestId, terminal);
+    } catch {
+      socket.terminate();
+      return;
+    }
+    try {
+      socket.send(JSON.stringify(response), (error) => {
+        if (error !== undefined && error !== null) {
+          socket.terminate();
+        }
+      });
+    } catch {
+      socket.terminate();
     }
   }
 

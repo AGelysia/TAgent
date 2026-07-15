@@ -11,5 +11,15 @@
   "dependencies": {
     "litematica": null,
     "malilib": null
+  },
+  "diagnostics": {
+    "litematicaAdapter": {
+      "status": "NOT_INSTALLED",
+      "minecraftVersion": "1.21.11",
+      "fabricLoaderVersion": "0.19.3",
+      "litematicaVersion": null,
+      "malilibVersion": null,
+      "adapterId": null
+    }
   }
 }

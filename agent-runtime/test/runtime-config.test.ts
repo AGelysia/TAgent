@@ -55,13 +55,39 @@ describe("runtime configuration", () => {
 
     const loaded = await loadRuntimeConfig({ configPath, environment: runtimeEnvironment() });
 
+    expect(loaded.config.configVersion).toBe(2);
     expect(loaded.config.model.apiKey).toBe(TEST_API_KEY);
+    expect(loaded.config.model.inputMicroUsdPerMillionTokens).toBe(1_000_000);
+    expect(loaded.config.model.outputMicroUsdPerMillionTokens).toBe(4_000_000);
+    expect(loaded.config.limits.providerRoundReservationMicroUsd).toBe(50_000);
     expect(loaded.config.transport.host).toBe("127.0.0.1");
     expect(loaded.paths.rootDirectory).toBe(directory);
     expect(loaded.paths.sqlite).toBe(join(directory, "data/runtime.db"));
     expect(loaded.paths.logDirectory).toBe(join(directory, "logs"));
     expect(loaded.paths.knowledgeRoots).toEqual([]);
     expect(loaded.warnings).toEqual([]);
+  });
+
+  it("rejects legacy configVersion 1 with a stable upgrade diagnostic", async () => {
+    const directory = await fixtureDirectory();
+    const configPath = await writeRuntimeConfig(
+      directory,
+      validRuntimeConfig().replace("configVersion: 2", "configVersion: 1"),
+      "legacy-v1.yml",
+    );
+
+    const error = await expectStartupError(
+      loadRuntimeConfig({ configPath, environment: runtimeEnvironment() }),
+      "CONFIG_VERSION_UNSUPPORTED",
+      "/configVersion",
+    );
+    expect(error.toSafeDiagnostic()).toEqual({
+      code: "CONFIG_VERSION_UNSUPPORTED",
+      stage: "config",
+      field: "/configVersion",
+      message:
+        "Runtime configuration version 1 is no longer supported. Upgrade to configVersion 2.",
+    });
   });
 
   it("resolves optional bounded knowledge roots without changing legacy configuration", async () => {
@@ -118,6 +144,34 @@ describe("runtime configuration", () => {
       "/",
     );
     expect(JSON.stringify(unknownError.toSafeDiagnostic())).not.toContain(unknownSecretKey);
+  });
+
+  it("requires bounded micro-USD pricing and an exact monthly budget", async () => {
+    const directory = await fixtureDirectory();
+    const fractionalBudget = await writeRuntimeConfig(
+      directory,
+      validRuntimeConfig().replace("monthlyBudgetUsd: 10", "monthlyBudgetUsd: 0.0000001"),
+      "fractional-budget.yml",
+    );
+    const zeroReservation = await writeRuntimeConfig(
+      directory,
+      validRuntimeConfig().replace(
+        "providerRoundReservationMicroUsd: 50000",
+        "providerRoundReservationMicroUsd: 0",
+      ),
+      "zero-reservation.yml",
+    );
+
+    await expectStartupError(
+      loadRuntimeConfig({ configPath: fractionalBudget, environment: runtimeEnvironment() }),
+      "CONFIG_SCHEMA_INVALID",
+      "/limits/monthlyBudgetUsd",
+    );
+    await expectStartupError(
+      loadRuntimeConfig({ configPath: zeroReservation, environment: runtimeEnvironment() }),
+      "CONFIG_SCHEMA_INVALID",
+      "/limits/providerRoundReservationMicroUsd",
+    );
   });
 
   it("rejects partial, recursive, duplicate, and path-escape configuration syntax", async () => {

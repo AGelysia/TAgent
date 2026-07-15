@@ -252,18 +252,18 @@ function healthFailure(status: number): ModelProviderHealthResult {
 
 function generationFailure(status: number): ModelGenerationError {
   if (status === 401 || status === 403) {
-    return new ModelGenerationError("MODEL_AUTHENTICATION_FAILED");
+    return new ModelGenerationError("MODEL_AUTHENTICATION_FAILED", "NOT_BILLABLE");
   }
   if (status === 404) {
-    return new ModelGenerationError("MODEL_UNAVAILABLE");
+    return new ModelGenerationError("MODEL_UNAVAILABLE", "NOT_BILLABLE");
   }
   if (status === 429) {
-    return new ModelGenerationError("MODEL_RATE_LIMITED");
+    return new ModelGenerationError("MODEL_RATE_LIMITED", "NOT_BILLABLE");
   }
   if (status === 408 || status >= 500) {
-    return new ModelGenerationError("PROVIDER_UNAVAILABLE");
+    return new ModelGenerationError("PROVIDER_UNAVAILABLE", "NOT_BILLABLE");
   }
-  return new ModelGenerationError("MODEL_RESPONSE_INVALID");
+  return new ModelGenerationError("MODEL_RESPONSE_INVALID", "NOT_BILLABLE");
 }
 
 function hasUnpairedSurrogate(value: string): boolean {

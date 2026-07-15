@@ -45,6 +45,8 @@ class PaperStartupCoordinatorTest {
     assertEquals(AgentHealth.DEGRADED, fixture.coordinator.diagnostics().health());
     assertEquals(List.of(AgentHealth.DEGRADED), fixture.events.availableHealth);
     assertTrue(fixture.coordinator.operationalGate().tryAcquire().isPresent());
+    assertEquals(1, fixture.publicationCalls.get());
+    assertEquals(0, fixture.discardCalls.get());
     fixture.close();
   }
 
@@ -71,6 +73,8 @@ class PaperStartupCoordinatorTest {
     assertEquals(0, runtimeFailure.commands.registerCalls);
     assertEquals(AgentState.UNREGISTERED, runtimeFailure.coordinator.diagnostics().state());
     assertEquals("TOKEN_AUTH_FAILED", runtimeFailure.coordinator.diagnostics().failureCode());
+    assertEquals(0, runtimeFailure.publicationCalls.get());
+    assertEquals(1, runtimeFailure.discardCalls.get());
     runtimeFailure.close();
   }
 
@@ -187,6 +191,8 @@ class PaperStartupCoordinatorTest {
     assertEquals(DesiredMode.DISABLED, fixture.coordinator.diagnostics().desiredMode());
     assertEquals("STATE_PERSISTENCE_FAILED", fixture.coordinator.diagnostics().failureCode());
     assertTrue(fixture.commands.registered);
+    assertEquals(1, fixture.publicationCalls.get());
+    assertEquals(1, fixture.discardCalls.get());
     fixture.close();
   }
 
@@ -432,6 +438,8 @@ class PaperStartupCoordinatorTest {
     private final FakeStore store;
     private final List<String> warnings;
     private final AtomicInteger checkCalls = new AtomicInteger();
+    private final AtomicInteger publicationCalls = new AtomicInteger();
+    private final AtomicInteger discardCalls = new AtomicInteger();
     private volatile StartupFailure checkFailure;
     private PaperStartupCoordinator coordinator;
 
@@ -446,7 +454,22 @@ class PaperStartupCoordinatorTest {
         throw checkFailure;
       }
       return new CoreReadiness(
-          settings(), warnings, store.load(), store, new AdminPolicy(Set.of(), false));
+          settings(),
+          warnings,
+          store.load(),
+          store,
+          new AdminPolicy(Set.of(), false),
+          new CoreReadiness.Publication() {
+            @Override
+            public void publish() {
+              publicationCalls.incrementAndGet();
+            }
+
+            @Override
+            public void discard() {
+              discardCalls.incrementAndGet();
+            }
+          });
     }
 
     private void finishMainTransition() throws InterruptedException {

@@ -71,13 +71,20 @@ export interface ModelProvider extends ModelProviderHealthCheck {
   generate(request: ModelGenerationRequest): Promise<ModelGenerationResult>;
 }
 
+export type ModelGenerationAccountingDisposition = "NOT_BILLABLE" | "BILLABILITY_UNKNOWN";
+
 export class ModelGenerationError extends Error {
   public readonly code: ModelGenerationFailureCode;
+  public readonly accountingDisposition: ModelGenerationAccountingDisposition;
 
-  public constructor(code: ModelGenerationFailureCode) {
+  public constructor(
+    code: ModelGenerationFailureCode,
+    accountingDisposition: ModelGenerationAccountingDisposition = "BILLABILITY_UNKNOWN",
+  ) {
     super(code);
     this.name = "ModelGenerationError";
     this.code = code;
+    this.accountingDisposition = accountingDisposition;
   }
 }
 
@@ -87,6 +94,6 @@ export class UnsupportedModelProvider implements ModelProvider {
   }
 
   public async generate(): Promise<ModelGenerationResult> {
-    throw new ModelGenerationError("PROVIDER_UNAVAILABLE");
+    throw new ModelGenerationError("PROVIDER_UNAVAILABLE", "NOT_BILLABLE");
   }
 }

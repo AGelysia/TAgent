@@ -21,11 +21,14 @@ import { SqliteConversationRepository } from "../src/storage/conversation-reposi
 import { migrateRuntimeStorage } from "../src/storage/migrations.js";
 import { ToolRegistry } from "../src/tools/tool-registry.js";
 import type { ToolExecutionResult } from "../src/tools/tool-types.js";
+import { SqliteUsageAccounting, type UsageAccounting } from "../src/usage/usage-accounting.js";
 
 const PLAYER_ONE = "11111111-1111-4111-8111-111111111111";
 const PLAYER_TWO = "22222222-2222-4222-8222-222222222222";
+const PLAYER_THREE = "66666666-6666-4666-8666-666666666666";
 const PERSISTENT_REQUEST_ONE = "33333333-3333-4333-8333-333333333333";
 const PERSISTENT_REQUEST_TWO = "44444444-4444-4444-8444-444444444444";
+const PERSISTENT_REQUEST_THREE = "77777777-7777-4777-8777-777777777777";
 const tools = new ToolRegistry(await SchemaRegistry.load());
 
 function agentService(options: Omit<AgentRequestServiceOptions, "tools">): AgentRequestService {
@@ -34,7 +37,7 @@ function agentService(options: Omit<AgentRequestServiceOptions, "tools">): Agent
 
 function config(overrides: Partial<RuntimeConfig["limits"]> = {}): RuntimeConfig {
   return {
-    configVersion: 1,
+    configVersion: 2,
     server: { id: "test-server" },
     transport: {
       host: "127.0.0.1",
@@ -46,6 +49,8 @@ function config(overrides: Partial<RuntimeConfig["limits"]> = {}): RuntimeConfig
       apiKey: "test-api-key-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ",
       model: "test-model",
       timeoutSeconds: 2,
+      inputMicroUsdPerMillionTokens: 1_000_000,
+      outputMicroUsdPerMillionTokens: 4_000_000,
     },
     storage: { sqlitePath: "./data/runtime.db" },
     logging: { directory: "./logs", level: "info" },
@@ -58,6 +63,7 @@ function config(overrides: Partial<RuntimeConfig["limits"]> = {}): RuntimeConfig
       perPlayerCooldownSeconds: 0,
       dailyRequestsPerPlayer: 100,
       monthlyBudgetUsd: 10,
+      providerRoundReservationMicroUsd: 50_000,
       ...overrides,
     },
     privacy: {
@@ -269,6 +275,72 @@ describe("Agent request service", () => {
 
     expect(database.prepare("SELECT COUNT(*) AS count FROM sessions").get()?.["count"]).toBe(0);
     expect(database.prepare("SELECT COUNT(*) AS count FROM messages").get()?.["count"]).toBe(0);
+    database.close();
+  });
+
+  it("cancels queued work before active work without draining the queue", async () => {
+    const database = new DatabaseSync(":memory:");
+    migrateRuntimeStorage(database, "2026-07-14T00:00:00.000Z");
+    const usage = new SqliteUsageAccounting(database, {
+      serverId: "test-server",
+      provider: "openai",
+      model: "test-model",
+      pricing: {
+        inputMicroUsdPerMillionTokens: 1_000_000,
+        outputMicroUsdPerMillionTokens: 4_000_000,
+      },
+      limits: {
+        dailyRequestsPerPlayer: 100,
+        monthlyBudgetMicroUsd: 1_000_000,
+        providerRoundReservationMicroUsd: 50_000,
+      },
+    });
+    const pending = deferred<ModelGenerationResult>();
+    const adapter = provider(() => pending.promise);
+    const service = agentService({
+      provider: adapter,
+      config: config({ maxConcurrentRequests: 1, maxQueuedRequests: 2 }),
+      usage,
+    });
+
+    service.submit(request(PERSISTENT_REQUEST_ONE), () => undefined);
+    service.submit(request(PERSISTENT_REQUEST_TWO, PLAYER_TWO), () => undefined);
+    service.submit(request(PERSISTENT_REQUEST_THREE, PLAYER_THREE), () => undefined);
+    await flush();
+    expect(service.activeCount).toBe(1);
+    expect(service.queuedCount).toBe(2);
+
+    service.cancelAll();
+
+    expect(service.activeCount).toBe(0);
+    expect(service.queuedCount).toBe(0);
+    expect(adapter.generate).toHaveBeenCalledOnce();
+    expect(usage.snapshot(Date.now())).toMatchObject({
+      currentMonth: { providerCalls: 1, estimatedProviderCalls: 1 },
+      budget: { activeReservationsMicroUsd: 0, settledMicroUsd: 50_000 },
+    });
+    expect(
+      database
+        .prepare(
+          `SELECT state, COUNT(*) AS count FROM usage_round_reservations
+           GROUP BY state ORDER BY state`,
+        )
+        .all(),
+    ).toEqual([
+      { state: "RELEASED", count: 2 },
+      { state: "SETTLED", count: 1 },
+    ]);
+
+    pending.resolve({
+      type: "final",
+      fallbackText: "late",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    await vi.waitFor(() =>
+      expect(
+        database.prepare("SELECT usage_kind FROM provider_usage_events").get()?.["usage_kind"],
+      ).toBe("REPORTED"),
+    );
     database.close();
   });
 
@@ -910,6 +982,322 @@ describe("Agent request service", () => {
       }),
     ).toBe("ignored");
     expect(adapter.generate).toHaveBeenCalledOnce();
+  });
+
+  it("accounts each provider round in a Tool loop and estimates a response without usage", async () => {
+    const database = new DatabaseSync(":memory:");
+    migrateRuntimeStorage(database, "2026-07-14T00:00:00.000Z");
+    const usage = new SqliteUsageAccounting(database, {
+      serverId: "test-server",
+      provider: "openai",
+      model: "test-model",
+      pricing: {
+        inputMicroUsdPerMillionTokens: 1_000_000,
+        outputMicroUsdPerMillionTokens: 4_000_000,
+      },
+      limits: {
+        dailyRequestsPerPlayer: 100,
+        monthlyBudgetMicroUsd: 10_000_000,
+        providerRoundReservationMicroUsd: 50_000,
+      },
+    });
+    let generation = 0;
+    const adapter = provider(async () => {
+      generation += 1;
+      return generation === 1
+        ? {
+            type: "tool_call",
+            providerCallId: "provider-call-1",
+            providerName: "server_info_read",
+            arguments: {},
+            continuation: { provider: "openai", items: [] },
+            usage: { inputTokens: 10, outputTokens: 2 },
+          }
+        : { type: "final", fallbackText: "One player is online." };
+    });
+    const ids = [
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    ];
+    const service = agentService({
+      provider: adapter,
+      config: config(),
+      usage,
+      now: () => Date.parse("2026-07-14T03:04:05.000Z"),
+      randomUuid: () => ids.shift() ?? "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    });
+    const responses: AgentRuntimeResponse[] = [];
+    service.submit(request(PERSISTENT_REQUEST_ONE), (response) => responses.push(response));
+    await vi.waitFor(() => expect(responses[0]?.type).toBe("tool.call"));
+    const call = responses[0];
+    if (call?.type !== "tool.call") {
+      throw new Error("missing Tool call");
+    }
+    expect(
+      service.acceptToolResult(PERSISTENT_REQUEST_ONE, {
+        toolCallId: call.payload.toolCallId,
+        sessionId: call.payload.sessionId,
+        playerUuid: PLAYER_ONE,
+        tool: call.payload.tool,
+        sequence: 0,
+        status: "succeeded",
+        source: "paper_api",
+        trust: "authoritative",
+        result: serverInfoResult(),
+        error: null,
+      }),
+    ).toBe("accepted");
+    await vi.waitFor(() => expect(service.activeCount).toBe(0));
+
+    expect(responses.at(-1)).toMatchObject({ type: "agent.complete" });
+    expect(
+      database
+        .prepare(
+          `SELECT provider_round, usage_kind, input_tokens, output_tokens, cost_micro_usd
+           FROM provider_usage_events ORDER BY provider_round`,
+        )
+        .all(),
+    ).toEqual([
+      {
+        provider_round: 0,
+        usage_kind: "REPORTED",
+        input_tokens: 10,
+        output_tokens: 2,
+        cost_micro_usd: 18,
+      },
+      {
+        provider_round: 1,
+        usage_kind: "ESTIMATED",
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_micro_usd: 50_000,
+      },
+    ]);
+    expect(usage.snapshot(Date.parse("2026-07-14T03:04:05.000Z")).budget).toMatchObject({
+      settledMicroUsd: 50_018,
+      activeReservationsMicroUsd: 0,
+    });
+    database.close();
+  });
+
+  it("releases a failed provider round and rejects new work with an explicit budget error", async () => {
+    const database = new DatabaseSync(":memory:");
+    migrateRuntimeStorage(database, "2026-07-14T00:00:00.000Z");
+    const usage = new SqliteUsageAccounting(database, {
+      serverId: "test-server",
+      provider: "openai",
+      model: "test-model",
+      pricing: {
+        inputMicroUsdPerMillionTokens: 1_000_000,
+        outputMicroUsdPerMillionTokens: 4_000_000,
+      },
+      limits: {
+        dailyRequestsPerPlayer: 100,
+        monthlyBudgetMicroUsd: 50_000,
+        providerRoundReservationMicroUsd: 50_000,
+      },
+    });
+    const failing = provider(async () => {
+      throw new ModelGenerationError("PROVIDER_UNAVAILABLE", "NOT_BILLABLE");
+    });
+    const failedService = agentService({ provider: failing, config: config(), usage });
+    const failedResponses: AgentTerminalResponse[] = [];
+    failedService.submit(request(PERSISTENT_REQUEST_ONE), (response) =>
+      failedResponses.push(response),
+    );
+    await vi.waitFor(() => expect(failedService.activeCount).toBe(0));
+    expect(failedResponses).toMatchObject([
+      { type: "agent.error", payload: { code: "MODEL_UNAVAILABLE" } },
+    ]);
+    expect(usage.snapshot(Date.now()).budget).toMatchObject({
+      settledMicroUsd: 0,
+      activeReservationsMicroUsd: 0,
+    });
+
+    const occupying = usage.admitRequest({
+      requestId: "55555555-5555-4555-8555-555555555555",
+      playerUuid: PLAYER_TWO,
+      timestamp: Date.now(),
+    });
+    expect(occupying).toEqual({ accepted: true });
+    const blockedProvider = provider(async () => ({ fallbackText: "must not run" }));
+    const blockedService = agentService({ provider: blockedProvider, config: config(), usage });
+    const blockedResponses: AgentTerminalResponse[] = [];
+    blockedService.submit(request(PERSISTENT_REQUEST_TWO), (response) =>
+      blockedResponses.push(response),
+    );
+    expect(blockedResponses).toMatchObject([
+      { type: "agent.error", payload: { code: "BUDGET_EXCEEDED", retryable: false } },
+    ]);
+    expect(blockedProvider.generate).not.toHaveBeenCalled();
+    database.close();
+  });
+
+  it("accounts a billable provider response that arrives after cancellation", async () => {
+    const database = new DatabaseSync(":memory:");
+    migrateRuntimeStorage(database, "2026-07-14T00:00:00.000Z");
+    const usage = new SqliteUsageAccounting(database, {
+      serverId: "test-server",
+      provider: "openai",
+      model: "test-model",
+      pricing: {
+        inputMicroUsdPerMillionTokens: 1_000_000,
+        outputMicroUsdPerMillionTokens: 4_000_000,
+      },
+      limits: {
+        dailyRequestsPerPlayer: 100,
+        monthlyBudgetMicroUsd: 1_000_000,
+        providerRoundReservationMicroUsd: 50_000,
+      },
+    });
+    const late = deferred<ModelGenerationResult>();
+    const service = agentService({
+      provider: provider(() => late.promise),
+      config: config(),
+      usage,
+    });
+    service.submit(request(PERSISTENT_REQUEST_ONE), () => undefined);
+    await flush();
+    expect(service.cancel(PERSISTENT_REQUEST_ONE, PLAYER_ONE)).toBe(true);
+    expect(usage.snapshot(Date.now()).budget.activeReservationsMicroUsd).toBe(0);
+
+    late.resolve({
+      type: "final",
+      fallbackText: "late answer",
+      usage: { inputTokens: 3, outputTokens: 1 },
+    });
+    await vi.waitFor(() =>
+      expect(
+        database.prepare("SELECT usage_kind FROM provider_usage_events").get()?.["usage_kind"],
+      ).toBe("REPORTED"),
+    );
+    expect(usage.snapshot(Date.now()).currentMonth).toMatchObject({
+      providerCalls: 1,
+      inputTokens: 3,
+      outputTokens: 1,
+      costMicroUsd: 7,
+    });
+    database.close();
+  });
+
+  it("bounds close when a started provider call never returns and settles its exposure", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-14T12:00:00.000Z"));
+    const database = new DatabaseSync(":memory:");
+    migrateRuntimeStorage(database, "2026-07-14T00:00:00.000Z");
+    const usage = new SqliteUsageAccounting(database, {
+      serverId: "test-server",
+      provider: "openai",
+      model: "test-model",
+      pricing: {
+        inputMicroUsdPerMillionTokens: 1_000_000,
+        outputMicroUsdPerMillionTokens: 4_000_000,
+      },
+      limits: {
+        dailyRequestsPerPlayer: 100,
+        monthlyBudgetMicroUsd: 1_000_000,
+        providerRoundReservationMicroUsd: 50_000,
+      },
+    });
+    const service = agentService({
+      provider: provider(() => new Promise<ModelGenerationResult>(() => undefined)),
+      config: config(),
+      usage,
+    });
+
+    service.submit(request(PERSISTENT_REQUEST_ONE), () => undefined);
+    await flush();
+    expect(
+      database
+        .prepare(
+          `SELECT state, started_at FROM usage_round_reservations
+           WHERE server_id = ? AND request_id = ? AND provider_round = 0`,
+        )
+        .get("test-server", PERSISTENT_REQUEST_ONE),
+    ).toMatchObject({ state: "ACTIVE", started_at: "2026-07-14T12:00:00.000Z" });
+
+    let closed = false;
+    const closing = service.close().then(() => {
+      closed = true;
+    });
+    await flush();
+
+    expect(service.activeCount).toBe(0);
+    expect(usage.snapshot(Date.now())).toMatchObject({
+      budget: { activeReservationsMicroUsd: 0, settledMicroUsd: 50_000 },
+      currentMonth: { estimatedProviderCalls: 1, costMicroUsd: 50_000 },
+    });
+    expect(
+      database
+        .prepare(
+          `SELECT r.state, e.usage_kind
+           FROM usage_round_reservations r
+           JOIN provider_usage_events e
+             ON e.server_id = r.server_id AND e.request_id = r.request_id
+               AND e.provider_round = r.provider_round
+           WHERE r.server_id = ? AND r.request_id = ? AND r.provider_round = 0`,
+        )
+        .get("test-server", PERSISTENT_REQUEST_ONE),
+    ).toEqual({ state: "SETTLED", usage_kind: "ESTIMATED" });
+    expect(closed).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await closing;
+    expect(closed).toBe(true);
+    database.close();
+  });
+
+  it("fails closed after a durable usage write fails", async () => {
+    const database = new DatabaseSync(":memory:");
+    migrateRuntimeStorage(database, "2026-07-14T00:00:00.000Z");
+    const durable = new SqliteUsageAccounting(database, {
+      serverId: "test-server",
+      provider: "openai",
+      model: "test-model",
+      pricing: {
+        inputMicroUsdPerMillionTokens: 1_000_000,
+        outputMicroUsdPerMillionTokens: 4_000_000,
+      },
+      limits: {
+        dailyRequestsPerPlayer: 100,
+        monthlyBudgetMicroUsd: 1_000_000,
+        providerRoundReservationMicroUsd: 50_000,
+      },
+    });
+    const broken = new Proxy(durable, {
+      get(target, property) {
+        if (property === "recordProviderUsage") {
+          return () => {
+            throw new Error("simulated accounting write failure");
+          };
+        }
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as UsageAccounting;
+    const adapter = provider(async () => ({
+      type: "final",
+      fallbackText: "provider response",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    }));
+    const service = agentService({ provider: adapter, config: config(), usage: broken });
+    const responses: AgentTerminalResponse[] = [];
+
+    service.submit(request(PERSISTENT_REQUEST_ONE), (response) => responses.push(response));
+    await vi.waitFor(() => expect(service.activeCount).toBe(0));
+    service.submit(request(PERSISTENT_REQUEST_TWO, PLAYER_TWO), (response) =>
+      responses.push(response),
+    );
+
+    expect(responses).toMatchObject([
+      { type: "agent.error", payload: { code: "RUNTIME_INTERNAL_ERROR" } },
+      { type: "agent.error", payload: { code: "RUNTIME_INTERNAL_ERROR" } },
+    ]);
+    expect(adapter.generate).toHaveBeenCalledOnce();
+    database.close();
   });
 });
 

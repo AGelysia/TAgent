@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.gson.JsonParser;
+import dev.minecraftagent.client.litematica.LitematicaAdapterDiagnostic;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 import java.util.UUID;
@@ -116,13 +117,14 @@ class ClientPayloadCodecTest {
   void emitsOnlyClosedPresentationFactsFromTheClient() {
     var advertisement =
         new ClientHandshakeAdvertisement(
-            "0.1.0", 1, 1, 2, 0, 0, Optional.empty(), Optional.empty());
+            "0.1.0", 1, 1, 2, 0, 0, Optional.empty(), Optional.empty(), notInstalled());
     var hello =
         JsonParser.parseString(text(codec.encodeHello(MESSAGE_ID, advertisement)))
             .getAsJsonObject();
     assertEquals("client.hello", hello.get("type").getAsString());
+    assertEquals("1.0", hello.get("clientPayloadVersion").getAsString());
     assertEquals(
-        "1.0", hello.getAsJsonObject("payload").get("clientProtocolVersion").getAsString());
+        "1.1", hello.getAsJsonObject("payload").get("clientProtocolVersion").getAsString());
     assertEquals(
         2,
         hello
@@ -136,6 +138,21 @@ class ClientPayloadCodecTest {
             .getAsJsonObject("dependencies")
             .get("litematica")
             .isJsonNull());
+    assertEquals(
+        "NOT_INSTALLED",
+        hello
+            .getAsJsonObject("payload")
+            .getAsJsonObject("diagnostics")
+            .getAsJsonObject("litematicaAdapter")
+            .get("status")
+            .getAsString());
+    assertEquals(
+        6,
+        hello
+            .getAsJsonObject("payload")
+            .getAsJsonObject("diagnostics")
+            .getAsJsonObject("litematicaAdapter")
+            .size());
     assertEquals(4, hello.size());
 
     var ack =
@@ -156,7 +173,17 @@ class ClientPayloadCodecTest {
         IllegalArgumentException.class,
         () ->
             new ClientHandshakeAdvertisement(
-                "0.1.0", 1, 1, 3, 0, 0, Optional.empty(), Optional.empty()));
+                "0.1.0", 1, 1, 3, 0, 0, Optional.empty(), Optional.empty(), notInstalled()));
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new LitematicaAdapterDiagnostic(
+                LitematicaAdapterDiagnostic.Status.NOT_INSTALLED,
+                "/home/player/.minecraft",
+                "0.19.3",
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty()));
   }
 
   @Test
@@ -165,7 +192,41 @@ class ClientPayloadCodecTest {
         IllegalArgumentException.class,
         () ->
             new ClientHandshakeAdvertisement(
-                "0.1.0", 1, 1, 1, 1, 1, Optional.of("0.26.12"), Optional.empty()));
+                "0.1.0",
+                1,
+                1,
+                1,
+                1,
+                1,
+                Optional.of("0.26.12"),
+                Optional.empty(),
+                new LitematicaAdapterDiagnostic(
+                    LitematicaAdapterDiagnostic.Status.MISSING_DEPENDENCY,
+                    "1.21.11",
+                    "0.19.3",
+                    Optional.of("0.26.12"),
+                    Optional.empty(),
+                    Optional.empty())));
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new ClientHandshakeAdvertisement(
+                "0.1.0",
+                1,
+                1,
+                1,
+                1,
+                1,
+                Optional.of("0.26.11"),
+                Optional.of("0.27.16"),
+                new LitematicaAdapterDiagnostic(
+                    LitematicaAdapterDiagnostic.Status.UNSUPPORTED_VERSION,
+                    "1.21.11",
+                    "0.19.3",
+                    Optional.of("0.26.11"),
+                    Optional.of("0.27.16"),
+                    Optional.empty())));
   }
 
   private ClientServerMessage decode(String type, String payload) {
@@ -194,5 +255,15 @@ class ClientPayloadCodecTest {
   private static String text(byte[] bytes) {
     assertTrue(bytes.length > 0 && bytes[0] == '{');
     return new String(bytes, StandardCharsets.UTF_8);
+  }
+
+  private static LitematicaAdapterDiagnostic notInstalled() {
+    return new LitematicaAdapterDiagnostic(
+        LitematicaAdapterDiagnostic.Status.NOT_INSTALLED,
+        "1.21.11",
+        "0.19.3",
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty());
   }
 }

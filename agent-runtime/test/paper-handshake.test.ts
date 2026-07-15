@@ -52,6 +52,7 @@ interface CloseDetails {
 interface StartFixtureOptions {
   readonly logger?: RuntimeLogger;
   readonly modelProvider?: ModelProvider;
+  readonly configSource?: (port: number) => string;
 }
 
 function healthyProvider(): ModelProviderHealthCheck {
@@ -168,6 +169,20 @@ function sessionResume(
   };
 }
 
+function managementCostsRequest(): Record<string, unknown> {
+  const requestId = uuid();
+  return {
+    protocolVersion: "1.0",
+    messageId: requestId,
+    requestId,
+    serverId: "test-server",
+    type: "management.costs.request",
+    timestamp: NOW.toISOString(),
+    nonce: Buffer.alloc(16, nextUuidSuffix).toString("base64url"),
+    payload: {},
+  };
+}
+
 function toolResult(callEnvelope: Record<string, unknown>): Record<string, unknown> {
   const call = asRecord(callEnvelope["payload"]);
   return {
@@ -201,10 +216,10 @@ function toolResult(callEnvelope: Record<string, unknown>): Record<string, unkno
   };
 }
 
-async function createConfig(port: number): Promise<string> {
+async function createConfig(port: number, source = validRuntimeConfig(port)): Promise<string> {
   const directory = await temporaryRuntimeDirectory();
   temporaryDirectories.push(directory);
-  return writeRuntimeConfig(directory, validRuntimeConfig(port));
+  return writeRuntimeConfig(directory, source);
 }
 
 async function startFixture(options: StartFixtureOptions = {}): Promise<{
@@ -212,7 +227,10 @@ async function startFixture(options: StartFixtureOptions = {}): Promise<{
   readonly url: string;
 }> {
   const port = await findAvailablePort();
-  const configPath = await createConfig(port);
+  const configPath = await createConfig(
+    port,
+    options.configSource?.(port) ?? validRuntimeConfig(port),
+  );
   const runtime = await startRuntime({
     configPath,
     environment: runtimeEnvironment(),
@@ -558,6 +576,89 @@ describe("Paper WebSocket handshake", () => {
     expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 
+  it("serves the bounded durable costs snapshot over the authenticated channel", async () => {
+    const modelProvider: ModelProvider = {
+      check: vi.fn().mockResolvedValue({ ok: true }),
+      generate: vi.fn().mockResolvedValue({
+        type: "final",
+        fallbackText: "accounted answer",
+        usage: { inputTokens: 5, outputTokens: 4 },
+      }),
+    };
+    const { url } = await startFixture({ modelProvider });
+    const socket = await openClient(url);
+    await exchange(socket, paperHello());
+    expect(asRecord(await exchange(socket, agentRequest("account this")))["type"]).toBe(
+      "agent.complete",
+    );
+
+    const request = managementCostsRequest();
+    const response = asRecord(await exchange(socket, request));
+    const responsePayload = asRecord(response["payload"]);
+    expect(response).toMatchObject({
+      requestId: request["requestId"],
+      serverId: "test-server",
+      type: "management.costs.response",
+      payload: {
+        currentDay: {
+          period: "2026-07-12",
+          admittedRequests: 1,
+          providerCalls: 1,
+          reportedProviderCalls: 1,
+          estimatedProviderCalls: 0,
+          inputTokens: 5,
+          outputTokens: 4,
+          costMicroUsd: 21,
+        },
+        currentMonth: {
+          period: "2026-07",
+          admittedRequests: 1,
+          providerCalls: 1,
+          costMicroUsd: 21,
+        },
+        budget: {
+          month: "2026-07",
+          limitMicroUsd: 10_000_000,
+          settledMicroUsd: 21,
+          activeReservationsMicroUsd: 0,
+          remainingMicroUsd: 9_999_979,
+          exhausted: false,
+        },
+      },
+    });
+    const registry = await SchemaRegistry.load();
+    expect(registry.validate("envelope.schema.json", response).valid).toBe(true);
+    expect(registry.validate("management-costs-response.schema.json", responsePayload).valid).toBe(
+      true,
+    );
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("returns a budget error without closing the authenticated channel", async () => {
+    const modelProvider: ModelProvider = {
+      check: vi.fn().mockResolvedValue({ ok: true }),
+      generate: vi.fn().mockResolvedValue({ type: "final", fallbackText: "must not run" }),
+    };
+    const { url } = await startFixture({
+      modelProvider,
+      configSource: (port) =>
+        validRuntimeConfig(port).replace("monthlyBudgetUsd: 10", "monthlyBudgetUsd: 0"),
+    });
+    const socket = await openClient(url);
+    await exchange(socket, paperHello());
+
+    const request = agentRequest("blocked by budget");
+    const response = asRecord(await exchange(socket, request));
+
+    expect(response).toMatchObject({
+      requestId: request["requestId"],
+      type: "agent.error",
+      payload: { code: "BUDGET_EXCEEDED", retryable: false },
+    });
+    expect(modelProvider.generate).not.toHaveBeenCalled();
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
+
   it("round-trips a correlated typed Tool call and result before completion", async () => {
     let generation = 0;
     const generate = vi.fn(async () => {
@@ -715,7 +816,7 @@ describe("Paper WebSocket handshake", () => {
       asRecord(unsupportedCapabilities["payload"])["clientCapabilities"],
     );
     capabilities["connected"] = true;
-    capabilities["clientProtocolVersion"] = "1.0";
+    capabilities["clientProtocolVersion"] = "1.1";
     const features = asRecord(capabilities["features"]);
     features["overlay"] = 1;
     features["itemIcons"] = 1;

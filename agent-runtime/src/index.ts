@@ -40,6 +40,7 @@ export {
   modelGenerationFailureCodes,
   UnsupportedModelProvider,
   type ModelGenerationFailureCode,
+  type ModelGenerationAccountingDisposition,
   type ModelGenerationContinuation,
   type ModelFinalResult,
   type ModelInputMessage,
@@ -86,6 +87,23 @@ export {
   type SqliteConversationRepositoryOptions,
 } from "./storage/conversation-repository.js";
 export { CURRENT_RUNTIME_SCHEMA_VERSION, migrateRuntimeStorage } from "./storage/migrations.js";
+export {
+  calculateUsageCostMicroUsd,
+  SqliteUsageAccounting,
+  usdToMicroUsd,
+  type ManagementCostSnapshot,
+  type ProviderUsageEventInput,
+  type ProviderUsageRecordResult,
+  type UsageAccounting,
+  type UsageAccountingLimits,
+  type UsageAccountingOptions,
+  type UsageAdmissionDecision,
+  type UsageAdmissionRejection,
+  type UsageAggregateSnapshot,
+  type UsagePricing,
+  type UsageRequestIdentity,
+  type UsageRoundReservationDecision,
+} from "./usage/usage-accounting.js";
 export {
   SqliteProjectRepository,
   type CreateProject,

@@ -1,6 +1,7 @@
 package dev.minecraftagent.client;
 
 import dev.minecraftagent.client.litematica.FabricModInventory;
+import dev.minecraftagent.client.litematica.LitematicaAdapterDiagnostic;
 import dev.minecraftagent.client.litematica.LitematicaAdapterResolver;
 import dev.minecraftagent.client.litematica.LitematicaClientController;
 import dev.minecraftagent.client.litematica.LitematicaDisplayReport;
@@ -47,6 +48,8 @@ public final class MinecraftAgentClient implements ClientModInitializer {
   private static final String KEY_EDIT = "key.minecraftagent.edit_overlay";
   private static final String KEY_PIN = "key.minecraftagent.toggle_pin";
   private static final String KEY_CLEAR = "key.minecraftagent.clear_views";
+  private static final java.util.regex.Pattern DIAGNOSTIC_VERSION =
+      java.util.regex.Pattern.compile("[0-9A-Za-z][0-9A-Za-z._+-]{0,63}");
 
   @Override
   public void onInitializeClient() {
@@ -58,7 +61,7 @@ public final class MinecraftAgentClient implements ClientModInitializer {
     var tasks = ClientTaskQueue.create();
     var mainTasks = ClientMainThreadQueue.create(action -> executeOnClient(minecraft, action));
     var litematica = createLitematicaController(loader, inventory, minecraft);
-    var advertisement = advertisement(loader, inventory, litematica.available());
+    var advertisement = advertisement(loader, litematica);
 
     PayloadTypeRegistry.playC2S().register(AgentClientPayload.TYPE, AgentClientPayload.CODEC);
     PayloadTypeRegistry.playS2C().register(AgentClientPayload.TYPE, AgentClientPayload.CODEC);
@@ -71,7 +74,7 @@ public final class MinecraftAgentClient implements ClientModInitializer {
             overlay,
             mainTasks::enqueue,
             bytes -> send(mainTasks, bytes),
-            presentationActions(litematica));
+            presentationActions(litematica.controller()));
 
     registerHud(renderer);
     registerKeys(renderer, overlay);
@@ -79,34 +82,59 @@ public final class MinecraftAgentClient implements ClientModInitializer {
     registerLifecycle(tasks, mainTasks, session);
     LOGGER.info(
         "Minecraft Agent client initialized; Litematica presentation status={}",
-        litematica.available() ? "AVAILABLE" : "UNAVAILABLE");
+        litematica.diagnostic().status());
   }
 
-  private static LitematicaClientController createLitematicaController(
+  private static LitematicaInitialization createLitematicaController(
       FabricLoader loader, FabricModInventory inventory, Minecraft minecraft) {
     Path previewRoot = loader.getConfigDir().resolve(MOD_ID).resolve("previews").normalize();
     try {
       previewRoot = preparePreviewRoot(loader.getGameDir());
-      String loaderVersion = inventory.version("fabricloader").orElse("unknown");
+      String minecraftVersion = safeVersion(loader.getRawGameVersion());
+      String loaderVersion = safeVersion(inventory, "fabricloader").orElse("unknown");
       var compatibility =
           LitematicaAdapterResolver.resolve(
-              loader.getRawGameVersion(),
+              minecraftVersion,
               loaderVersion,
               inventory,
               MinecraftAgentClient.class.getClassLoader(),
               previewRoot,
               minecraft::isSameThread);
       LOGGER.info("Minecraft Agent Litematica compatibility={}", compatibility.status());
-      return new LitematicaClientController(compatibility, previewRoot);
+      return new LitematicaInitialization(
+          new LitematicaClientController(compatibility, previewRoot),
+          LitematicaAdapterDiagnostic.from(compatibility));
     } catch (IOException | RuntimeException | LinkageError exception) {
       LOGGER.warn("Minecraft Agent managed preview directory is unavailable");
       try {
-        return new LitematicaClientController(Optional.empty(), previewRoot);
+        return new LitematicaInitialization(
+            new LitematicaClientController(Optional.empty(), previewRoot),
+            LitematicaAdapterDiagnostic.previewStorageUnavailable(
+                safeVersion(loader.getRawGameVersion()),
+                safeVersion(inventory, "fabricloader").orElse("unknown"),
+                safeVersion(inventory, "litematica"),
+                safeVersion(inventory, "malilib")));
       } catch (IOException impossible) {
         throw new IllegalStateException(
             "Unable to create disabled Litematica controller", impossible);
       }
     }
+  }
+
+  private static Optional<String> safeVersion(FabricModInventory inventory, String modId) {
+    try {
+      return inventory.version(modId).filter(MinecraftAgentClient::validDiagnosticVersion);
+    } catch (RuntimeException | LinkageError exception) {
+      return Optional.empty();
+    }
+  }
+
+  private static String safeVersion(String version) {
+    return validDiagnosticVersion(version) ? version : "unknown";
+  }
+
+  private static boolean validDiagnosticVersion(String version) {
+    return version != null && DIAGNOSTIC_VERSION.matcher(version).matches();
   }
 
   private static Path preparePreviewRoot(Path gameDirectory) throws IOException {
@@ -135,9 +163,13 @@ public final class MinecraftAgentClient implements ClientModInitializer {
   }
 
   private static ClientHandshakeAdvertisement advertisement(
-      FabricLoader loader, FabricModInventory inventory, boolean litematicaAvailable) {
+      FabricLoader loader, LitematicaInitialization litematica) {
     String modVersion =
         loader.getModContainer(MOD_ID).orElseThrow().getMetadata().getVersion().getFriendlyString();
+    var diagnostic = litematica.diagnostic();
+    boolean litematicaAvailable =
+        diagnostic.status() == LitematicaAdapterDiagnostic.Status.READY
+            && litematica.controller().available();
     return new ClientHandshakeAdvertisement(
         modVersion,
         1,
@@ -145,8 +177,9 @@ public final class MinecraftAgentClient implements ClientModInitializer {
         2,
         litematicaAvailable ? 1 : 0,
         litematicaAvailable ? 1 : 0,
-        inventory.version("litematica"),
-        inventory.version("malilib"));
+        diagnostic.litematicaVersion(),
+        diagnostic.malilibVersion(),
+        diagnostic);
   }
 
   private static ClientPresentationSession.PresentationActionSink presentationActions(
@@ -286,4 +319,7 @@ public final class MinecraftAgentClient implements ClientModInitializer {
           }
         });
   }
+
+  private record LitematicaInitialization(
+      LitematicaClientController controller, LitematicaAdapterDiagnostic diagnostic) {}
 }

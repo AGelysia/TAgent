@@ -12,6 +12,9 @@ base {
 
 val modVersion = version.toString()
 val minecraftVersion = libs.versions.minecraft.get()
+val fabricApiVersion =
+    libs.versions.fabric.api
+        .get()
 val protocolDirectory = rootProject.layout.projectDirectory.dir("protocol")
 
 repositories {
@@ -60,10 +63,12 @@ tasks.processResources {
     filteringCharset = "UTF-8"
     inputs.property("version", modVersion)
     inputs.property("minecraftVersion", minecraftVersion)
+    inputs.property("fabricApiVersion", fabricApiVersion)
     filesMatching("fabric.mod.json") {
         expand(
             "version" to modVersion,
             "minecraftVersion" to minecraftVersion,
+            "fabricApiVersion" to fabricApiVersion,
         )
     }
     from(protocolDirectory.dir("schemas")) {

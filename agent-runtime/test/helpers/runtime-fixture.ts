@@ -17,7 +17,7 @@ export function runtimeEnvironment(
 }
 
 export function validRuntimeConfig(port = 38_127): string {
-  return `configVersion: 1
+  return `configVersion: 2
 server:
   id: test-server
 transport:
@@ -29,6 +29,8 @@ model:
   apiKey: \${OPENAI_API_KEY}
   model: test-model
   timeoutSeconds: 2
+  inputMicroUsdPerMillionTokens: 1000000
+  outputMicroUsdPerMillionTokens: 4000000
 storage:
   sqlitePath: ./data/runtime.db
 logging:
@@ -41,6 +43,7 @@ limits:
   perPlayerCooldownSeconds: 1
   dailyRequestsPerPlayer: 100
   monthlyBudgetUsd: 10
+  providerRoundReservationMicroUsd: 50000
 privacy:
   storeConversations: true
   retentionDays: 7

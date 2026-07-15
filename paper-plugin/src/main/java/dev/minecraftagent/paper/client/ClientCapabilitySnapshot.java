@@ -13,7 +13,7 @@ public record ClientCapabilitySnapshot(
   public ClientCapabilitySnapshot {
     Objects.requireNonNull(capabilities);
     if (connected) {
-      if (!ClientHandshake.PROTOCOL_VERSION.equals(clientProtocolVersion)
+      if (!ClientHandshake.isSupportedProtocolVersion(clientProtocolVersion)
           || generation == null
           || generation < 1
           || generation > Integer.MAX_VALUE) {

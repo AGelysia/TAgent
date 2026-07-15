@@ -1,5 +1,10 @@
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$Gradle = if ($env:OS -eq "Windows_NT") { "$Root/gradlew.bat" } else { "$Root/gradlew" }
+$GradleArgs = @("--no-daemon", "--max-workers=1")
+if ($env:MINECRAFT_AGENT_NO_BUILD_CACHE -eq "1") {
+    $GradleArgs += "--no-build-cache"
+}
 
 Push-Location "$Root/agent-runtime"
 try {
@@ -19,9 +24,9 @@ try {
 
 Push-Location $Root
 try {
-    & ./gradlew.bat --no-daemon --max-workers=1 :paper-plugin:build
+    & $Gradle @GradleArgs :paper-plugin:build
     if ($LASTEXITCODE -ne 0) { throw "Paper build failed with exit code $LASTEXITCODE" }
-    & ./gradlew.bat --no-daemon --max-workers=1 :client-mod:build
+    & $Gradle @GradleArgs :client-mod:build
     if ($LASTEXITCODE -ne 0) { throw "Client build failed with exit code $LASTEXITCODE" }
 } finally {
     Pop-Location

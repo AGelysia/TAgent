@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -81,10 +82,44 @@ public final class AgentRequestService
     void cancel();
   }
 
+  public enum CostsQueryStatus {
+    AVAILABLE,
+    UNAVAILABLE,
+    TIMED_OUT,
+    FAILED
+  }
+
+  public record CostsQueryResult(
+      CostsQueryStatus status, AgentProtocolCodec.ManagementCosts costs) {
+    public CostsQueryResult {
+      Objects.requireNonNull(status);
+      if ((status == CostsQueryStatus.AVAILABLE) != (costs != null)) {
+        throw new IllegalArgumentException("Invalid costs query result");
+      }
+    }
+
+    public static CostsQueryResult available(AgentProtocolCodec.ManagementCosts costs) {
+      return new CostsQueryResult(CostsQueryStatus.AVAILABLE, Objects.requireNonNull(costs));
+    }
+
+    public static CostsQueryResult unavailable() {
+      return new CostsQueryResult(CostsQueryStatus.UNAVAILABLE, null);
+    }
+
+    public static CostsQueryResult timedOut() {
+      return new CostsQueryResult(CostsQueryStatus.TIMED_OUT, null);
+    }
+
+    public static CostsQueryResult failed() {
+      return new CostsQueryResult(CostsQueryStatus.FAILED, null);
+    }
+  }
+
   private static final String TIMEOUT_MESSAGE = "AI request timed out.";
   private static final String UNAVAILABLE_MESSAGE = "AI unavailable. Try again later.";
   private static final String SESSION_RESUMED_PREFIX = "Resumed AI session ";
   private static final int MAX_ACTIVE_REQUESTS = 64;
+  private static final Duration MANAGEMENT_QUERY_TIMEOUT = Duration.ofSeconds(5);
 
   private final Object lock = new Object();
   private final OperationalGate operationalGate;
@@ -105,6 +140,7 @@ public final class AgentRequestService
   private final Map<UUID, LiveRequest> requestsById = new HashMap<>();
   private final Map<UUID, LiveRequest> requestsByPlayer = new HashMap<>();
   private final Map<UUID, UUID> currentSessionsByPlayer = new HashMap<>();
+  private CostsQuery costsQuery;
 
   public AgentRequestService(
       OperationalGate operationalGate,
@@ -420,6 +456,58 @@ public final class AgentRequestService
     return Submission.ACCEPTED;
   }
 
+  public CompletionStage<CostsQueryResult> queryCosts() {
+    var permit = operationalGate.tryAcquire();
+    if (permit.isEmpty()) {
+      return CompletableFuture.completedFuture(CostsQueryResult.unavailable());
+    }
+    var binding = connection.get();
+    if (closed.get() || binding == null || !binding.connection().isOpen()) {
+      return CompletableFuture.completedFuture(CostsQueryResult.unavailable());
+    }
+
+    CostsQuery query;
+    synchronized (lock) {
+      if (closed.get()
+          || connection.get() != binding
+          || !binding.connection().isOpen()
+          || !operationalGate.revalidate(permit.orElseThrow())) {
+        return CompletableFuture.completedFuture(CostsQueryResult.unavailable());
+      }
+      if (costsQuery != null) {
+        return costsQuery.completion().copy();
+      }
+      query = new CostsQuery(UUID.randomUUID(), permit.orElseThrow(), binding);
+      costsQuery = query;
+      try {
+        query.timeout(
+            timeoutScheduler.schedule(MANAGEMENT_QUERY_TIMEOUT, () -> timeoutCosts(query)));
+      } catch (RuntimeException error) {
+        costsQuery = null;
+        query.completion().complete(CostsQueryResult.failed());
+        return query.completion().copy();
+      }
+    }
+
+    try {
+      var encoded = binding.codec().encodeCostsRequest(query.requestId());
+      if (!costsCurrent(query)) {
+        finishCosts(query, CostsQueryResult.unavailable());
+        return query.completion().copy();
+      }
+      var sent = Objects.requireNonNull(binding.connection().sendApplication(encoded));
+      sent.whenComplete(
+          (ignored, error) -> {
+            if (error != null) {
+              costsSendFailed(query);
+            }
+          });
+    } catch (RuntimeException error) {
+      costsSendFailed(query);
+    }
+    return query.completion().copy();
+  }
+
   @Override
   public void attach(AuthenticatedRuntimeConnection runtimeConnection, String serverId) {
     Objects.requireNonNull(runtimeConnection);
@@ -432,8 +520,10 @@ public final class AgentRequestService
     }
     try {
       runtimeConnection.setApplicationHandler(message -> receive(binding, message));
+      runtimeConnection.whenClosed().whenComplete((ignored, error) -> disconnectCosts(binding));
     } catch (RuntimeException error) {
       connection.compareAndSet(binding, null);
+      disconnectCosts(binding);
       throw error;
     }
   }
@@ -442,7 +532,9 @@ public final class AgentRequestService
   public void detach(AuthenticatedRuntimeConnection runtimeConnection) {
     var binding = connection.get();
     if (binding != null && binding.connection() == runtimeConnection) {
-      connection.compareAndSet(binding, null);
+      if (connection.compareAndSet(binding, null)) {
+        disconnectCosts(binding);
+      }
     }
   }
 
@@ -468,16 +560,19 @@ public final class AgentRequestService
             ? CancelReason.RUNTIME_DISCONNECTED
             : CancelReason.AGENT_OFFLINE;
     ArrayList<LiveRequest> pending;
+    CostsQuery pendingCosts;
     synchronized (lock) {
       pending = new ArrayList<>(requestsById.values());
       requestsById.clear();
       requestsByPlayer.clear();
+      pendingCosts = takeCosts(null);
     }
     for (var request : pending) {
       request.cancelTimeout();
       request.cancelToolExecution();
       sendCancellation(request, cancellationReason);
     }
+    completeCosts(pendingCosts, CostsQueryResult.unavailable());
   }
 
   @Override
@@ -492,10 +587,15 @@ public final class AgentRequestService
     }
   }
 
-  int activeRequestCount() {
+  public int activeRequestCount() {
     synchronized (lock) {
       return requestsById.size();
     }
+  }
+
+  public boolean runtimeConnected() {
+    var binding = connection.get();
+    return !closed.get() && binding != null && binding.connection().isOpen();
   }
 
   UUID currentSession(UUID playerId) {
@@ -513,29 +613,35 @@ public final class AgentRequestService
     try {
       message = source.codec().decode(encoded);
     } catch (RuntimeException error) {
+      disconnectCosts(source, CostsQueryResult.failed());
       events.event("RUNTIME_APPLICATION_MESSAGE_REJECTED");
       source.connection().close();
       return;
     }
 
-    LiveRequest request;
+    if (message instanceof AgentProtocolCodec.ManagementCosts costs) {
+      receiveCosts(source, costs);
+      return;
+    }
+    var playerMessage = (AgentProtocolCodec.PlayerMessage) message;
     if (message instanceof AgentProtocolCodec.ToolCall toolCall) {
       receiveToolCall(source, toolCall);
       return;
     }
 
+    LiveRequest request;
     String reply;
     synchronized (lock) {
-      request = requestsById.get(message.requestId());
+      request = requestsById.get(playerMessage.requestId());
       if (request == null) {
         return;
       }
-      if (request.binding() != source || !request.playerId().equals(message.playerUuid())) {
+      if (request.binding() != source || !request.playerId().equals(playerMessage.playerUuid())) {
         events.event("RUNTIME_APPLICATION_BINDING_REJECTED");
         source.connection().close();
         return;
       }
-      if (!validResponse(request, message)) {
+      if (!validResponse(request, playerMessage)) {
         events.event("RUNTIME_APPLICATION_BINDING_REJECTED");
         source.connection().close();
         return;
@@ -543,24 +649,46 @@ public final class AgentRequestService
       if (!operationalGate.revalidate(request.permit()) || !remove(request)) {
         return;
       }
-      if (message instanceof AgentProtocolCodec.Completion completion) {
+      if (playerMessage instanceof AgentProtocolCodec.Completion completion) {
         if (completion.sessionId() != null) {
           currentSessionsByPlayer.put(request.playerId(), completion.sessionId());
         }
-      } else if (message instanceof AgentProtocolCodec.SessionResumed resumed) {
+      } else if (playerMessage instanceof AgentProtocolCodec.SessionResumed resumed) {
         currentSessionsByPlayer.put(request.playerId(), resumed.sessionId());
-      } else if (message instanceof AgentProtocolCodec.AgentError error
+      } else if (playerMessage instanceof AgentProtocolCodec.AgentError error
           && (error.code() == AgentProtocolCodec.AgentErrorCode.SESSION_NOT_FOUND
               || error.code() == AgentProtocolCodec.AgentErrorCode.CONVERSATION_STORAGE_DISABLED)) {
         clearStaleSession(request);
       }
-      reply = responseText(message);
+      reply = responseText(playerMessage);
     }
     request.cancelTimeout();
     dispatchBoundReply(
         request,
         reply,
-        message instanceof AgentProtocolCodec.Completion completion ? completion : null);
+        playerMessage instanceof AgentProtocolCodec.Completion completion ? completion : null);
+  }
+
+  private void receiveCosts(ConnectionBinding source, AgentProtocolCodec.ManagementCosts response) {
+    CostsQuery query;
+    CostsQueryResult result;
+    synchronized (lock) {
+      query = costsQuery;
+      if (query == null || !query.requestId().equals(response.requestId())) {
+        return;
+      }
+      if (query.binding() != source) {
+        events.event("RUNTIME_APPLICATION_BINDING_REJECTED");
+        source.connection().close();
+        return;
+      }
+      costsQuery = null;
+      result =
+          operationalGate.revalidate(query.permit())
+              ? CostsQueryResult.available(response)
+              : CostsQueryResult.unavailable();
+    }
+    completeCosts(query, result);
   }
 
   private void receiveToolCall(ConnectionBinding source, AgentProtocolCodec.ToolCall message) {
@@ -667,8 +795,71 @@ public final class AgentRequestService
   }
 
   private void rejectBinding(ConnectionBinding source) {
+    disconnectCosts(source, CostsQueryResult.failed());
     events.event("RUNTIME_APPLICATION_BINDING_REJECTED");
     source.connection().close();
+  }
+
+  private void timeoutCosts(CostsQuery query) {
+    finishCosts(query, CostsQueryResult.timedOut());
+  }
+
+  private void costsSendFailed(CostsQuery query) {
+    if (!finishCosts(query, CostsQueryResult.failed())) {
+      return;
+    }
+    events.event("RUNTIME_MANAGEMENT_COSTS_SEND_FAILED");
+    query.binding().connection().close();
+  }
+
+  private boolean costsCurrent(CostsQuery query) {
+    synchronized (lock) {
+      return costsQuery == query
+          && !closed.get()
+          && connection.get() == query.binding()
+          && query.binding().connection().isOpen()
+          && operationalGate.revalidate(query.permit());
+    }
+  }
+
+  private boolean finishCosts(CostsQuery query, CostsQueryResult result) {
+    synchronized (lock) {
+      if (costsQuery != query) {
+        return false;
+      }
+      costsQuery = null;
+    }
+    completeCosts(query, result);
+    return true;
+  }
+
+  private void disconnectCosts(ConnectionBinding binding) {
+    disconnectCosts(binding, CostsQueryResult.unavailable());
+  }
+
+  private void disconnectCosts(ConnectionBinding binding, CostsQueryResult result) {
+    CostsQuery query;
+    synchronized (lock) {
+      query = takeCosts(binding);
+    }
+    completeCosts(query, result);
+  }
+
+  private CostsQuery takeCosts(ConnectionBinding binding) {
+    if (costsQuery == null || binding != null && costsQuery.binding() != binding) {
+      return null;
+    }
+    var query = costsQuery;
+    costsQuery = null;
+    return query;
+  }
+
+  private static void completeCosts(CostsQuery query, CostsQueryResult result) {
+    if (query == null) {
+      return;
+    }
+    query.cancelTimeout();
+    query.completion().complete(result);
   }
 
   private void timeout(LiveRequest request) {
@@ -856,7 +1047,7 @@ public final class AgentRequestService
   }
 
   private static boolean validResponse(
-      LiveRequest request, AgentProtocolCodec.InboundMessage message) {
+      LiveRequest request, AgentProtocolCodec.PlayerMessage message) {
     if (message instanceof AgentProtocolCodec.AgentError) {
       return request.activeToolCall() == null;
     }
@@ -882,7 +1073,7 @@ public final class AgentRequestService
     }
   }
 
-  private static String responseText(AgentProtocolCodec.InboundMessage message) {
+  private static String responseText(AgentProtocolCodec.PlayerMessage message) {
     return switch (message) {
       case AgentProtocolCodec.Completion completion -> completion.fallbackText();
       case AgentProtocolCodec.AgentError error -> error.fallbackText();
@@ -895,6 +1086,54 @@ public final class AgentRequestService
 
   private record ConnectionBinding(
       AuthenticatedRuntimeConnection connection, AgentProtocolCodec codec) {}
+
+  private static final class CostsQuery {
+    private final UUID requestId;
+    private final OperationalGate.Permit permit;
+    private final ConnectionBinding binding;
+    private final CompletableFuture<CostsQueryResult> completion = new CompletableFuture<>();
+    private final AtomicReference<Cancellable> timeout = new AtomicReference<>();
+
+    private CostsQuery(UUID requestId, OperationalGate.Permit permit, ConnectionBinding binding) {
+      this.requestId = Objects.requireNonNull(requestId);
+      this.permit = Objects.requireNonNull(permit);
+      this.binding = Objects.requireNonNull(binding);
+    }
+
+    UUID requestId() {
+      return requestId;
+    }
+
+    OperationalGate.Permit permit() {
+      return permit;
+    }
+
+    ConnectionBinding binding() {
+      return binding;
+    }
+
+    CompletableFuture<CostsQueryResult> completion() {
+      return completion;
+    }
+
+    void timeout(Cancellable scheduled) {
+      if (!timeout.compareAndSet(null, scheduled) || completion.isDone()) {
+        var current = timeout.getAndSet(null);
+        if (current != null) {
+          current.cancel();
+        } else {
+          scheduled.cancel();
+        }
+      }
+    }
+
+    void cancelTimeout() {
+      var scheduled = timeout.getAndSet(null);
+      if (scheduled != null) {
+        scheduled.cancel();
+      }
+    }
+  }
 
   private enum Operation {
     QUERY,

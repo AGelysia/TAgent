@@ -73,13 +73,16 @@ describe("conversation storage", () => {
       ).toEqual([
         { version: 1, name: "sessions-and-messages" },
         { version: 2, name: "projects-and-events" },
+        { version: 3, name: "durable-usage-accounting" },
+        { version: 4, name: "provider-round-start-state" },
+        { version: 5, name: "runtime-process-lock" },
       ]);
 
       database
         .prepare(
           "INSERT INTO runtime_schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
         )
-        .run(3, "future", NOW);
+        .run(6, "future", NOW);
       expect(() => migrateRuntimeStorage(database, LATER)).toThrow(/unsupported/u);
       expect(database.isTransaction).toBe(false);
     } finally {

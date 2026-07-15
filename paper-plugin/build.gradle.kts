@@ -31,10 +31,13 @@ dependencies {
     compileOnly(libs.snakeyaml)
 
     testImplementation(platform(libs.junit.bom))
+    testImplementation(libs.byte.buddy)
+    testImplementation(libs.byte.buddy.agent)
     testImplementation(libs.gson)
     testImplementation(libs.java.websocket)
     testImplementation(libs.json.schema.validator)
     testImplementation(libs.junit.jupiter)
+    testImplementation(libs.mockbukkit)
     testImplementation(libs.mockito)
     testImplementation(libs.paper.api)
     testImplementation(libs.snakeyaml)

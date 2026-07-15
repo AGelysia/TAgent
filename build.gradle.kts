@@ -1,3 +1,5 @@
+import org.gradle.api.tasks.bundling.AbstractArchiveTask
+
 plugins {
     base
     alias(libs.plugins.spotless) apply false
@@ -5,7 +7,12 @@ plugins {
 
 allprojects {
     group = "dev.minecraftagent"
-    version = "0.1.0-SNAPSHOT"
+    version = "0.1.0"
+
+    tasks.withType<AbstractArchiveTask>().configureEach {
+        isPreserveFileTimestamps = false
+        isReproducibleFileOrder = true
+    }
 }
 
 tasks.register("checkAll") {

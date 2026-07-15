@@ -16,6 +16,7 @@ public interface AgentUiControl {
     UNPIN,
     CLEAR,
     PREVIEW,
+    REMOVE,
     MATERIALS
   }
 

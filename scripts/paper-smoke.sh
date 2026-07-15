@@ -2,12 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VERSION="$(node -p "require('$ROOT/agent-runtime/package.json').version")"
 PAPER_BUILD=132
 PAPER_SHA256=5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba
 PAPER_URL="https://fill-data.papermc.io/v1/objects/${PAPER_SHA256}/paper-1.21.11-${PAPER_BUILD}.jar"
 CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/minecraft-agent-paper-smoke"
 PAPER_JAR="${CACHE_ROOT}/paper-1.21.11-${PAPER_BUILD}.jar"
-PLUGIN_JAR="${ROOT}/paper-plugin/build/libs/minecraft-agent-paper-0.1.0-SNAPSHOT.jar"
+PLUGIN_JAR="${ROOT}/paper-plugin/build/libs/minecraft-agent-paper-${VERSION}.jar"
+JAVA_BIN="${JAVA_HOME:+${JAVA_HOME}/bin/}java"
 TEST_TOKEN=phase-5-paper-smoke-token-0123456789abcdef
 WRONG_TOKEN=phase-5-paper-smoke-wrong-0123456789abcdef
 SELECTED_CASES=" ${PAPER_SMOKE_CASES:-offline-lifecycle unavailable wrong-token incompatible} "
@@ -131,7 +133,7 @@ run_offline_command() {
   local command=$2
   run_console_command "$server_log" "$command" 'AI offline$' 10
   if [[ "$(rg -c 'AI offline$' <<<"$LAST_COMMAND_OUTPUT" || true)" != 1 ]] \
-    || rg -q 'Minecraft Agent:|Minecraft Agent health:|/agent \[|Unknown or incomplete command' \
+    || rg -q 'Minecraft Agent status:|Minecraft Agent health:|/agent \[|Unknown or incomplete command' \
       <<<"$LAST_COMMAND_OUTPUT"; then
     printf 'Offline command did not return exactly one safe response: %s\n' "$command" >&2
     printf '%s\n' "$LAST_COMMAND_OUTPUT" >&2
@@ -168,6 +170,56 @@ case_enabled() {
   [[ "$SELECTED_CASES" == *" $1 "* ]]
 }
 
+allocate_loopback_port() {
+  node -e '
+    const server = require("node:net").createServer();
+    server.unref();
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (typeof address !== "object" || address === null) process.exit(1);
+      process.stdout.write(String(address.port));
+      server.close();
+    });
+  '
+}
+
+write_server_properties() {
+  local server_root=$1
+  local server_port
+  server_port="$(allocate_loopback_port)"
+  [[ "$server_port" =~ ^[0-9]{1,5}$ ]] \
+    && ((10#$server_port >= 1024 && 10#$server_port <= 65535)) \
+    || { printf 'Could not allocate a loopback Paper smoke port\n' >&2; return 1; }
+  printf '%s\n' \
+    'server-ip=127.0.0.1' \
+    "server-port=$server_port" \
+    'online-mode=false' \
+    'enable-rcon=false' \
+    'enable-query=false' \
+    'broadcast-rcon-to-ops=false' \
+    'max-players=1' \
+    'view-distance=2' \
+    'simulation-distance=2' \
+    'spawn-protection=0' \
+    'level-type=minecraft:flat' \
+    'generate-structures=false' \
+    'sync-chunk-writes=false' >"${server_root}/server.properties"
+}
+
+assert_loopback_paper_listener() {
+  local server_root=$1
+  local server_port
+  server_port="$(sed -n 's/^server-port=//p' "$server_root/server.properties")"
+  local listeners
+  listeners="$(ss -H -ltnp "sport = :$server_port")"
+  if [[ "$(wc -l <<<"$listeners")" != 1 ]] \
+    || ! rg -q "[[:space:]](127\\.0\\.0\\.1|\\[::ffff:127\\.0\\.0\\.1\\]):${server_port}[[:space:]]" \
+      <<<"$listeners"; then
+    printf 'Paper smoke listener was not confined to its allocated loopback port\n' >&2
+    return 1
+  fi
+}
+
 start_runtime() {
   local mode=$1
   local runtime_token=$2
@@ -179,7 +231,7 @@ start_runtime() {
   if [[ "$mode" == actual ]]; then
     local config_path="${runtime_root}/config.local.yml"
     printf '%s\n' \
-      'configVersion: 1' \
+      'configVersion: 2' \
       'server:' \
       '  id: survival-main' \
       'transport:' \
@@ -191,6 +243,8 @@ start_runtime() {
       '  apiKey: ${OPENAI_API_KEY}' \
       '  model: phase-5-smoke-model' \
       '  timeoutSeconds: 2' \
+      '  inputMicroUsdPerMillionTokens: 1000000' \
+      '  outputMicroUsdPerMillionTokens: 4000000' \
       'storage:' \
       '  sqlitePath: ./data/runtime.db' \
       'logging:' \
@@ -203,6 +257,7 @@ start_runtime() {
       '  perPlayerCooldownSeconds: 0' \
       '  dailyRequestsPerPlayer: 10' \
       '  monthlyBudgetUsd: 1' \
+      '  providerRoundReservationMicroUsd: 50000' \
       'privacy:' \
       '  storeConversations: false' \
       '  retentionDays: 0' \
@@ -241,27 +296,21 @@ run_paper_case() {
   mkdir -p "${server_root}/plugins"
   cp "$PLUGIN_JAR" "${server_root}/plugins/"
   printf 'eula=true\n' >"${server_root}/eula.txt"
-  printf '%s\n' \
-    'online-mode=false' \
-    'max-players=1' \
-    'view-distance=2' \
-    'simulation-distance=2' \
-    'spawn-protection=0' \
-    'level-type=minecraft:flat' \
-    'generate-structures=false' \
-    'sync-chunk-writes=false' >"${server_root}/server.properties"
+  write_server_properties "$server_root"
   mkfifo "$input_fifo"
   exec 9<>"$input_fifo"
 
   (
     cd "$server_root"
     MINECRAFT_AGENT_SERVER_TOKEN="$paper_token" \
-      java -Xms256M -Xmx512M -Dpaper.disableStartupVersionCheck=true \
+      "$JAVA_BIN" -Xms256M -Xmx512M -Dpaper.disableStartupVersionCheck=true \
       -jar "$PAPER_JAR" --nogui <"$input_fifo"
   ) >"$server_log" 2>&1 &
   PAPER_PID=$!
 
   wait_for_log "$server_log" 'Done \(' 180
+  wait_for_log "$server_log" 'Starting Minecraft server on 127\.0\.0\.1:' 20
+  assert_loopback_paper_listener "$server_root"
   wait_for_log "$server_log" "$expected_startup" 20
   local previous_size
   previous_size=$(wc -c <"$server_log")
@@ -272,7 +321,7 @@ run_paper_case() {
 
   if [[ "$expect_command" == present ]]; then
     local responses
-    responses=$(rg -c 'Minecraft Agent: (ONLINE|DEGRADED)' "$command_output" || true)
+    responses=$(rg -c 'Minecraft Agent status: ONLINE' "$command_output" || true)
     if ((responses < 2)); then
       printf 'Expected both command labels to execute in %s\n' "$case_name" >&2
       cat "$command_output" >&2
@@ -284,7 +333,7 @@ run_paper_case() {
       return 1
     fi
   else
-    if rg -q 'Minecraft Agent: (ONLINE|DEGRADED)' "$command_output"; then
+    if rg -q 'Minecraft Agent status: ONLINE' "$command_output"; then
       printf 'Command unexpectedly existed in %s\n' "$case_name" >&2
       cat "$command_output" >&2
       return 1
@@ -312,15 +361,7 @@ prepare_paper_server() {
   mkdir -p "${server_root}/plugins"
   cp "$PLUGIN_JAR" "${server_root}/plugins/"
   printf 'eula=true\n' >"${server_root}/eula.txt"
-  printf '%s\n' \
-    'online-mode=false' \
-    'max-players=1' \
-    'view-distance=2' \
-    'simulation-distance=2' \
-    'spawn-protection=0' \
-    'level-type=minecraft:flat' \
-    'generate-structures=false' \
-    'sync-chunk-writes=false' >"${server_root}/server.properties"
+  write_server_properties "$server_root"
 }
 
 launch_paper() {
@@ -334,11 +375,13 @@ launch_paper() {
   (
     cd "$server_root"
     MINECRAFT_AGENT_SERVER_TOKEN="$paper_token" \
-      java -Xms256M -Xmx512M -Dpaper.disableStartupVersionCheck=true \
+      "$JAVA_BIN" -Xms256M -Xmx512M -Dpaper.disableStartupVersionCheck=true \
       -jar "$PAPER_JAR" --nogui <"$input_fifo"
   ) >"$server_log" 2>&1 &
   PAPER_PID=$!
   wait_for_log "$server_log" 'Done \(' 180
+  wait_for_log "$server_log" 'Starting Minecraft server on 127\.0\.0\.1:' 20
+  assert_loopback_paper_listener "$server_root"
 }
 
 stop_paper() {
@@ -409,6 +452,15 @@ run_offline_lifecycle_case() {
     printf '%s\n' "$LAST_COMMAND_OUTPUT" >&2
     return 1
   fi
+  run_console_command "$first_log" 'agent status' 'Runtime: CONNECTED$' 10
+  run_console_command "$first_log" 'agent capabilities' 'Capability catalog: generation=' 10
+  run_console_command "$first_log" 'agent costs' 'AI costs: currency=USD$' 10
+  run_console_command "$first_log" 'agent reload' 'AI configuration unchanged\.$' 10
+  if ! rg -q 'AI reload started\.$' <<<"$LAST_COMMAND_OUTPUT"; then
+    printf 'Online reload did not report its bounded start state\n' >&2
+    printf '%s\n' "$LAST_COMMAND_OUTPUT" >&2
+    return 1
+  fi
   run_console_command \
     "$first_log" \
     'agent confirm aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' \
@@ -424,6 +476,11 @@ run_offline_lifecycle_case() {
   run_offline_command "$first_log" 'agent off'
   wait_for_log "$first_log" 'event=agent_offline reason=MANUAL' 20
   run_offline_command "$first_log" 'agent doctor'
+  run_offline_command "$first_log" 'agent status'
+  run_offline_command "$first_log" 'agent capabilities'
+  run_offline_command "$first_log" 'agent costs'
+  run_offline_command "$first_log" 'agent reload'
+  run_offline_command "$first_log" 'agent ui clear'
   run_offline_command "$first_log" 'agent unknown'
 
   local state_file="${server_root}/plugins/MinecraftAgent/state/agent-state.yml"
@@ -450,7 +507,7 @@ run_offline_lifecycle_case() {
     20
   run_console_command \
     "$unsafe_audit_log" 'agent' 'Unknown or incomplete command' 10
-  if rg -q 'Minecraft Agent: (ONLINE|DEGRADED)|event=startup_ready' \
+  if rg -q 'Minecraft Agent status: ONLINE|event=startup_ready' \
     "$unsafe_audit_log"; then
     printf 'Unsafe proposal audit storage did not fail startup closed\n' >&2
     tail -n 160 "$unsafe_audit_log" >&2
@@ -483,7 +540,7 @@ run_offline_lifecycle_case() {
   wait_for_log_count "$restart_log" 'event=startup_ready health=DEGRADED' $((ready_count + 1)) 20
   wait_for_log_count "$restart_log" 'AI online$' $((online_count + 1)) 10
   printf 'agent\n' >&9
-  wait_for_log "$restart_log" 'Minecraft Agent: ONLINE$' 10
+  wait_for_log "$restart_log" 'Minecraft Agent status: ONLINE$' 10
   run_console_command \
     "$restart_log" 'agent doctor' 'Warning: CAPABILITY_PACK_DISABLED$' 10
   if ! rg -q 'Minecraft Agent health: DEGRADED$' <<<"$LAST_COMMAND_OUTPUT"; then
@@ -519,8 +576,18 @@ run_offline_lifecycle_case() {
   printf 'paper-smoke case=offline-lifecycle result=passed\n'
 }
 
+if ! command -v "$JAVA_BIN" >/dev/null 2>&1; then
+  printf 'Java executable not found: %s\n' "$JAVA_BIN" >&2
+  exit 1
+fi
+command -v ss >/dev/null 2>&1 \
+  || { printf 'Paper smoke requires ss to verify loopback confinement\n' >&2; exit 1; }
 validate_selected_cases
+[[ ! -e "$CACHE_ROOT" || -d "$CACHE_ROOT" && ! -L "$CACHE_ROOT" ]] \
+  || { printf 'Paper smoke cache path must be a real directory\n' >&2; exit 1; }
 mkdir -p "$CACHE_ROOT"
+[[ ! -L "$PAPER_JAR" && ! -L "${PAPER_JAR}.tmp" ]] \
+  || { printf 'Paper smoke cache files must not be symlinks\n' >&2; exit 1; }
 if [[ -f "$PAPER_JAR" ]] && ! printf '%s  %s\n' "$PAPER_SHA256" "$PAPER_JAR" | sha256sum --check --status; then
   rm -f "$PAPER_JAR"
 fi

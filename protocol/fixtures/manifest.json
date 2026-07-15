@@ -103,6 +103,11 @@
           "schema": "agent-error.schema.json",
           "documentPointer": "/storageDisabled",
           "expectedValid": true
+        },
+        {
+          "schema": "agent-error.schema.json",
+          "documentPointer": "/budgetExceeded",
+          "expectedValid": true
         }
       ]
     },
@@ -662,6 +667,30 @@
           "schema": "client-handshake.schema.json",
           "documentPointer": "",
           "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "client-handshake.legacy-v1-valid",
+      "category": "valid",
+      "file": "valid/client-handshake-legacy-v1.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "client-handshake.diagnostics-missing",
+      "category": "invalid_field",
+      "file": "invalid/client-handshake-diagnostics-missing.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
         }
       ]
     },
@@ -1914,6 +1943,129 @@
         "expectedValid": false,
         "errorCode": "BLOCK_GEOMETRY_INVALID"
       }
+    },
+    {
+      "id": "management-costs.valid",
+      "category": "valid",
+      "file": "valid/management-costs.json",
+      "validations": [
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "/request",
+          "expectedValid": true
+        },
+        {
+          "schema": "management-costs-request.schema.json",
+          "documentPointer": "/request/payload",
+          "expectedValid": true
+        },
+        {
+          "schema": "envelope.schema.json",
+          "documentPointer": "/response",
+          "expectedValid": true
+        },
+        {
+          "schema": "management-costs-response.schema.json",
+          "documentPointer": "/response/payload",
+          "expectedValid": true
+        }
+      ]
+    },
+    {
+      "id": "management-costs.negative",
+      "category": "invalid_value",
+      "file": "invalid/management-costs-negative.json",
+      "validations": [
+        {
+          "schema": "management-costs-response.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "management-costs.period-kind",
+      "category": "invalid_value",
+      "file": "invalid/management-costs-period-kind.json",
+      "validations": [
+        {
+          "schema": "management-costs-response.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "client-handshake.diagnostics-status-unknown",
+      "category": "invalid_value",
+      "file": "invalid/client-handshake-diagnostics-status-unknown.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "client-handshake.diagnostics-path",
+      "category": "invalid_structure",
+      "file": "invalid/client-handshake-diagnostics-path.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "client-handshake.diagnostics-incoherent",
+      "category": "invalid_value",
+      "file": "invalid/client-handshake-diagnostics-incoherent.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "client-handshake.diagnostics-version-path",
+      "category": "invalid_value",
+      "file": "invalid/client-handshake-diagnostics-version-path.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "client-handshake.diagnostic-dependency-presence",
+      "category": "invalid_dependency",
+      "file": "invalid/client-handshake-diagnostic-dependency-presence.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
+    },
+    {
+      "id": "client-handshake.non-ready-capability",
+      "category": "invalid_state",
+      "file": "invalid/client-handshake-non-ready-capability.json",
+      "validations": [
+        {
+          "schema": "client-handshake.schema.json",
+          "documentPointer": "",
+          "expectedValid": false
+        }
+      ]
     }
   ]
 }

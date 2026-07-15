@@ -5,6 +5,7 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class OperationalGate {
+  private final Object transitionLock = new Object();
   private final AtomicReference<Snapshot> snapshot;
 
   public OperationalGate() {
@@ -17,9 +18,11 @@ public final class OperationalGate {
 
   public long transitionTo(AgentState nextState) {
     Objects.requireNonNull(nextState);
-    return snapshot
-        .updateAndGet(current -> new Snapshot(nextState, incrementEpoch(current.epoch())))
-        .epoch();
+    synchronized (transitionLock) {
+      return snapshot
+          .updateAndGet(current -> new Snapshot(nextState, incrementEpoch(current.epoch())))
+          .epoch();
+    }
   }
 
   public AgentState state() {
@@ -31,21 +34,35 @@ public final class OperationalGate {
   }
 
   public Optional<Permit> tryAcquire() {
-    while (true) {
+    synchronized (transitionLock) {
       var current = snapshot.get();
       if (current.state() != AgentState.ONLINE) {
         return Optional.empty();
       }
-      var permit = new Permit(this, current.epoch());
-      if (snapshot.get() == current) {
-        return Optional.of(permit);
-      }
+      return Optional.of(new Permit(this, current.epoch()));
     }
   }
 
   public boolean revalidate(Permit permit) {
     Objects.requireNonNull(permit);
-    var current = snapshot.get();
+    synchronized (transitionLock) {
+      return valid(permit, snapshot.get());
+    }
+  }
+
+  public boolean executeIfValid(Permit permit, Runnable operation) {
+    Objects.requireNonNull(permit);
+    Objects.requireNonNull(operation);
+    synchronized (transitionLock) {
+      if (!valid(permit, snapshot.get())) {
+        return false;
+      }
+      operation.run();
+      return true;
+    }
+  }
+
+  private boolean valid(Permit permit, Snapshot current) {
     return permit.owner == this
         && current.state() == AgentState.ONLINE
         && current.epoch() == permit.epoch;

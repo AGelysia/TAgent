@@ -1,6 +1,6 @@
 {
   "client": {
-    "clientProtocolVersion": "1.0",
+    "clientProtocolVersion": "1.1",
     "modVersion": "0.1.0",
     "capabilities": {
       "overlay": 1,
@@ -9,7 +9,17 @@
       "litematicaPreview": 0,
       "litematicaMaterialList": 0
     },
-    "dependencies": { "litematica": null, "malilib": null }
+    "dependencies": { "litematica": null, "malilib": null },
+    "diagnostics": {
+      "litematicaAdapter": {
+        "status": "NOT_INSTALLED",
+        "minecraftVersion": "1.21.11",
+        "fabricLoaderVersion": "0.19.3",
+        "litematicaVersion": null,
+        "malilibVersion": null,
+        "adapterId": null
+      }
+    }
   },
   "view": {
     "viewSchemaVersion": "1.0",

@@ -59,7 +59,30 @@ public final class AgentProtocolCodec {
   private static final Set<String> SESSION_RESUMED_FIELDS = Set.of("sessionId", "playerUuid");
   private static final Set<String> TOOL_CALL_FIELDS =
       Set.of("toolCallId", "sessionId", "playerUuid", "module", "tool", "arguments", "sequence");
+  private static final Set<String> COSTS_FIELDS = Set.of("currentDay", "currentMonth", "budget");
+  private static final Set<String> USAGE_WINDOW_FIELDS =
+      Set.of(
+          "period",
+          "admittedRequests",
+          "providerCalls",
+          "reportedProviderCalls",
+          "estimatedProviderCalls",
+          "inputTokens",
+          "outputTokens",
+          "costMicroUsd");
+  private static final Set<String> BUDGET_FIELDS =
+      Set.of(
+          "month",
+          "limitMicroUsd",
+          "settledMicroUsd",
+          "activeReservationsMicroUsd",
+          "remainingMicroUsd",
+          "exhausted");
   private static final Pattern TOOL_ID = Pattern.compile("[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+");
+  private static final Pattern DAY_PERIOD =
+      Pattern.compile("[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])");
+  private static final Pattern MONTH_PERIOD = Pattern.compile("[0-9]{4}-(?:0[1-9]|1[0-2])");
+  private static final long MAX_SAFE_INTEGER = 9_007_199_254_740_991L;
 
   private final String serverId;
   private final SecureRandom secureRandom;
@@ -128,6 +151,11 @@ public final class AgentProtocolCodec {
       payload.addProperty("sessionId", sessionId.toString());
     }
     return encodeEnvelope(requestId, requestId, "session.resume", payload);
+  }
+
+  public String encodeCostsRequest(UUID requestId) {
+    Objects.requireNonNull(requestId);
+    return encodeEnvelope(requestId, requestId, "management.costs.request", new JsonObject());
   }
 
   public String encodeCancel(UUID requestId, UUID playerUuid, CancelReason reason) {
@@ -248,6 +276,7 @@ public final class AgentProtocolCodec {
       case "agent.error" -> decodeError(messageId, requestId, payload);
       case "session.resumed" -> decodeSessionResumed(messageId, requestId, payload);
       case "tool.call" -> decodeToolCall(messageId, requestId, payload);
+      case "management.costs.response" -> decodeManagementCosts(messageId, requestId, payload);
       default -> throw failure("UNSUPPORTED_MESSAGE_TYPE");
     };
   }
@@ -328,6 +357,43 @@ public final class AgentProtocolCodec {
         playerUuid,
         new ReadToolCall(
             toolCallId, requestId, sessionId, playerUuid, module, tool, arguments, sequence));
+  }
+
+  private ManagementCosts decodeManagementCosts(
+      UUID messageId, UUID requestId, JsonObject payload) {
+    requireFields(payload, COSTS_FIELDS);
+    try {
+      var currentDay = usageWindow(object(payload, "currentDay"));
+      var currentMonth = usageWindow(object(payload, "currentMonth"));
+      var budget = budget(object(payload, "budget"));
+      return new ManagementCosts(messageId, requestId, currentDay, currentMonth, budget);
+    } catch (IllegalArgumentException error) {
+      throw invalid();
+    }
+  }
+
+  private static UsageWindow usageWindow(JsonObject payload) {
+    requireFields(payload, USAGE_WINDOW_FIELDS);
+    return new UsageWindow(
+        string(payload, "period"),
+        nonnegativeInteger(payload, "admittedRequests"),
+        nonnegativeInteger(payload, "providerCalls"),
+        nonnegativeInteger(payload, "reportedProviderCalls"),
+        nonnegativeInteger(payload, "estimatedProviderCalls"),
+        nonnegativeInteger(payload, "inputTokens"),
+        nonnegativeInteger(payload, "outputTokens"),
+        nonnegativeInteger(payload, "costMicroUsd"));
+  }
+
+  private static Budget budget(JsonObject payload) {
+    requireFields(payload, BUDGET_FIELDS);
+    return new Budget(
+        string(payload, "month"),
+        nonnegativeInteger(payload, "limitMicroUsd"),
+        nonnegativeInteger(payload, "settledMicroUsd"),
+        nonnegativeInteger(payload, "activeReservationsMicroUsd"),
+        nonnegativeInteger(payload, "remainingMicroUsd"),
+        bool(payload, "exhausted"));
   }
 
   private String encodeEnvelope(UUID messageId, UUID requestId, String type, JsonObject payload) {
@@ -469,6 +535,22 @@ public final class AgentProtocolCodec {
     }
   }
 
+  private static long nonnegativeInteger(JsonObject object, String name) {
+    var value = object.get(name);
+    if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) {
+      throw invalid();
+    }
+    try {
+      var integer = value.getAsBigDecimal().longValueExact();
+      if (integer < 0 || integer > MAX_SAFE_INTEGER) {
+        throw invalid();
+      }
+      return integer;
+    } catch (ArithmeticException error) {
+      throw invalid();
+    }
+  }
+
   private static UUID uuid(JsonObject object, String name) {
     return canonicalUuid(string(object, name));
   }
@@ -546,6 +628,7 @@ public final class AgentProtocolCodec {
     MODEL_RESPONSE_INVALID,
     REQUEST_CANCELLED,
     REQUEST_LIMITED,
+    BUDGET_EXCEEDED,
     SESSION_NOT_FOUND,
     CONVERSATION_STORAGE_DISABLED,
     TOOL_REJECTED,
@@ -553,11 +636,14 @@ public final class AgentProtocolCodec {
     RUNTIME_INTERNAL_ERROR
   }
 
-  public sealed interface InboundMessage permits Completion, AgentError, SessionResumed, ToolCall {
+  public sealed interface InboundMessage permits PlayerMessage, ManagementCosts {
     UUID messageId();
 
     UUID requestId();
+  }
 
+  public sealed interface PlayerMessage extends InboundMessage
+      permits Completion, AgentError, SessionResumed, ToolCall {
     UUID playerUuid();
   }
 
@@ -568,7 +654,7 @@ public final class AgentProtocolCodec {
       UUID playerUuid,
       String fallbackText,
       List<ClientStructuredView> structuredViews)
-      implements InboundMessage {
+      implements PlayerMessage {
     public Completion {
       structuredViews = List.copyOf(structuredViews);
     }
@@ -581,13 +667,89 @@ public final class AgentProtocolCodec {
       AgentErrorCode code,
       String fallbackText,
       boolean retryable)
-      implements InboundMessage {}
+      implements PlayerMessage {}
 
   public record SessionResumed(UUID messageId, UUID requestId, UUID sessionId, UUID playerUuid)
-      implements InboundMessage {}
+      implements PlayerMessage {}
 
   public record ToolCall(UUID messageId, UUID requestId, UUID playerUuid, ReadToolCall call)
-      implements InboundMessage {}
+      implements PlayerMessage {}
+
+  public record UsageWindow(
+      String period,
+      long admittedRequests,
+      long providerCalls,
+      long reportedProviderCalls,
+      long estimatedProviderCalls,
+      long inputTokens,
+      long outputTokens,
+      long costMicroUsd) {
+    public UsageWindow {
+      Objects.requireNonNull(period);
+      requireSafeInteger(admittedRequests);
+      requireSafeInteger(providerCalls);
+      requireSafeInteger(reportedProviderCalls);
+      requireSafeInteger(estimatedProviderCalls);
+      requireSafeInteger(inputTokens);
+      requireSafeInteger(outputTokens);
+      requireSafeInteger(costMicroUsd);
+      if (providerCalls != reportedProviderCalls + estimatedProviderCalls) {
+        throw new IllegalArgumentException("Invalid provider call accounting");
+      }
+    }
+  }
+
+  public record Budget(
+      String month,
+      long limitMicroUsd,
+      long settledMicroUsd,
+      long activeReservationsMicroUsd,
+      long remainingMicroUsd,
+      boolean exhausted) {
+    public Budget {
+      Objects.requireNonNull(month);
+      requireSafeInteger(limitMicroUsd);
+      requireSafeInteger(settledMicroUsd);
+      requireSafeInteger(activeReservationsMicroUsd);
+      requireSafeInteger(remainingMicroUsd);
+      var exposure = settledMicroUsd + activeReservationsMicroUsd;
+      var expectedRemaining = Math.max(0, limitMicroUsd - exposure);
+      if (!MONTH_PERIOD.matcher(month).matches()
+          || remainingMicroUsd != expectedRemaining
+          || exhausted != (remainingMicroUsd == 0)) {
+        throw new IllegalArgumentException("Invalid budget accounting");
+      }
+    }
+  }
+
+  public record ManagementCosts(
+      UUID messageId,
+      UUID requestId,
+      UsageWindow currentDay,
+      UsageWindow currentMonth,
+      Budget budget)
+      implements InboundMessage {
+    public ManagementCosts {
+      Objects.requireNonNull(messageId);
+      Objects.requireNonNull(requestId);
+      Objects.requireNonNull(currentDay);
+      Objects.requireNonNull(currentMonth);
+      Objects.requireNonNull(budget);
+      if (!DAY_PERIOD.matcher(currentDay.period()).matches()
+          || !MONTH_PERIOD.matcher(currentMonth.period()).matches()
+          || !currentDay.period().startsWith(currentMonth.period() + "-")
+          || !budget.month().equals(currentMonth.period())
+          || budget.settledMicroUsd() != currentMonth.costMicroUsd()) {
+        throw new IllegalArgumentException("Invalid management costs periods");
+      }
+    }
+  }
+
+  private static void requireSafeInteger(long value) {
+    if (value < 0 || value > MAX_SAFE_INTEGER) {
+      throw new IllegalArgumentException("Invalid management costs integer");
+    }
+  }
 
   private static final class ReplayWindow {
     private final Map<String, Instant> entries = new LinkedHashMap<>();

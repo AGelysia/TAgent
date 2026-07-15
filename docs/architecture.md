@@ -2,7 +2,8 @@
 
 ## Status and scope
 
-This document records the target architecture and decisions through Phase 11.
+This document records the target architecture and decisions through the Phase 13
+release-candidate gate.
 The repository contains build scaffolding, protocol contracts, the Runtime
 configuration/readiness boundary, Paper-side authenticated startup and Offline
 recovery, private conversations, Runtime-owned sessions, one-shot module
@@ -18,6 +19,12 @@ adapter. Phase 11 adds bounded private Markdown retrieval, player-owned project
 storage, permission-filtered landmarks, authoritative recipe v2 presentation,
 Paper-owned build snapshots, and Palette-to-native schematic generation. The
 preview path remains read-only and the production write catalog remains empty.
+Phase 12 adds bounded management, atomic policy reload, anonymous client
+diagnostics, and durable cost admission/accounting. Phase 13 adds dependency and
+artifact verification, deterministic uncached packaging, supplemental MockBukkit
+and Capability fuzz coverage, an explicit preview-remove control, and a
+repository-only deterministic graphical harness. That harness is not a fourth
+deployable component and is excluded from the release package.
 The conditional command and Offline recovery paths have
 been validated on the pinned Paper `1.21.11-132` server artifact.
 
@@ -180,8 +187,9 @@ Phase 5 supplies the production OpenAI Responses adapter. Startup checks the
 configured model without generating an answer, and accepted requests use a
 bounded non-streaming text call with provider storage disabled. Runtime owns a
 FIFO queue, a concurrency cap, one outstanding request per player, cooldown,
-an in-memory daily request limit, provider timeout, and cooperative abort. The
-monthly budget and durable usage accounting remain later work.
+an in-memory daily request limit, provider timeout, and cooperative abort. That
+phase left monthly budget and durable accounting for later work; Phase 12 adds
+the Runtime-owned durable implementation described below.
 
 Phase 7 extends that adapter with strict registered functions and a Runtime-
 owned serial loop. Provider-safe function schemas are deliberately smaller than
@@ -246,22 +254,24 @@ contention.
 
 The authority split is:
 
-| Paper-owned store                         | Runtime-owned store                |
-| ----------------------------------------- | ---------------------------------- |
-| Desired enabled state                     | Sessions and messages              |
+| Paper-owned store                         | Runtime-owned store                  |
+| ----------------------------------------- | ------------------------------------ |
+| Desired enabled state                     | Sessions and messages                |
 | Proposals and execution status            | Project metadata and revision events |
-| Security audit events                     | Requests and provider usage events |
-| Capability approvals and effective hashes | Daily usage projections            |
-| Private landmark catalog and ACL metadata | Configured Markdown source roots   |
-| Validated one-shot build artifacts        | Bounded in-memory document index   |
-| Tool execution idempotency records        | Local request/correlation state    |
+| Security audit events                     | Requests and provider usage events   |
+| Capability approvals and effective hashes | UTC daily/monthly usage aggregates   |
+| Private landmark catalog and ACL metadata | Configured Markdown source roots     |
+| Validated one-shot build artifacts        | Bounded in-memory document index     |
+| Tool execution idempotency records        | Local request/correlation state      |
 
-Paper may send audit or usage events to Runtime for display, but such a copy is
-not authoritative. The two processes exchange IDs and hashes only through the
-versioned protocol. Phase 2 creates the Runtime-owned readiness database file
-and holds its checked connection. Phase 6 applies versioned session/message
-migrations and uses the same private Runtime-owned connection for bounded
-repository operations. Paper still opens no database.
+Runtime's provider usage events and UTC aggregates are authoritative. Paper
+reads only the bounded current cost snapshot through the authenticated
+management protocol and does not mirror provider usage into its own store. The
+two processes exchange IDs and hashes only through the versioned protocol.
+Phase 2 creates the Runtime-owned readiness database file and holds its checked
+connection. Phase 6 applies versioned session/message migrations and uses the
+same private Runtime-owned connection for bounded repository operations. Paper
+still opens no database.
 Phase 8 keeps active proposal state in a bounded in-memory repository and writes
 authoritative, redacted JSONL security events below Paper's private state
 directory. Restart therefore cannot revive a proposal, while the audit history
@@ -269,6 +279,11 @@ survives it.
 Phase 11 migration v2 persists projects in Runtime's existing private SQLite
 file. Paper stores its landmark YAML and short-lived request/player-bound preview
 artifacts separately; the Fabric client stores only managed local schematics.
+Phase 12 migrations v3-v5 add Runtime-owned request admissions, per-provider-round
+reservations and start state, idempotent provider usage events, per-player
+UTC-daily quota counts, and server-wide UTC day/month aggregates. Only aggregate cost windows
+cross the authenticated management protocol; player identities remain private
+to Runtime quota enforcement.
 
 ## State and health
 
@@ -423,7 +438,7 @@ The implemented Phase 7 boundary is:
 
 The following remained outside the Phase 7 implementation boundary:
 
-- Durable usage accounting and monthly budget enforcement.
+- Durable usage accounting and a monthly reservation-based admission bound.
 - Proposal creation, confirmation, audit persistence, and every write tool.
 - Capability Pack loading was assigned to Phase 9; generic command-backed
   execution remains excluded.
@@ -546,11 +561,11 @@ draft-manifest totals.
 Unapplied `STALE` and `REJECTED` previews use `proposed_added`,
 `proposed_removed`, `proposed_changed`, and `proposed_unchanged`; only a
 `PUBLISHED` event uses unprefixed diff fields. For an unapplied preview, the
-event's generation remains the active snapshot generation. Publication runs
-after local desired-state and proposal-audit path safety checks but before
-Runtime authentication. A failed Runtime handshake can therefore leave a new
-metadata generation, which remains non-executable and does not make startup
-successful.
+event's generation remains the active snapshot generation. Local safety checks
+produce an unpublished candidate. Production publishes it only after Runtime
+authentication, application attachment, connection revalidation, and current
+attempt validation. A failed handshake or stale recovery therefore leaves the
+prior active generation unchanged.
 
 The argument compiler accepts only the closed manifest types and required
 arguments. Supplied JSON must contain every declared name and no undeclared
@@ -707,3 +722,51 @@ connection-scoped managed store using atomic publication, but does not load it
 until an explicit client action. The placement and native Material List are
 presentation state only. The production proposal catalog remains empty, and no
 world apply or rollback operation is reachable.
+
+## Phase 12 bounded management surface
+
+[ADR 0010](adr/0010-phase12-bounded-management-and-durable-cost-control.md) keeps management as a
+projection over immutable subsystem snapshots rather than a general introspection
+or mutation API. Paper combines current request/connection state, one Capability
+registry generation, and one anonymous client diagnostic snapshot. `status`,
+`doctor`, and `capabilities` render only bounded stable fields. Client handshake
+diagnostics are generation-bound data and group protocol, feature, and closed
+Litematica status/version tuples without player identity or local paths.
+The client payload envelope remains `1.0`, while the Phase 12 client hello is
+`1.1`. Paper still accepts the diagnostic-free Phase 10/11 hello `1.0`, preserves
+its presentation capabilities, and groups it under the internal
+`LEGACY_UNREPORTED` diagnostic. New non-`READY` clients cannot advertise either
+Litematica feature.
+
+Paper sends `management.costs.request` over the existing authenticated
+application connection. Runtime answers from its SQLite v3-v5 usage authority with
+the current UTC day/month aggregates and budget exposure. The query is
+single-flight, connection-bound, replay checked, capped by the normal 64 KiB
+application frame, and has a five-second Paper timeout. It never enters the
+player request map or exposes per-player quota rows.
+
+Migration v5 stores one process-owner row in SQLite. `BEGIN IMMEDIATE` serializes
+live-owner validation and dead-owner replacement before abandoned-work recovery,
+so competing recoverers cannot release or settle the first process's admissions.
+Bulk cancellation removes queued records before releasing active slots, so
+shutdown cannot drain queued work into new provider calls.
+
+Reload owns a separate immutable local policy generation. The off-thread strict
+loader creates a complete candidate, compares every non-reloadable field to the
+trusted startup candidate, and atomically publishes only a changed Owner set and
+full security policy. Proposal, toggle, and reload authorization all obtain
+their policy from that same snapshot. Server ID, Runtime settings, state or
+Capability paths, and Capability approvals are restart-only. Capability,
+knowledge, and landmark content is not live-reloaded. A load failure, invalid
+candidate, concurrent request, closed manager, or stale completion retains the
+previous generation.
+
+Core self-check output is a non-published candidate. The coordinator invokes its
+publication callback only after Runtime authentication, application attachment,
+connection revalidation, and current-attempt validation; failure, cancellation,
+or disable discards it. The first successful publication installs the trusted
+reload manager. Recovery reuses that same manager and monotonic generation, and
+rejects changed restart-only fields instead of rebasing them. Reload publication
+is additionally bound to the Online operational epoch. Final permit validation
+and policy CAS share the gate transition lock, so an older attempt cannot
+publish after an Offline/Online transition.

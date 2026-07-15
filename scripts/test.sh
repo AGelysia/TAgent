@@ -2,14 +2,26 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GRADLE_ARGS=(--no-daemon --max-workers=1)
+if [[ "${MINECRAFT_AGENT_NO_BUILD_CACHE:-0}" == 1 ]]; then
+  GRADLE_ARGS+=(--no-build-cache)
+fi
 
 cd "$ROOT/agent-runtime"
 npm ci --prefer-offline
 npm run format:check
 npm run lint
-npm test
+if [[ -n "${MINECRAFT_AGENT_VITEST_JUNIT:-}" ]]; then
+  [[ "$MINECRAFT_AGENT_VITEST_JUNIT" == /* ]] \
+    || { printf 'MINECRAFT_AGENT_VITEST_JUNIT must be an absolute path\n' >&2; exit 1; }
+  mkdir -p "$(dirname "$MINECRAFT_AGENT_VITEST_JUNIT")"
+  npm test -- --reporter=default --reporter=junit \
+    --outputFile.junit="$MINECRAFT_AGENT_VITEST_JUNIT"
+else
+  npm test
+fi
 npm run build
 
 cd "$ROOT"
-./gradlew --no-daemon --max-workers=1 :paper-plugin:build
-./gradlew --no-daemon --max-workers=1 :client-mod:build
+./gradlew "${GRADLE_ARGS[@]}" :paper-plugin:build
+./gradlew "${GRADLE_ARGS[@]}" :client-mod:build

@@ -4,7 +4,9 @@ Date: 2026-07-13
 
 ## Status
 
-Accepted for Phase 9.
+Accepted for Phase 9. The production publication ordering in this ADR is
+superseded by ADR 0010; Phase 12 keeps the load result unpublished until Runtime
+authentication and current-attempt validation succeed.
 
 ## Context
 
@@ -126,10 +128,10 @@ event. Global failures use separate
 counts only draft-manifest diagnostics and does not duplicate the global error.
 
 Production performs desired-state and private proposal-audit path safety checks
-before catalog publication, then authenticates Runtime afterward. A failed
-handshake may therefore leave a new inert metadata generation without making
-startup or recovery successful. Metadata publication is not rolled back as an
-executed Minecraft operation.
+before producing a catalog candidate. As superseded by ADR 0010, the coordinator
+publishes that candidate only after Runtime authentication, application
+attachment, connection revalidation, and current-attempt validation. A failed
+or stale attempt retains the active generation.
 
 Argument compilation uses a closed type set and requires every descriptor to be
 required. A call must contain every declared name and no undeclared name. Each

@@ -7,6 +7,7 @@ public final class StartupFailure extends Exception {
   public enum Code {
     PAPER_CONFIG_INVALID,
     PAPER_CONFIG_TOO_LARGE,
+    PAPER_RESTART_REQUIRED,
     RUNTIME_ENDPOINT_INVALID,
     SERVER_TOKEN_MISSING,
     SERVER_TOKEN_UNSAFE,

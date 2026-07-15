@@ -9,9 +9,9 @@ public record LitematicaCompatibility(
     Optional<LitematicaSupportMatrix.Entry> supportedCombination,
     Optional<LitematicaAdapter> adapter) {
   public enum Status {
-    AVAILABLE,
+    READY,
     NOT_INSTALLED,
-    DEPENDENCY_MISSING,
+    MISSING_DEPENDENCY,
     UNSUPPORTED_VERSION,
     ADAPTER_LINKAGE_FAILED
   }
@@ -21,9 +21,8 @@ public record LitematicaCompatibility(
     Objects.requireNonNull(detectedVersions, "detectedVersions");
     Objects.requireNonNull(supportedCombination, "supportedCombination");
     Objects.requireNonNull(adapter, "adapter");
-    boolean linkedCombination =
-        status == Status.AVAILABLE || status == Status.ADAPTER_LINKAGE_FAILED;
-    if ((status == Status.AVAILABLE) != adapter.isPresent()
+    boolean linkedCombination = status == Status.READY || status == Status.ADAPTER_LINKAGE_FAILED;
+    if ((status == Status.READY) != adapter.isPresent()
         || linkedCombination != supportedCombination.isPresent()) {
       throw new IllegalArgumentException("compatibility status and adapter do not agree");
     }

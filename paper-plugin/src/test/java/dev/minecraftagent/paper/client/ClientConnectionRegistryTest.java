@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
+import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
@@ -55,6 +56,23 @@ class ClientConnectionRegistryTest {
     var dependencies = new LinkedHashMap<String, String>();
     dependencies.put("litematica", preview == 1 ? "0.20.0" : null);
     dependencies.put("malilib", preview == 1 ? "0.21.0" : null);
-    return new ClientHandshake("1.0", "1.2.3", new ClientCapabilities(versions), dependencies);
+    var diagnostic =
+        preview == 1
+            ? new ClientLitematicaDiagnostic(
+                ClientLitematicaDiagnostic.Status.READY,
+                "1.21.11",
+                "0.19.3",
+                Optional.of("0.20.0"),
+                Optional.of("0.21.0"),
+                Optional.of("litematica-reflection-1"))
+            : new ClientLitematicaDiagnostic(
+                ClientLitematicaDiagnostic.Status.NOT_INSTALLED,
+                "1.21.11",
+                "0.19.3",
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty());
+    return new ClientHandshake(
+        "1.1", "1.2.3", new ClientCapabilities(versions), dependencies, diagnostic);
   }
 }

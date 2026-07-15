@@ -43,7 +43,7 @@ function buildPreviewArguments(revision = 3): Readonly<Record<string, unknown>> 
 
 function config(): RuntimeConfig {
   return {
-    configVersion: 1,
+    configVersion: 2,
     server: { id: "test-server" },
     transport: {
       host: "127.0.0.1",
@@ -55,6 +55,8 @@ function config(): RuntimeConfig {
       apiKey: "test-api-key-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ",
       model: "test-model",
       timeoutSeconds: 2,
+      inputMicroUsdPerMillionTokens: 1_000_000,
+      outputMicroUsdPerMillionTokens: 4_000_000,
     },
     storage: { sqlitePath: "./data/runtime.db" },
     logging: { directory: "./logs", level: "info" },
@@ -67,6 +69,7 @@ function config(): RuntimeConfig {
       perPlayerCooldownSeconds: 0,
       dailyRequestsPerPlayer: 100,
       monthlyBudgetUsd: 10,
+      providerRoundReservationMicroUsd: 50_000,
     },
     privacy: {
       storeConversations: false,

@@ -4,9 +4,13 @@ import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Pattern;
 
 /** Selects a single exact adapter before attempting to resolve any optional-mod class. */
 public final class LitematicaAdapterResolver {
+  private static final Pattern DIAGNOSTIC_VERSION =
+      Pattern.compile("[0-9A-Za-z][0-9A-Za-z._+-]{0,63}");
+
   private LitematicaAdapterResolver() {}
 
   public static LitematicaCompatibility resolve(
@@ -32,7 +36,7 @@ public final class LitematicaAdapterResolver {
       return unavailable(LitematicaCompatibility.Status.NOT_INSTALLED, detected);
     }
     if (malilib.isEmpty()) {
-      return unavailable(LitematicaCompatibility.Status.DEPENDENCY_MISSING, detected);
+      return unavailable(LitematicaCompatibility.Status.MISSING_DEPENDENCY, detected);
     }
 
     var supported =
@@ -47,7 +51,7 @@ public final class LitematicaAdapterResolver {
           ReflectiveLitematicaAdapter.link(
               supported.orElseThrow(), modClassLoader, managedPreviewRoot, clientThreadCheck);
       return new LitematicaCompatibility(
-          LitematicaCompatibility.Status.AVAILABLE, detected, supported, Optional.of(adapter));
+          LitematicaCompatibility.Status.READY, detected, supported, Optional.of(adapter));
     } catch (ReflectiveOperationException | LinkageError | RuntimeException exception) {
       return new LitematicaCompatibility(
           LitematicaCompatibility.Status.ADAPTER_LINKAGE_FAILED,
@@ -59,10 +63,14 @@ public final class LitematicaAdapterResolver {
 
   private static Optional<String> safeVersion(ModInventory mods, String modId) {
     try {
-      return mods.version(modId).filter(version -> !version.isBlank());
+      return mods.version(modId).filter(LitematicaAdapterResolver::validDiagnosticVersion);
     } catch (RuntimeException | LinkageError exception) {
       return Optional.empty();
     }
+  }
+
+  private static boolean validDiagnosticVersion(String version) {
+    return version != null && DIAGNOSTIC_VERSION.matcher(version).matches();
   }
 
   private static LitematicaCompatibility unavailable(

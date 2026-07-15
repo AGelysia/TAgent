@@ -1,4 +1,4 @@
-configVersion: 1
+configVersion: 2
 
 server:
   id: survival-main
@@ -13,6 +13,9 @@ model:
   apiKey: ${OPENAI_API_KEY}
   model: configured-model-name
   timeoutSeconds: 60
+  # Configure these integer rates from the selected model's price sheet.
+  inputMicroUsdPerMillionTokens: 1000000
+  outputMicroUsdPerMillionTokens: 4000000
 
 storage:
   sqlitePath: ./data/runtime.db
@@ -39,6 +42,8 @@ limits:
   perPlayerCooldownSeconds: 3
   dailyRequestsPerPlayer: 100
   monthlyBudgetUsd: 50
+  # Conservative maximum expected charge for one provider round, in micro-USD.
+  providerRoundReservationMicroUsd: 50000
 
 privacy:
   storeConversations: true

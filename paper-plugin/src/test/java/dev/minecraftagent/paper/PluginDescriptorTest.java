@@ -22,6 +22,24 @@ class PluginDescriptorTest {
                   + "    description: Allows a player to ask Minecraft Agent private questions\n"
                   + "    default: true"));
       assertTrue(descriptor.contains("minecraftagent.command.agent:"));
+      assertTrue(descriptor.contains("minecraftagent.ui:"));
+      assertTrue(descriptor.contains("minecraftagent.admin.status:"));
+      assertTrue(descriptor.contains("minecraftagent.admin.doctor:"));
+      assertTrue(descriptor.contains("minecraftagent.admin.reload:"));
+      assertTrue(descriptor.contains("minecraftagent.admin.capabilities:"));
+      assertTrue(descriptor.contains("minecraftagent.admin.costs:"));
+      assertTrue(
+          descriptor.contains(
+              "minecraftagent.admin.reload:\n"
+                  + "    description: Names the Console or configured Owner reload operation\n"
+                  + "    default: false"));
+      assertFalse(
+          descriptor.contains(
+              "minecraftagent.command.agent:\n"
+                  + "    description: Legacy aggregate for read-only Minecraft Agent management queries\n"
+                  + "    default: op\n"
+                  + "    children:\n"
+                  + "      minecraftagent.admin.reload: true"));
       assertTrue(
           descriptor.contains(
               "minecraftagent.proposal.respond:\n"

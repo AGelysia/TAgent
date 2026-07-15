@@ -24,6 +24,12 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
   public static final String PERMISSION = "minecraftagent.command.agent";
   public static final String USE_PERMISSION = "minecraftagent.use";
   public static final String MODULE_PERMISSION = "minecraftagent.module";
+  public static final String STATUS_PERMISSION = "minecraftagent.admin.status";
+  public static final String DOCTOR_PERMISSION = "minecraftagent.admin.doctor";
+  public static final String RELOAD_PERMISSION = "minecraftagent.admin.reload";
+  public static final String CAPABILITIES_PERMISSION = "minecraftagent.admin.capabilities";
+  public static final String COSTS_PERMISSION = "minecraftagent.admin.costs";
+  public static final String UI_PERMISSION = "minecraftagent.ui";
   public static final String PROPOSAL_PERMISSION = "minecraftagent.proposal.respond";
   public static final String TOGGLE_PERMISSION = "minecraftagent.admin.toggle";
 
@@ -59,6 +65,8 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
   private final AgentRequestGateway requests;
   private final ProposalResponseGateway proposalResponses;
   private final AgentUiControl uiControl;
+  private final AgentManagementGateway management;
+  private final ReloadAuthorizer reloadAuthorizer;
   private final ToggleAuthorizer toggleAuthorizer;
   private final Consumer<Runnable> replyDispatcher;
 
@@ -75,6 +83,8 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
         (playerId, message) -> AgentRequestGateway.Submission.RUNTIME_UNAVAILABLE,
         ProposalResponseGateway.unavailable(),
         AgentUiControl.unavailable(),
+        AgentManagementGateway.unavailable(),
+        ignored -> false,
         toggleAuthorizer,
         replyDispatcher);
   }
@@ -93,6 +103,8 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
         requests,
         ProposalResponseGateway.unavailable(),
         AgentUiControl.unavailable(),
+        AgentManagementGateway.unavailable(),
+        ignored -> false,
         toggleAuthorizer,
         replyDispatcher);
   }
@@ -112,6 +124,8 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
         requests,
         proposalResponses,
         AgentUiControl.unavailable(),
+        AgentManagementGateway.unavailable(),
+        ignored -> false,
         toggleAuthorizer,
         replyDispatcher);
   }
@@ -125,12 +139,36 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
       AgentUiControl uiControl,
       ToggleAuthorizer toggleAuthorizer,
       Consumer<Runnable> replyDispatcher) {
+    this(
+        plugin,
+        status,
+        control,
+        requests,
+        proposalResponses,
+        uiControl,
+        AgentManagementGateway.unavailable(),
+        ignored -> false,
+        toggleAuthorizer,
+        replyDispatcher);
+  }
+
+  public AgentCommand(
+      Plugin plugin,
+      Supplier<AgentStatus> status,
+      AgentControl control,
+      AgentRequestGateway requests,
+      ProposalResponseGateway proposalResponses,
+      AgentUiControl uiControl,
+      AgentManagementGateway management,
+      ReloadAuthorizer reloadAuthorizer,
+      ToggleAuthorizer toggleAuthorizer,
+      Consumer<Runnable> replyDispatcher) {
     super(
         "agent",
         "Controls Minecraft Agent readiness",
         "/agent [say <message>|resume [session]|module list|module <name> <message>|ui"
-            + " <pin|unpin|clear>|ui <preview|materials> <view-id>|confirm"
-            + " <proposal>|reject <proposal>|doctor|off|on]",
+            + " <pin|unpin|clear>|ui <preview|remove|materials> <view-id>|confirm"
+            + " <proposal>|reject <proposal>|status|doctor|reload|capabilities|costs|off|on]",
         List.of());
     this.plugin = Objects.requireNonNull(plugin);
     this.status = Objects.requireNonNull(status);
@@ -138,6 +176,8 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
     this.requests = Objects.requireNonNull(requests);
     this.proposalResponses = Objects.requireNonNull(proposalResponses);
     this.uiControl = Objects.requireNonNull(uiControl);
+    this.management = Objects.requireNonNull(management);
+    this.reloadAuthorizer = Objects.requireNonNull(reloadAuthorizer);
     this.toggleAuthorizer = Objects.requireNonNull(toggleAuthorizer);
     this.replyDispatcher = Objects.requireNonNull(replyDispatcher);
   }
@@ -191,22 +231,25 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
       return true;
     }
 
-    if (!sender.hasPermission(PERMISSION)) {
-      sender.sendMessage(PERMISSION_DENIED_MESSAGE);
-      return true;
-    }
-    if (arguments.length == 0) {
-      sender.sendMessage("Minecraft Agent: " + snapshot.state().name());
+    if (arguments.length == 0
+        || (arguments.length == 1 && arguments[0].equalsIgnoreCase("status"))) {
+      status(sender, snapshot);
       return true;
     }
     if (arguments.length == 1 && arguments[0].equalsIgnoreCase("doctor")) {
-      sender.sendMessage("Minecraft Agent health: " + healthLabel(snapshot.health()));
-      if (snapshot.failureCode() != null) {
-        sender.sendMessage("Core: " + snapshot.failureCode());
-      }
-      for (var warning : snapshot.warningCodes()) {
-        sender.sendMessage("Warning: " + warning);
-      }
+      doctor(sender, snapshot);
+      return true;
+    }
+    if (arguments.length == 1 && arguments[0].equalsIgnoreCase("capabilities")) {
+      capabilities(sender);
+      return true;
+    }
+    if (arguments.length == 1 && arguments[0].equalsIgnoreCase("costs")) {
+      costs(sender);
+      return true;
+    }
+    if (arguments.length == 1 && arguments[0].equalsIgnoreCase("reload")) {
+      reload(sender);
       return true;
     }
     sender.sendMessage(getUsage());
@@ -230,9 +273,9 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
     if (arguments.length == 2
         && online
         && arguments[0].equalsIgnoreCase("ui")
-        && sender.hasPermission(USE_PERMISSION)) {
+        && sender.hasPermission(UI_PERMISSION)) {
       var prefix = arguments[1].toLowerCase(Locale.ROOT);
-      return List.of("pin", "unpin", "clear", "preview", "materials").stream()
+      return List.of("pin", "unpin", "clear", "preview", "remove", "materials").stream()
           .filter(candidate -> candidate.startsWith(prefix))
           .toList();
     }
@@ -240,18 +283,32 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
       return List.of();
     }
 
-    var candidates = new ArrayList<String>(6);
+    var candidates = new ArrayList<String>(12);
     if (online) {
       if (sender.hasPermission(USE_PERMISSION)) {
         candidates.add("say");
         candidates.add("resume");
+      }
+      if (sender.hasPermission(UI_PERMISSION)) {
         candidates.add("ui");
       }
       if (sender.hasPermission(MODULE_PERMISSION)) {
         candidates.add("module");
       }
-      if (sender.hasPermission(PERMISSION)) {
+      if (sender.hasPermission(STATUS_PERMISSION)) {
+        candidates.add("status");
+      }
+      if (sender.hasPermission(DOCTOR_PERMISSION)) {
         candidates.add("doctor");
+      }
+      if (sender.hasPermission(CAPABILITIES_PERMISSION)) {
+        candidates.add("capabilities");
+      }
+      if (sender.hasPermission(COSTS_PERMISSION)) {
+        candidates.add("costs");
+      }
+      if (reloadAuthorizer.canReload(sender)) {
+        candidates.add("reload");
       }
       if (toggleAuthorizer.canToggle(sender)) {
         candidates.add("off");
@@ -363,7 +420,7 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
   }
 
   private void ui(CommandSender sender, String[] arguments) {
-    if (!sender.hasPermission(USE_PERMISSION)) {
+    if (!sender.hasPermission(UI_PERMISSION)) {
       sender.sendMessage(PERMISSION_DENIED_MESSAGE);
       return;
     }
@@ -381,6 +438,7 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
           case "unpin" -> AgentUiControl.Action.UNPIN;
           case "clear" -> AgentUiControl.Action.CLEAR;
           case "preview" -> AgentUiControl.Action.PREVIEW;
+          case "remove" -> AgentUiControl.Action.REMOVE;
           case "materials" -> AgentUiControl.Action.MATERIALS;
           default -> null;
         };
@@ -389,7 +447,9 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
       return;
     }
     boolean requiresViewId =
-        action == AgentUiControl.Action.PREVIEW || action == AgentUiControl.Action.MATERIALS;
+        action == AgentUiControl.Action.PREVIEW
+            || action == AgentUiControl.Action.REMOVE
+            || action == AgentUiControl.Action.MATERIALS;
     if (arguments.length != (requiresViewId ? 3 : 2)) {
       sender.sendMessage(getUsage());
       return;
@@ -466,6 +526,268 @@ public final class AgentCommand extends Command implements PluginIdentifiableCom
     } catch (RuntimeException ignored) {
       // A failed reply dispatch must not expose gateway details or escape command execution.
     }
+  }
+
+  private void status(CommandSender sender, AgentStatus agentStatus) {
+    if (!sender.hasPermission(STATUS_PERMISSION)) {
+      sender.sendMessage(PERMISSION_DENIED_MESSAGE);
+      return;
+    }
+    var snapshot = safeSnapshot();
+    sender.sendMessage("Minecraft Agent status: " + agentStatus.state().name());
+    sender.sendMessage("Desired mode: " + agentStatus.desiredMode().name());
+    sender.sendMessage("Health: " + healthLabel(agentStatus.health()));
+    sender.sendMessage("Runtime: " + (snapshot.runtimeConnected() ? "CONNECTED" : "DISCONNECTED"));
+    sender.sendMessage("Protocol: " + snapshot.protocolVersion());
+    sender.sendMessage("Active requests: " + snapshot.activeRequests());
+  }
+
+  private void doctor(CommandSender sender, AgentStatus agentStatus) {
+    if (!sender.hasPermission(DOCTOR_PERMISSION)) {
+      sender.sendMessage(PERMISSION_DENIED_MESSAGE);
+      return;
+    }
+    var snapshot = safeSnapshot();
+    sender.sendMessage("Minecraft Agent health: " + healthLabel(agentStatus.health()));
+    sender.sendMessage("Paper component: " + snapshot.componentVersion());
+    sender.sendMessage("Runtime protocol: " + snapshot.protocolVersion());
+    sender.sendMessage(
+        "Clients: online="
+            + snapshot.clients().onlinePlayers()
+            + " negotiated="
+            + snapshot.clients().negotiatedClients());
+    sender.sendMessage("Client protocols: " + counts(snapshot.clients().protocolCounts()));
+    sender.sendMessage("Client features: " + counts(snapshot.clients().featureCounts()));
+    sender.sendMessage(
+        "Litematica adapters: " + counts(snapshot.clients().litematicaAdapterCounts()));
+    for (var compatibility : snapshot.clients().litematicaCompatibility()) {
+      sender.sendMessage(
+          "Litematica compatibility: status="
+              + compatibility.status()
+              + " clients="
+              + compatibility.clients()
+              + " minecraft="
+              + compatibility.minecraftVersion()
+              + " fabric="
+              + compatibility.fabricLoaderVersion()
+              + " litematica="
+              + compatibility.litematicaVersion()
+              + " malilib="
+              + compatibility.malilibVersion()
+              + " adapter="
+              + compatibility.adapterId());
+    }
+    if (snapshot.clients().omittedCompatibilityGroups() > 0) {
+      sender.sendMessage(
+          "Litematica compatibility groups omitted: "
+              + snapshot.clients().omittedCompatibilityGroups());
+    }
+    sender.sendMessage(
+        "Capabilities: generation="
+            + snapshot.capabilities().generation()
+            + " effective="
+            + snapshot.capabilities().effective().size()
+            + " disabled="
+            + snapshot.capabilities().disabledCount());
+    if (agentStatus.failureCode() != null) {
+      sender.sendMessage("Core: " + agentStatus.failureCode());
+    }
+    for (var warning : agentStatus.warningCodes()) {
+      sender.sendMessage("Warning: " + warning);
+    }
+  }
+
+  private void capabilities(CommandSender sender) {
+    if (!sender.hasPermission(CAPABILITIES_PERMISSION)) {
+      sender.sendMessage(PERMISSION_DENIED_MESSAGE);
+      return;
+    }
+    var summary = safeSnapshot().capabilities();
+    sender.sendMessage(
+        "Capability catalog: generation="
+            + summary.generation()
+            + " effective="
+            + summary.effective().size()
+            + " disabled="
+            + summary.disabledCount());
+    for (var capability : summary.effective()) {
+      sender.sendMessage(
+          "Capability: "
+              + capability.id()
+              + "@"
+              + capability.version()
+              + " sha256="
+              + capability.sha256());
+    }
+    for (var diagnostic : summary.diagnosticCounts().entrySet()) {
+      sender.sendMessage(
+          "Capability diagnostic: " + diagnostic.getKey() + "=" + diagnostic.getValue());
+    }
+  }
+
+  private void costs(CommandSender sender) {
+    if (!sender.hasPermission(COSTS_PERMISSION)) {
+      sender.sendMessage(PERMISSION_DENIED_MESSAGE);
+      return;
+    }
+    try {
+      var completion = management.costs();
+      if (completion == null) {
+        dispatchCosts(sender, AgentManagementGateway.CostsResult.failed());
+        return;
+      }
+      completion.whenComplete(
+          (result, error) ->
+              dispatchCosts(
+                  sender,
+                  error == null && result != null
+                      ? result
+                      : AgentManagementGateway.CostsResult.failed()));
+    } catch (RuntimeException error) {
+      dispatchCosts(sender, AgentManagementGateway.CostsResult.failed());
+    }
+  }
+
+  private void dispatchCosts(CommandSender sender, AgentManagementGateway.CostsResult result) {
+    replyDispatcher.accept(
+        () -> {
+          if (!onlineNow()) {
+            sender.sendMessage(OFFLINE_MESSAGE);
+            return;
+          }
+          if (!sender.hasPermission(COSTS_PERMISSION)) {
+            sender.sendMessage(PERMISSION_DENIED_MESSAGE);
+            return;
+          }
+          if (result.status() != AgentManagementGateway.CostsStatus.AVAILABLE) {
+            sender.sendMessage(
+                result.status() == AgentManagementGateway.CostsStatus.UNAVAILABLE
+                    ? "AI cost accounting is unavailable."
+                    : "AI cost query failed. Try again.");
+            return;
+          }
+          var snapshot = Objects.requireNonNull(result.snapshot());
+          sender.sendMessage("AI costs: currency=USD");
+          sender.sendMessage("Today: " + usage(snapshot.today()));
+          sender.sendMessage("Month: " + usage(snapshot.month()));
+          sender.sendMessage(
+              "Monthly budget: usd="
+                  + usd(snapshot.monthlyBudgetMicroUsd())
+                  + " settledUsd="
+                  + usd(snapshot.settledMonthlyCostMicroUsd())
+                  + " activeReservationsUsd="
+                  + usd(snapshot.activeReservationsMicroUsd())
+                  + " remainingUsd="
+                  + usd(snapshot.remainingMonthlyBudgetMicroUsd())
+                  + " status="
+                  + (snapshot.budgetExhausted() ? "EXHAUSTED" : "AVAILABLE"));
+        });
+  }
+
+  private void reload(CommandSender sender) {
+    if (!reloadAuthorizer.canReload(sender)) {
+      sender.sendMessage(PERMISSION_DENIED_MESSAGE);
+      return;
+    }
+    sender.sendMessage("AI reload started.");
+    try {
+      var completion = management.reload();
+      if (completion == null) {
+        dispatchReload(
+            sender,
+            new AgentManagementGateway.ReloadResult(AgentManagementGateway.ReloadStatus.FAILED));
+        return;
+      }
+      completion.whenComplete(
+          (result, error) ->
+              dispatchReload(
+                  sender,
+                  error == null && result != null
+                      ? result
+                      : new AgentManagementGateway.ReloadResult(
+                          AgentManagementGateway.ReloadStatus.FAILED)));
+    } catch (RuntimeException error) {
+      dispatchReload(
+          sender,
+          new AgentManagementGateway.ReloadResult(AgentManagementGateway.ReloadStatus.FAILED));
+    }
+  }
+
+  private void dispatchReload(CommandSender sender, AgentManagementGateway.ReloadResult result) {
+    var message =
+        switch (result.status()) {
+          case RELOADED -> "AI configuration reloaded.";
+          case UNCHANGED -> "AI configuration unchanged.";
+          case RESTART_REQUIRED -> "AI configuration change requires a server restart.";
+          case INVALID_CONFIG ->
+              "AI configuration is invalid; the previous configuration remains active.";
+          case BUSY -> "AI reload already in progress.";
+          case UNAVAILABLE -> "AI reload is unavailable.";
+          case FAILED -> "AI reload failed; the previous configuration remains active.";
+        };
+    replyDispatcher.accept(
+        () -> {
+          if (!onlineNow()) {
+            sender.sendMessage(OFFLINE_MESSAGE);
+          } else if (!reloadAuthorizer.canReload(sender)) {
+            sender.sendMessage(PERMISSION_DENIED_MESSAGE);
+          } else {
+            sender.sendMessage(message);
+          }
+        });
+  }
+
+  private boolean onlineNow() {
+    try {
+      var current = status.get();
+      return current != null && current.state() == AgentState.ONLINE;
+    } catch (RuntimeException error) {
+      return false;
+    }
+  }
+
+  private dev.minecraftagent.paper.management.ManagementSnapshot safeSnapshot() {
+    try {
+      var snapshot = management.snapshot();
+      return snapshot == null
+          ? dev.minecraftagent.paper.management.ManagementSnapshot.unavailable()
+          : snapshot;
+    } catch (RuntimeException error) {
+      return dev.minecraftagent.paper.management.ManagementSnapshot.unavailable();
+    }
+  }
+
+  private static String counts(java.util.Map<String, Integer> values) {
+    return values.isEmpty()
+        ? "none"
+        : values.entrySet().stream()
+            .map(entry -> entry.getKey() + "=" + entry.getValue())
+            .collect(java.util.stream.Collectors.joining(","));
+  }
+
+  private static String usage(AgentManagementGateway.UsageWindow window) {
+    return "period="
+        + window.period()
+        + " requests="
+        + window.requests()
+        + " providerCalls="
+        + window.providerCalls()
+        + " reported="
+        + window.reportedProviderCalls()
+        + " estimated="
+        + window.estimatedProviderCalls()
+        + " inputTokens="
+        + window.inputTokens()
+        + " outputTokens="
+        + window.outputTokens()
+        + " usd="
+        + usd(window.costMicroUsd());
+  }
+
+  private static String usd(long microUsd) {
+    return (microUsd / 1_000_000L)
+        + "."
+        + String.format(Locale.ROOT, "%06d", microUsd % 1_000_000L);
   }
 
   private static void handleSubmission(

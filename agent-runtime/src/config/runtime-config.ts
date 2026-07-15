@@ -8,6 +8,7 @@ import { z, type ZodIssue } from "zod";
 import { RuntimeStartupError, type RuntimeConfigIssue } from "../bootstrap/startup-error.js";
 
 const MAX_CONFIG_BYTES = 64 * 1024;
+const CURRENT_CONFIG_VERSION = 2;
 const ENVIRONMENT_REFERENCE = /^\$\{([A-Z_][A-Z0-9_]*)\}$/u;
 const PLACEHOLDER_SECRET = /^(?:change-?me|replace-with-|your[-_])/iu;
 
@@ -60,7 +61,7 @@ const secretSchema = z
 
 const runtimeConfigSchema = z
   .object({
-    configVersion: z.literal(1),
+    configVersion: z.literal(CURRENT_CONFIG_VERSION),
     server: z
       .object({
         id: z
@@ -90,6 +91,8 @@ const runtimeConfigSchema = z
           .max(128)
           .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u),
         timeoutSeconds: z.number().int().min(1).max(120),
+        inputMicroUsdPerMillionTokens: z.number().int().min(0).max(1_000_000_000_000),
+        outputMicroUsdPerMillionTokens: z.number().int().min(0).max(1_000_000_000_000),
       })
       .strict(),
     storage: z
@@ -140,7 +143,15 @@ const runtimeConfigSchema = z
         maxContextCharacters: z.number().int().min(4096).max(65_536).default(32_768),
         perPlayerCooldownSeconds: z.number().int().min(0).max(3600),
         dailyRequestsPerPlayer: z.number().int().min(1).max(1_000_000),
-        monthlyBudgetUsd: z.number().finite().min(0).max(1_000_000),
+        monthlyBudgetUsd: z
+          .number()
+          .finite()
+          .min(0)
+          .max(1_000_000)
+          .refine((value) => Number.isSafeInteger(value * 1_000_000), {
+            message: "must use at most six decimal places",
+          }),
+        providerRoundReservationMicroUsd: z.number().int().min(1).max(1_000_000_000_000),
       })
       .strict(),
     privacy: z
@@ -361,6 +372,26 @@ function schemaError(issues: readonly ZodIssue[]): RuntimeStartupError {
   });
 }
 
+function assertSupportedConfigVersion(input: unknown): void {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return;
+  }
+  const version = (input as Readonly<Record<string, unknown>>)["configVersion"];
+  if (typeof version !== "number" || version === CURRENT_CONFIG_VERSION) {
+    return;
+  }
+
+  throw new RuntimeStartupError({
+    code: "CONFIG_VERSION_UNSUPPORTED",
+    stage: "config",
+    field: "/configVersion",
+    safeMessage:
+      version === 1
+        ? "Runtime configuration version 1 is no longer supported. Upgrade to configVersion 2."
+        : "Runtime configuration version is unsupported. Use configVersion 2.",
+  });
+}
+
 function assertSecretValues(config: RuntimeConfig): void {
   const secrets = [
     ["/model/apiKey", config.model.apiKey],
@@ -567,6 +598,7 @@ export async function loadRuntimeConfig(
   const configFile = resolve(rootDirectory, basename(requestedConfigFile));
   const parsed = parseYaml(source);
   const expanded = expandEnvironmentReferences(parsed, environment);
+  assertSupportedConfigVersion(expanded.value);
   const result = runtimeConfigSchema.safeParse(expanded.value);
   if (!result.success) {
     throw schemaError(result.error.issues);

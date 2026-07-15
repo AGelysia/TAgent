@@ -515,6 +515,46 @@ must re-read live state, enforce the write policy and proposal lifecycle, define
 conflict/partial-failure/rollback behavior, and preserve durable audit before a
 single block can change.
 
+## Management safety
+
+Phase 12 keeps the command-level Offline check ahead of every management
+permission, argument parser, Runtime query, and reload authorizer. When the
+service is not ONLINE, `status`, `doctor`, `capabilities`, `costs`, `reload`, and
+client UI commands all return exactly `AI offline`; only exact `on` and `off`
+forms can reach their separate toggle authorization.
+
+Read-only management permissions are independent and default to OP. Reload is
+stricter: only the local Console or a player UUID in the current immutable Owner
+set can invoke it. OP state and `minecraftagent.admin.reload` alone carry no
+authority. The loader parses and validates a complete candidate off-thread.
+Publication replaces one generation containing the Owner set and full security
+policy with a single compare-and-set; authorization suppliers read that same
+snapshot for proposal, toggle, and reload decisions. Runtime endpoint/token,
+timeouts, server ID, state/Capability paths, and Capability approvals are not
+hot-swappable and return a fixed restart-required result. A rejected, stale,
+concurrent, closed, or failed reload leaves the prior generation active.
+
+The startup/recovery self-check cannot publish owners, proposal policy, or a new
+reload baseline. Those candidate objects are committed only after the Runtime
+connection is authenticated and the lifecycle attempt is still current; all
+failure and disable paths discard them. The trusted manager survives recovery,
+so `off -> edit restart-only fields -> on` cannot rebase the endpoint, token,
+paths, approvals, or generation. A reload captures an Online operational permit
+and commits permit validation plus policy CAS while holding the same transition
+lock. Cost/reload replies also recheck Online state and caller authority on the
+main thread before output.
+
+Management output is a separate bounded projection, not a dump of subsystem
+objects. Capability source paths and rejected values are excluded. Client
+diagnostics are anonymous current-generation counts grouped by protocol,
+feature version, and a closed Litematica status/version tuple; the client hello
+schema rejects any path field. Compatibility strings are bounded printable
+data and cannot affect advertised capability or authorization. Cost responses
+contain only server-wide UTC day/month aggregates and budget state over the
+authenticated Runtime channel. Per-player quota rows, UUIDs, prompts, paths,
+provider errors, credentials, and raw configuration values never enter these
+surfaces.
+
 ## Data and privacy
 
 Paper security records and Runtime conversation records use separate stores and
@@ -586,7 +626,7 @@ Responses request only for admitted player work.
 
 ## Current enforcement gap
 
-At the Phase 11 boundary, Paper-side startup, authenticated application channel,
+At the Phase 12 boundary, Paper-side startup, authenticated application channel,
 conditional registration, persistent Offline state, epoch gate, private
 conversation, request cancellation, Runtime-owned sessions, owner-filtered
 resume, one-shot modules, bounded context, Runtime provider limits, eight Paper
@@ -602,12 +642,18 @@ registry item rendering, local preferences, and an optional exact-version
 Litematica lifecycle adapter. Private Markdown search, project schema v2,
 landmark search, authoritative recipe v2, strict Palette validation, Paper-owned
 preview generation, and native local schematic generation are implemented.
+Paper additionally exposes bounded status, doctor, Capability, and cost queries,
+anonymous client compatibility diagnostics, and the restricted atomic local
+policy reload. Runtime SQLite v3-v5 durably enforces UTC daily admissions and
+applies monthly provider cost reservations/settlement as a conservative
+admission bound. The v5 process-owner row assumes one Linux PID namespace and a
+local database; operators must stop older v3/v4 Runtime binaries before upgrade.
 
 The production proposal catalog is still empty, the synchronous service has no
 production creation path, and no capability record has an executor. Proposal
-WebSocket handlers, write-operation producers, durable usage accounting,
-trusted third-party command adapters, a world apply/rollback adapter, and world
-mutation remain absent. Build preview publication is disabled by default and is
+WebSocket handlers, write-operation producers, trusted third-party command
+adapters, a world apply/rollback adapter, and world mutation remain absent.
+Build preview publication is disabled by default and is
 read-only when explicitly enabled. A graphical client with the real supported
 Litematica/MaLiLib tuple has not been
 run on this host. Protocol schemas, a client ACK, an effective capability record,

@@ -1143,7 +1143,7 @@ final class SharedProtocolContractTest {
     private List<String> validateViewNegotiation(JsonNode negotiation) {
         var client = negotiation.path("client");
         var view = negotiation.path("view");
-        if (!"1.0".equals(client.path("clientProtocolVersion").asText())) {
+        if (!Set.of("1.0", "1.1").contains(client.path("clientProtocolVersion").asText())) {
             return List.of("VIEW_PROTOCOL_UNSUPPORTED");
         }
 

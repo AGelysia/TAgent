@@ -1,5 +1,6 @@
 package dev.minecraftagent.client.network;
 
+import dev.minecraftagent.client.litematica.LitematicaAdapterDiagnostic;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.regex.Pattern;
@@ -13,9 +14,12 @@ public record ClientHandshakeAdvertisement(
     int litematicaPreview,
     int litematicaMaterialList,
     Optional<String> litematicaVersion,
-    Optional<String> malilibVersion) {
+    Optional<String> malilibVersion,
+    LitematicaAdapterDiagnostic litematicaAdapterDiagnostic) {
   private static final Pattern VERSION =
       Pattern.compile("[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?");
+  private static final Pattern DEPENDENCY_VERSION =
+      Pattern.compile("[0-9A-Za-z][0-9A-Za-z._+-]{0,63}");
 
   public ClientHandshakeAdvertisement {
     if (modVersion == null || modVersion.length() > 64 || !VERSION.matcher(modVersion).matches()) {
@@ -28,6 +32,7 @@ public record ClientHandshakeAdvertisement(
     requireFeatureVersion(litematicaMaterialList);
     litematicaVersion = Objects.requireNonNull(litematicaVersion);
     malilibVersion = Objects.requireNonNull(malilibVersion);
+    Objects.requireNonNull(litematicaAdapterDiagnostic);
     litematicaVersion.ifPresent(ClientHandshakeAdvertisement::requireDependencyVersion);
     malilibVersion.ifPresent(ClientHandshakeAdvertisement::requireDependencyVersion);
     if ((litematicaPreview == 1 || litematicaMaterialList == 1)
@@ -37,6 +42,15 @@ public record ClientHandshakeAdvertisement(
     }
     if (litematicaMaterialList == 1 && litematicaPreview != 1) {
       throw new IllegalArgumentException("Material List requires preview support");
+    }
+    if (litematicaAdapterDiagnostic.status() != LitematicaAdapterDiagnostic.Status.READY
+        && (litematicaPreview != 0 || litematicaMaterialList != 0)) {
+      throw new IllegalArgumentException(
+          "Unavailable Litematica adapters cannot advertise Litematica capabilities");
+    }
+    if (!litematicaVersion.equals(litematicaAdapterDiagnostic.litematicaVersion())
+        || !malilibVersion.equals(litematicaAdapterDiagnostic.malilibVersion())) {
+      throw new IllegalArgumentException("Dependency versions and diagnostics do not agree");
     }
   }
 
@@ -51,9 +65,7 @@ public record ClientHandshakeAdvertisement(
   }
 
   private static void requireDependencyVersion(String version) {
-    if (version.isEmpty()
-        || version.length() > 64
-        || version.chars().anyMatch(character -> character < 0x20 || character > 0x7e)) {
+    if (!DEPENDENCY_VERSION.matcher(version).matches()) {
       throw new IllegalArgumentException("Invalid dependency version");
     }
   }

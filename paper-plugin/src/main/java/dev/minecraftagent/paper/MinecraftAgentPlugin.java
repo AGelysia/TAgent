@@ -17,7 +17,9 @@ import dev.minecraftagent.paper.client.PaperClientChannel;
 import dev.minecraftagent.paper.command.AdminToggleAuthorizer;
 import dev.minecraftagent.paper.command.AgentCommand;
 import dev.minecraftagent.paper.command.AgentControl;
+import dev.minecraftagent.paper.command.AgentManagementGateway;
 import dev.minecraftagent.paper.command.AgentUiControl;
+import dev.minecraftagent.paper.command.OwnerReloadAuthorizer;
 import dev.minecraftagent.paper.command.PaperCommandRegistration;
 import dev.minecraftagent.paper.command.ProposalResponseGateway;
 import dev.minecraftagent.paper.landmark.LandmarkCatalog;
@@ -30,6 +32,9 @@ import dev.minecraftagent.paper.lifecycle.OfflineCleanup;
 import dev.minecraftagent.paper.lifecycle.OfflineReason;
 import dev.minecraftagent.paper.lifecycle.OperationalGate;
 import dev.minecraftagent.paper.lifecycle.PaperStartupCoordinator;
+import dev.minecraftagent.paper.management.ManagementSnapshotFactory;
+import dev.minecraftagent.paper.management.reload.PaperReloadCandidateSource;
+import dev.minecraftagent.paper.management.reload.ReloadManager;
 import dev.minecraftagent.paper.preview.BuildPreviewArtifactRepository;
 import dev.minecraftagent.paper.preview.PaperBuildPreviewService;
 import dev.minecraftagent.paper.proposal.InMemoryProposalRepository;
@@ -59,6 +64,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
@@ -86,6 +92,7 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
   private final AtomicReference<ProposalService> proposalServiceReference = new AtomicReference<>();
   private final AtomicReference<ProposalAuthorizer.Policy> proposalPolicyReference =
       new AtomicReference<>(lockedProposalPolicy());
+  private final AtomicReference<ReloadManager> reloadManagerReference = new AtomicReference<>();
   private final CapabilityRegistry capabilityRegistry = new CapabilityRegistry();
 
   @Override
@@ -93,6 +100,10 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     clientChannelReference.set(null);
     proposalServiceReference.set(null);
     proposalPolicyReference.set(lockedProposalPolicy());
+    var staleReloadManager = reloadManagerReference.getAndSet(null);
+    if (staleReloadManager != null) {
+      staleReloadManager.close();
+    }
     var dataDirectory = getDataFolder().toPath().toAbsolutePath().normalize();
     var configPath = dataDirectory.resolve("config.yml");
     var minecraftVersion = getServer().getMinecraftVersion();
@@ -118,7 +129,12 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     var operationalGate = new OperationalGate();
     var proposalAuthorizer =
         new ProposalAuthorizer(
-            proposalPolicyReference::get,
+            () -> {
+              var manager = reloadManagerReference.get();
+              return manager == null
+                  ? proposalPolicyReference.get()
+                  : manager.snapshot().proposalPolicy();
+            },
             new ProposalAuthorizer.LivePlayerPolicy() {
               @Override
               public boolean isOnline(UUID playerUuid) {
@@ -234,6 +250,56 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
             return current.turnOn();
           }
         };
+    java.util.function.Supplier<AdminPolicy> currentAdminPolicy =
+        () -> {
+          var manager = reloadManagerReference.get();
+          if (manager != null) {
+            return manager.snapshot().adminPolicy();
+          }
+          var current = coordinatorReference.get();
+          return current == null ? AdminPolicy.locked() : current.adminPolicy();
+        };
+    AgentManagementGateway management =
+        new AgentManagementGateway() {
+          @Override
+          public dev.minecraftagent.paper.management.ManagementSnapshot snapshot() {
+            return ManagementSnapshotFactory.create(
+                componentVersion,
+                "1.0",
+                requests.runtimeConnected(),
+                requests.activeRequestCount(),
+                capabilityRegistry.snapshot(),
+                clientState.diagnosticsSnapshot());
+          }
+
+          @Override
+          public java.util.concurrent.CompletionStage<CostsResult> costs() {
+            return requests.queryCosts().thenApply(MinecraftAgentPlugin::mapCostsResult);
+          }
+
+          @Override
+          public java.util.concurrent.CompletionStage<ReloadResult> reload() {
+            var manager = reloadManagerReference.get();
+            if (manager == null) {
+              return CompletableFuture.completedFuture(new ReloadResult(ReloadStatus.UNAVAILABLE));
+            }
+            var request = manager.reload();
+            return request
+                .completion()
+                .thenApply(
+                    result -> {
+                      getLogger()
+                          .info(
+                              "event=configuration_reload status="
+                                  + result.status().name()
+                                  + " code="
+                                  + result.code().name()
+                                  + " generation="
+                                  + result.generation());
+                      return mapReloadResult(result);
+                    });
+          }
+        };
     var command =
         new AgentCommand(
             this,
@@ -251,6 +317,7 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
                     case UNPIN -> ClientUiCommandGateway.Action.UNPIN;
                     case CLEAR -> ClientUiCommandGateway.Action.CLEAR;
                     case PREVIEW -> ClientUiCommandGateway.Action.LITEMATICA_PREVIEW_LOAD;
+                    case REMOVE -> ClientUiCommandGateway.Action.LITEMATICA_PREVIEW_REMOVE;
                     case MATERIALS -> ClientUiCommandGateway.Action.LITEMATICA_MATERIAL_LIST_OPEN;
                   };
               return clientUi.invoke(playerId, clientAction, viewId)
@@ -258,11 +325,9 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
                   ? AgentUiControl.Result.SENT
                   : AgentUiControl.Result.CLIENT_UNAVAILABLE;
             },
-            new AdminToggleAuthorizer(
-                () -> {
-                  var current = coordinatorReference.get();
-                  return current == null ? AdminPolicy.locked() : current.adminPolicy();
-                }),
+            management,
+            new OwnerReloadAuthorizer(currentAdminPolicy),
+            new AdminToggleAuthorizer(currentAdminPolicy),
             task -> getServer().getScheduler().runTask(this, task));
 
     var coordinator =
@@ -278,8 +343,13 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
                           System.getenv(),
                           Runtime.version().feature(),
                           minecraftVersion));
-              landmarkCatalogReference.set(new LandmarkCatalogLoader().loadOrCreate(dataDirectory));
-              serverIdReference.set(result.config().serverId());
+              var landmarkCatalog = new LandmarkCatalogLoader().loadOrCreate(dataDirectory);
+              var trustedReloadManager = reloadManagerReference.get();
+              if (trustedReloadManager != null
+                  && trustedReloadManager.restartRequired(result.config()).isPresent()) {
+                throw new StartupFailure(
+                    StartupFailure.Code.PAPER_RESTART_REQUIRED, StartupFailure.Stage.CONFIG);
+              }
               var runtime = result.config().runtime();
               var settings =
                   new RuntimeConnectionSettings(
@@ -303,12 +373,17 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
               }
               var desiredModeStore = desiredModeStoreReference.get();
               var desiredMode = desiredModeStore.load();
-              var policy = result.config().securityPolicy();
-              var proposalPolicy =
-                  new ProposalAuthorizer.Policy(
-                      result.config().owners(),
-                      proposalWriteAccess(policy.worldWrite()),
-                      proposalWriteAccess(policy.playerWrite()));
+              var candidateReloadManager =
+                  trustedReloadManager == null
+                      ? new ReloadManager(
+                          worker,
+                          new PaperReloadCandidateSource(
+                              configPath, dataDirectory, System.getenv()),
+                          result.config(),
+                          operationalGate)
+                      : trustedReloadManager;
+              var effectivePolicy = candidateReloadManager.snapshot();
+              var proposalPolicy = effectivePolicy.proposalPolicy();
               var proposalAudit = FileProposalAuditLog.open(checkedStateDirectory);
               var proposalService =
                   new ProposalService(
@@ -321,15 +396,59 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
                       operationalGate,
                       Clock.systemUTC(),
                       Duration.ofSeconds(60));
-              refreshCapabilityCatalog(result, pluginInventory, warnings);
-              proposalPolicyReference.set(proposalPolicy);
-              proposalServiceReference.set(proposalService);
-              return new CoreReadiness(
-                  settings,
-                  List.copyOf(warnings),
-                  desiredMode,
-                  desiredModeStore,
-                  new AdminPolicy(result.config().owners(), policy.allowOpToggle()));
+              var capabilityPublication =
+                  prepareCapabilityCatalog(result, pluginInventory, warnings);
+              var readiness =
+                  new CoreReadiness(
+                      settings,
+                      List.copyOf(warnings),
+                      desiredMode,
+                      desiredModeStore,
+                      effectivePolicy.adminPolicy(),
+                      new CoreReadiness.Publication() {
+                        private final java.util.concurrent.atomic.AtomicBoolean finalized =
+                            new java.util.concurrent.atomic.AtomicBoolean();
+
+                        @Override
+                        public void publish() {
+                          if (!finalized.compareAndSet(false, true)) {
+                            throw new IllegalStateException(
+                                "Startup candidate was already finalized");
+                          }
+                          try {
+                            if (trustedReloadManager == null) {
+                              if (!reloadManagerReference.compareAndSet(
+                                  null, candidateReloadManager)) {
+                                throw new IllegalStateException(
+                                    "Trusted reload manager changed during startup");
+                              }
+                            } else if (reloadManagerReference.get() != trustedReloadManager) {
+                              throw new IllegalStateException(
+                                  "Trusted reload manager changed during recovery");
+                            }
+                            landmarkCatalogReference.set(landmarkCatalog);
+                            serverIdReference.set(result.config().serverId());
+                            capabilityPublication.run();
+                            proposalPolicyReference.set(proposalPolicy);
+                            proposalServiceReference.set(proposalService);
+                          } catch (RuntimeException error) {
+                            if (trustedReloadManager == null) {
+                              reloadManagerReference.compareAndSet(candidateReloadManager, null);
+                              candidateReloadManager.close();
+                            }
+                            throw error;
+                          }
+                        }
+
+                        @Override
+                        public void discard() {
+                          if (finalized.compareAndSet(false, true)
+                              && trustedReloadManager == null) {
+                            candidateReloadManager.close();
+                          }
+                        }
+                      });
+              return readiness;
             },
             connector,
             task -> getServer().getScheduler().runTask(this, task),
@@ -391,6 +510,10 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     }
     proposalServiceReference.set(null);
     proposalPolicyReference.set(lockedProposalPolicy());
+    var reloadManager = reloadManagerReference.getAndSet(null);
+    if (reloadManager != null) {
+      reloadManager.close();
+    }
     var requests = requestServiceReference.getAndSet(null);
     if (requests != null) {
       requests.close();
@@ -405,19 +528,19 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     getLogger().warning("event=startup_warning stage=" + stage + " code=" + code);
   }
 
-  private void refreshCapabilityCatalog(
+  private Runnable prepareCapabilityCatalog(
       dev.minecraftagent.paper.startup.LocalStartupResult startup,
       PaperInstalledPluginInventory pluginInventory,
       Set<String> warnings) {
     if (startup.warnings().stream()
         .anyMatch(
             warning -> warning.code() == StartupWarning.Code.OPTIONAL_CAPABILITY_UNAVAILABLE)) {
-      getLogger()
-          .warning(
-              "event=capability_catalog status=RETAINED generation="
-                  + capabilityRegistry.snapshot().generation()
-                  + " code=OPTIONAL_CAPABILITY_UNAVAILABLE");
-      return;
+      return () ->
+          getLogger()
+              .warning(
+                  "event=capability_catalog status=RETAINED generation="
+                      + capabilityRegistry.snapshot().generation()
+                      + " code=OPTIONAL_CAPABILITY_UNAVAILABLE");
     }
 
     var approvals = startup.config().capabilityApprovals();
@@ -425,13 +548,26 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
         new CapabilityPackLoader(pluginInventory, approvals::contains)
             .load(startup.config().optionalCapabilityDirectory());
     var preview = capabilityRegistry.preview(loaded);
-    var publication = capabilityRegistry.publish(preview);
-    if (publication.status() != CapabilityRegistry.PublishStatus.PUBLISHED) {
+    if (!preview.publishable()) {
       warnings.add(StartupWarning.Code.CAPABILITY_CATALOG_UNAVAILABLE.name());
     } else if (loaded.drafts().stream().anyMatch(draft -> !draft.enabled())) {
       warnings.add(StartupWarning.Code.CAPABILITY_PACK_DISABLED.name());
     }
+    return () -> {
+      try {
+        publishCapabilityCatalog(loaded, preview);
+      } catch (RuntimeException error) {
+        getLogger()
+            .warning(
+                "event=capability_catalog status=RETAINED code=CAPABILITY_CATALOG_UNAVAILABLE");
+      }
+    };
+  }
 
+  private void publishCapabilityCatalog(
+      dev.minecraftagent.paper.capability.load.CapabilityLoadResult loaded,
+      dev.minecraftagent.paper.capability.registry.CapabilityRegistryPreview preview) {
+    var publication = capabilityRegistry.publish(preview);
     var diffPrefix =
         publication.status() == CapabilityRegistry.PublishStatus.PUBLISHED ? "" : "proposed_";
     getLogger()
@@ -548,17 +684,77 @@ public final class MinecraftAgentPlugin extends JavaPlugin {
     };
   }
 
-  private static ProposalAuthorizer.WriteAccess proposalWriteAccess(
-      dev.minecraftagent.paper.startup.SecurityPolicy.AccessLevel access) {
-    return switch (access) {
-      case OP -> ProposalAuthorizer.WriteAccess.OP;
-      case OWNER -> ProposalAuthorizer.WriteAccess.OWNER;
-    };
-  }
-
   private static ProposalAuthorizer.Policy lockedProposalPolicy() {
     return new ProposalAuthorizer.Policy(
         Set.of(), ProposalAuthorizer.WriteAccess.OWNER, ProposalAuthorizer.WriteAccess.OWNER);
+  }
+
+  private static AgentManagementGateway.ReloadResult mapReloadResult(
+      dev.minecraftagent.paper.management.reload.ReloadResult result) {
+    var status =
+        switch (result.code()) {
+          case RELOAD_APPLIED -> AgentManagementGateway.ReloadStatus.RELOADED;
+          case RELOAD_UNCHANGED -> AgentManagementGateway.ReloadStatus.UNCHANGED;
+          case RELOAD_IN_PROGRESS -> AgentManagementGateway.ReloadStatus.BUSY;
+          case RELOAD_MANAGER_CLOSED, RELOAD_OPERATION_NOT_ONLINE ->
+              AgentManagementGateway.ReloadStatus.UNAVAILABLE;
+          case RELOAD_CONFIG_REJECTED -> AgentManagementGateway.ReloadStatus.INVALID_CONFIG;
+          case RELOAD_RESTART_REQUIRED_SERVER_ID,
+              RELOAD_RESTART_REQUIRED_RUNTIME_ENDPOINT,
+              RELOAD_RESTART_REQUIRED_RUNTIME_TOKEN,
+              RELOAD_RESTART_REQUIRED_RUNTIME_CONNECT_TIMEOUT,
+              RELOAD_RESTART_REQUIRED_RUNTIME_HANDSHAKE_TIMEOUT,
+              RELOAD_RESTART_REQUIRED_STATE_DIRECTORY,
+              RELOAD_RESTART_REQUIRED_CAPABILITY_DIRECTORY,
+              RELOAD_RESTART_REQUIRED_CAPABILITY_APPROVALS ->
+              AgentManagementGateway.ReloadStatus.RESTART_REQUIRED;
+          case RELOAD_WORKER_REJECTED,
+              RELOAD_CANDIDATE_LOAD_FAILED,
+              RELOAD_GENERATION_EXHAUSTED,
+              RELOAD_STALE_COMPLETION ->
+              AgentManagementGateway.ReloadStatus.FAILED;
+        };
+    return new AgentManagementGateway.ReloadResult(status);
+  }
+
+  private static AgentManagementGateway.CostsResult mapCostsResult(
+      AgentRequestService.CostsQueryResult result) {
+    return switch (result.status()) {
+      case UNAVAILABLE -> AgentManagementGateway.CostsResult.unavailable();
+      case TIMED_OUT, FAILED -> AgentManagementGateway.CostsResult.failed();
+      case AVAILABLE -> {
+        var costs = Objects.requireNonNull(result.costs());
+        var day = costs.currentDay();
+        var month = costs.currentMonth();
+        var budget = costs.budget();
+        yield AgentManagementGateway.CostsResult.available(
+            new AgentManagementGateway.CostsSnapshot(
+                new AgentManagementGateway.UsageWindow(
+                    day.period(),
+                    day.admittedRequests(),
+                    day.providerCalls(),
+                    day.reportedProviderCalls(),
+                    day.estimatedProviderCalls(),
+                    day.inputTokens(),
+                    day.outputTokens(),
+                    day.costMicroUsd()),
+                new AgentManagementGateway.UsageWindow(
+                    month.period(),
+                    month.admittedRequests(),
+                    month.providerCalls(),
+                    month.reportedProviderCalls(),
+                    month.estimatedProviderCalls(),
+                    month.inputTokens(),
+                    month.outputTokens(),
+                    month.costMicroUsd()),
+                budget.month(),
+                budget.limitMicroUsd(),
+                budget.settledMicroUsd(),
+                budget.activeReservationsMicroUsd(),
+                budget.remainingMicroUsd(),
+                budget.exhausted()));
+      }
+    };
   }
 
   private static void installDefaultConfig(Path dataDirectory, Path configPath)

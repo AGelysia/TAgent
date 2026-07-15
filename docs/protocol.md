@@ -9,7 +9,8 @@ Protocol 1.0 defines contracts for two separate links:
    read-tool exchanges after authentication. Phase 8 adds proposal contracts
    without enabling proposal transport handlers. Phase 10 permits negotiated
    client capabilities on `agent.request` and closed structured views inside
-   `agent.complete`; standalone `view.publish` remains unsupported.
+   `agent.complete`; standalone `view.publish` remains unsupported. Phase 12
+   adds a server-wide management cost query over the same authenticated channel.
 2. Paper to the optional Fabric client over versioned Minecraft custom payloads
    on the Phase 10 `minecraftagent:client` channel.
 
@@ -123,35 +124,39 @@ selected version of `null` represents negotiation failure and cannot transition
 a connection to ready.
 
 The Fabric handshake is separate. `client-handshake.schema.json` advertises the
-client protocol, mod version, fixed feature versions, and detected Litematica
-and MaLiLib versions. It contains no Runtime authentication fields or player
-identity. Paper binds it to the player on the actual plugin-message connection
-and replies with the current positive connection generation.
+hello protocol, mod version, fixed feature versions, and detected Litematica and
+MaLiLib versions. The outer client payload remains version `1.0`; the current
+hello is `1.1`, while Paper continues to accept the diagnostic-free `1.0` hello.
+It contains no Runtime authentication fields or player identity. Paper binds it
+to the player on the actual plugin-message connection and replies with the
+current positive connection generation.
 
 ## Payload contracts
 
 Protocol 1.0 includes these closed contracts:
 
-| Contract             | Purpose                                                               |
-| -------------------- | --------------------------------------------------------------------- |
-| `handshake`          | Runtime-Paper version and authentication negotiation                  |
-| `agent-request`      | Session, actual player identity, module, message, and client features |
-| `agent-complete`     | Correlated private fallback text and bounded structured views         |
-| `agent-error`        | Correlated stable error code, safe fallback text, and retry hint      |
-| `agent-cancel`       | Correlated Paper-originated cancellation reason                       |
-| `session-resume`     | Player-owned exact or latest session selection request                |
-| `session-resumed`    | Correlated selected non-null session identifier                       |
-| `tool-call`          | Typed tool identity, closed arguments, and bounded loop sequence      |
-| `tool-result`        | Status, source, trust label, result, or stable error                  |
-| `proposal`           | Frozen write intent and integrity hashes                              |
-| `proposal-confirmed` | Redacted correlation after trusted confirmation admission             |
-| `proposal-cancelled` | Redacted correlation and a closed cancellation reason                 |
-| `client-handshake`   | Client feature and dependency negotiation                             |
-| `client-payload`     | Closed raw-JSON client channel envelope and message directions         |
-| `structured-view`    | Trusted fixed view variants and fallback relationship                 |
-| `recipe-view`        | Structured server recipe representation                               |
-| `build-preview`      | Bounded target projection and transform metadata                      |
-| `capability`         | Declarative Capability Pack manifest                                  |
+| Contract                    | Purpose                                                               |
+| --------------------------- | --------------------------------------------------------------------- |
+| `handshake`                 | Runtime-Paper version and authentication negotiation                  |
+| `agent-request`             | Session, actual player identity, module, message, and client features |
+| `agent-complete`            | Correlated private fallback text and bounded structured views         |
+| `agent-error`               | Correlated stable error code, safe fallback text, and retry hint      |
+| `agent-cancel`              | Correlated Paper-originated cancellation reason                       |
+| `session-resume`            | Player-owned exact or latest session selection request                |
+| `session-resumed`           | Correlated selected non-null session identifier                       |
+| `tool-call`                 | Typed tool identity, closed arguments, and bounded loop sequence      |
+| `tool-result`               | Status, source, trust label, result, or stable error                  |
+| `management-costs-request`  | Empty authenticated request for current server-wide usage             |
+| `management-costs-response` | Correlated UTC day/month cost and budget aggregates                   |
+| `proposal`                  | Frozen write intent and integrity hashes                              |
+| `proposal-confirmed`        | Redacted correlation after trusted confirmation admission             |
+| `proposal-cancelled`        | Redacted correlation and a closed cancellation reason                 |
+| `client-handshake`          | Client feature and dependency negotiation                             |
+| `client-payload`            | Closed raw-JSON client channel envelope and message directions        |
+| `structured-view`           | Trusted fixed view variants and fallback relationship                 |
+| `recipe-view`               | Structured server recipe representation                               |
+| `build-preview`             | Bounded target projection and transform metadata                      |
+| `capability`                | Declarative Capability Pack manifest                                  |
 
 Schemas can exist before their behavior. Phase 5 enables agent request,
 completion, error, and cancellation after hello; Phase 6 adds dedicated session
@@ -179,6 +184,30 @@ the loop and no ninth call is emitted. Failed/rejected results require
 source/trust provenance. Structured views now travel only as validated fields of
 `agent.complete`; the implementation still does not create a proposal through
 the authenticated channel or expose a pack-backed Runtime capability.
+
+### Management costs
+
+`management.costs.request` is Paper-to-Runtime and has an empty closed payload.
+Like other top-level queries, its `messageId` equals its newly allocated
+`requestId`. Runtime returns one correlated `management.costs.response` with a
+distinct response `messageId`; normal timestamp, nonce, server-ID, replay-cache,
+schema, authentication, and 64 KiB application limits apply.
+
+The response contains exactly `currentDay`, `currentMonth`, and `budget`.
+`currentDay.period` is a UTC `YYYY-MM-DD`; `currentMonth.period` and
+`budget.month` are UTC `YYYY-MM`. Each usage window contains admitted request
+count, total provider calls, reported/estimated call counts, input/output token
+totals, and integer `costMicroUsd`. `budget` contains the configured limit,
+settled cost, active provider-round reservations, remaining amount after both,
+and an exhausted flag. An estimated call means a successful provider response
+omitted usage and Runtime conservatively settled that round at its configured
+reservation. Counts and monetary fields are non-negative safe integers.
+
+The payload is intentionally server-wide and bounded. It contains no player
+UUID, session/request ID list, per-player count, prompt, completion, pricing
+credential, or provider response detail. Player identity exists only in the
+private Runtime admission tables needed to enforce the daily limit and is not
+projected onto this management contract.
 
 Phase 8 registers `proposal.create`, `proposal.confirmed`, and
 `proposal.cancelled` payload schemas and a shared RFC 8785 argument-hash golden.
@@ -217,17 +246,31 @@ Directions are fixed:
 
 | Direction       | Types                                                                  |
 | --------------- | ---------------------------------------------------------------------- |
-| Client to Paper | `client.hello`, `client.ack`, `client.error`                       |
+| Client to Paper | `client.hello`, `client.ack`, `client.error`                           |
 | Paper to client | `server.hello`, `view.begin`, `view.chunk`, `view.clear`, `ui.control` |
 
 Paper assigns a positive per-player generation on the actual connection. Every
 post-handshake message repeats it, and reconnect, disconnect, world transition,
 Offline cleanup, or plugin disable invalidates pending state from older
-generations. `client.hello` advertises protocol `1.0`, the client mod version,
-independent bounded feature versions (`recipeView` may be `2`), and nullable
-detected dependency versions. `server.hello` selects only server-known view
-schema `1.0`; it cannot
-be expanded by a client claim.
+generations. The current `client.hello` advertises protocol `1.1`, the client mod
+version, independent bounded feature versions (`recipeView` may be `2`), and
+nullable detected dependency versions. Protocol `1.1` requires
+`diagnostics.litematicaAdapter`: a closed, path-free status plus bounded
+Minecraft/Fabric/Litematica/MaLiLib/adapter version tuple. The status is one of
+`READY`, `NOT_INSTALLED`, `MISSING_DEPENDENCY`, `UNSUPPORTED_VERSION`,
+`ADAPTER_LINKAGE_FAILED`, or `PREVIEW_STORAGE_UNAVAILABLE`, and its nullable
+fields and dependency presence must agree. A non-`READY` `1.1` hello must set
+both Litematica capability versions to zero; a `READY` diagnostic may still
+advertise zero. Paper binds the diagnostic to the current connection generation
+for anonymous management aggregation only; it cannot raise a feature version or
+authorize a UI action.
+
+Paper also accepts the original hello protocol `1.0`, which has no `diagnostics`
+field. Its already-negotiated presentation capabilities remain effective, and
+Paper creates an internal `LEGACY_UNREPORTED` diagnostic solely for anonymous
+operator counts. That internal status is not a wire value. `server.hello`
+selects only server-known view schema `1.0`; it cannot be expanded by a client
+claim.
 
 `agent.complete.structuredViews` is an ordered alternatives list. Paper
 validates every entry but publishes only the first view whose schema and
@@ -377,6 +420,8 @@ silently change hash behavior under protocol 1.0.
 ## Compatibility rules
 
 - Runtime-Paper protocol 1.0 currently negotiates only exact version `1.0`.
+- The client payload envelope remains `1.0`; Paper accepts hello protocols `1.0`
+  and `1.1`, and the current Fabric client emits `1.1`.
 - Fabric features are independently versioned; an old recipe view does not
   imply support for a build preview.
 - Unknown fields are rejected rather than ignored in security-sensitive

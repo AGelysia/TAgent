@@ -84,6 +84,36 @@ describe("runtime bootstrap", () => {
     }
   });
 
+  it("rejects a second live Runtime owner before recovery or provider access", async () => {
+    const directory = await fixtureDirectory();
+    const configPath = await writeRuntimeConfig(directory);
+    const first = await bootstrap({
+      configPath,
+      environment: runtimeEnvironment(),
+      modelProviderHealthCheck: healthyProvider(),
+    });
+    const blockedProvider = healthyProvider();
+    try {
+      await expect(
+        bootstrap({
+          configPath,
+          environment: runtimeEnvironment(),
+          modelProviderHealthCheck: blockedProvider,
+        }),
+      ).rejects.toMatchObject({ code: "SQLITE_BUSY" });
+      expect(blockedProvider.check).not.toHaveBeenCalled();
+    } finally {
+      await first.app.close();
+    }
+
+    const replacement = await bootstrap({
+      configPath,
+      environment: runtimeEnvironment(),
+      modelProviderHealthCheck: healthyProvider(),
+    });
+    await replacement.app.close();
+  });
+
   it("binds only after the provider check and serves a cached minimal health view", async () => {
     const directory = await fixtureDirectory();
     const port = await findAvailablePort();

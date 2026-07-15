@@ -74,6 +74,14 @@ verified, reassembled content described by a `view.begin` and its
 `build-preview.schema.json`. Phase 11 publishes that view type only from a
 Paper-owned artifact when the operator explicitly enables it.
 
+The outer `clientPayloadVersion` remains `1.0`. The current Fabric client emits
+hello protocol `1.1`, which requires the closed Litematica diagnostic. Paper
+also accepts the original diagnostic-free hello `1.0` and preserves its feature
+claims; it groups those clients under the internal, non-wire
+`LEGACY_UNREPORTED` diagnostic. In hello `1.1`, dependency and diagnostic version
+presence must agree, Paper additionally requires exact version equality, and a
+non-`READY` diagnostic must advertise both Litematica features as zero.
+
 `structured-view.schema.json` has its own type-discriminated content. Recipe,
 build preview, proposal, and ItemStack references resolve to the corresponding
 local schemas. The client only accepts a view type and version it advertised.

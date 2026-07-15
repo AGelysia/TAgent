@@ -26,7 +26,8 @@ import java.util.regex.Pattern;
 
 /** Strict raw-UTF-8 codec for the client side of the single custom payload channel. */
 public final class ClientPayloadCodec {
-  public static final String PROTOCOL_VERSION = "1.0";
+  public static final String PAYLOAD_VERSION = "1.0";
+  public static final String HELLO_PROTOCOL_VERSION = "1.1";
   public static final int MAX_INBOUND_BYTES = AgentClientPayload.MAX_FRAME_BYTES;
   public static final int MAX_OUTBOUND_BYTES = 16 * 1024;
 
@@ -43,7 +44,7 @@ public final class ClientPayloadCodec {
   public ClientServerMessage decodeServer(byte[] bytes) {
     JsonObject envelope = parse(bytes);
     requireFields(envelope, ENVELOPE_FIELDS);
-    if (!PROTOCOL_VERSION.equals(string(envelope, "clientPayloadVersion", 3))) {
+    if (!PAYLOAD_VERSION.equals(string(envelope, "clientPayloadVersion", 3))) {
       throw failure("CLIENT_PROTOCOL_INCOMPATIBLE");
     }
     UUID messageId = uuid(envelope, "messageId", false);
@@ -74,11 +75,24 @@ public final class ClientPayloadCodec {
     addNullable(dependencies, "litematica", advertisement.litematicaVersion().orElse(null));
     addNullable(dependencies, "malilib", advertisement.malilibVersion().orElse(null));
 
+    var diagnostic = advertisement.litematicaAdapterDiagnostic();
+    JsonObject litematicaAdapter = new JsonObject();
+    litematicaAdapter.addProperty("status", diagnostic.status().name());
+    litematicaAdapter.addProperty("minecraftVersion", diagnostic.minecraftVersion());
+    litematicaAdapter.addProperty("fabricLoaderVersion", diagnostic.fabricLoaderVersion());
+    addNullable(
+        litematicaAdapter, "litematicaVersion", diagnostic.litematicaVersion().orElse(null));
+    addNullable(litematicaAdapter, "malilibVersion", diagnostic.malilibVersion().orElse(null));
+    addNullable(litematicaAdapter, "adapterId", diagnostic.adapterId().orElse(null));
+    JsonObject diagnostics = new JsonObject();
+    diagnostics.add("litematicaAdapter", litematicaAdapter);
+
     JsonObject payload = new JsonObject();
-    payload.addProperty("clientProtocolVersion", PROTOCOL_VERSION);
+    payload.addProperty("clientProtocolVersion", HELLO_PROTOCOL_VERSION);
     payload.addProperty("modVersion", advertisement.modVersion());
     payload.add("capabilities", capabilities);
     payload.add("dependencies", dependencies);
+    payload.add("diagnostics", diagnostics);
     return encode(messageId, "client.hello", payload);
   }
 
@@ -227,7 +241,7 @@ public final class ClientPayloadCodec {
 
   private static byte[] encode(UUID messageId, String type, JsonObject payload) {
     JsonObject envelope = new JsonObject();
-    envelope.addProperty("clientPayloadVersion", PROTOCOL_VERSION);
+    envelope.addProperty("clientPayloadVersion", PAYLOAD_VERSION);
     envelope.addProperty("messageId", Objects.requireNonNull(messageId).toString());
     envelope.addProperty("type", type);
     envelope.add("payload", payload);

@@ -7,6 +7,11 @@ import { loadRuntimeConfig, type LoadRuntimeConfigOptions } from "../config/runt
 import { checkLogDirectory } from "../health/filesystem.js";
 import { checkModelProvider, type ModelProviderHealthCheck } from "../health/model-provider.js";
 import { registerHealthRoute, RuntimeHealthState } from "../health/runtime-health.js";
+import {
+  acquireRuntimeDatabaseLock,
+  RuntimeDatabaseLockBusyError,
+  type RuntimeDatabaseLock,
+} from "../health/runtime-lock.js";
 import { checkRuntimeSqlite, type RuntimeSqliteHandle } from "../health/sqlite.js";
 import { loadMarkdownKnowledge } from "../knowledge/markdown-loader.js";
 import { RuntimeLogger } from "../observability/runtime-logger.js";
@@ -23,6 +28,11 @@ import { SqliteProjectRepository } from "../storage/project-repository.js";
 import { LocalToolExecutor } from "../tools/local-tool-executor.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
 import { registerPaperHandshakeRoute } from "../transport/paper-handshake.js";
+import {
+  SqliteUsageAccounting,
+  usdToMicroUsd,
+  type UsageAccounting,
+} from "../usage/usage-accounting.js";
 import { runtimeIdentity, type RuntimeIdentity } from "../version.js";
 
 export interface BootstrapOptions extends LoadRuntimeConfigOptions {
@@ -42,6 +52,7 @@ export interface BootstrapResult {
   readonly app: FastifyInstance;
   readonly identity: RuntimeIdentity;
   readonly health: RuntimeHealthState;
+  readonly costs: UsageAccounting;
   readonly listenAddress: RuntimeListenAddress;
 }
 
@@ -68,6 +79,8 @@ async function checkProtocolSchema(protocolRoot?: string): Promise<SchemaRegistr
       "capability.schema.json",
       "client-payload.schema.json",
       "envelope.schema.json",
+      "management-costs-request.schema.json",
+      "management-costs-response.schema.json",
       "session-resume.schema.json",
       "session-resumed.schema.json",
       "tool-call.schema.json",
@@ -117,6 +130,7 @@ async function checkProtocolSchema(protocolRoot?: string): Promise<SchemaRegistr
 export async function bootstrap(options: BootstrapOptions = {}): Promise<BootstrapResult> {
   const logger = options.logger ?? new RuntimeLogger();
   let sqlite: RuntimeSqliteHandle | undefined;
+  let runtimeDatabaseLock: RuntimeDatabaseLock | undefined;
   let app: FastifyInstance | undefined;
 
   try {
@@ -132,12 +146,30 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
     const storageNow = options.now?.() ?? new Date();
     let conversations: DisabledConversationRepository | SqliteConversationRepository;
     let projects: SqliteProjectRepository;
+    let costs: SqliteUsageAccounting;
     try {
       migrateRuntimeStorage(sqlite.database, storageNow.toISOString());
+      runtimeDatabaseLock = acquireRuntimeDatabaseLock(sqlite.database, storageNow.toISOString());
       conversations = loaded.config.privacy.storeConversations
         ? new SqliteConversationRepository(sqlite.database)
         : new DisabledConversationRepository();
       projects = new SqliteProjectRepository(sqlite.database);
+      costs = new SqliteUsageAccounting(sqlite.database, {
+        serverId: loaded.config.server.id,
+        provider: loaded.config.model.provider,
+        model: loaded.config.model.model,
+        pricing: {
+          inputMicroUsdPerMillionTokens: loaded.config.model.inputMicroUsdPerMillionTokens,
+          outputMicroUsdPerMillionTokens: loaded.config.model.outputMicroUsdPerMillionTokens,
+        },
+        limits: {
+          dailyRequestsPerPlayer: loaded.config.limits.dailyRequestsPerPlayer,
+          monthlyBudgetMicroUsd: usdToMicroUsd(loaded.config.limits.monthlyBudgetUsd),
+          providerRoundReservationMicroUsd: loaded.config.limits.providerRoundReservationMicroUsd,
+        },
+      });
+      costs.recoverAbandonedRequests(storageNow.getTime());
+      costs.pruneHistoricalDetails(storageNow.getTime());
       if (loaded.config.privacy.storeConversations && loaded.config.privacy.retentionDays > 0) {
         const cutoff = new Date(
           storageNow.getTime() - loaded.config.privacy.retentionDays * 24 * 60 * 60 * 1000,
@@ -145,6 +177,15 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
         conversations.purgeExpired(cutoff.toISOString());
       }
     } catch (error) {
+      if (error instanceof RuntimeDatabaseLockBusyError) {
+        throw new RuntimeStartupError({
+          code: "SQLITE_BUSY",
+          stage: "sqlite",
+          field: "/storage/sqlitePath",
+          safeMessage: "Runtime SQLite database is owned by another Runtime process.",
+          cause: error,
+        });
+      }
       throw new RuntimeStartupError({
         code: "SQLITE_WRITE_FAILED",
         stage: "sqlite",
@@ -172,6 +213,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
       conversations,
       tools,
       localTools,
+      usage: costs,
       ...(options.now === undefined ? {} : { now: () => options.now?.().getTime() ?? Date.now() }),
     });
     app = createRuntimeApp();
@@ -181,15 +223,20 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
       schemaRegistry,
       health,
       agentRequests,
+      usage: costs,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     registerHealthRoute(app, health);
     app.addHook("preClose", async () => {
-      agentRequests.close();
+      await agentRequests.close();
     });
     app.addHook("onClose", async () => {
       health.markStopped();
-      sqlite?.close();
+      try {
+        runtimeDatabaseLock?.release();
+      } finally {
+        sqlite?.close();
+      }
     });
     await app.ready();
 
@@ -197,6 +244,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
       app,
       identity: runtimeIdentity,
       health,
+      costs,
       listenAddress: {
         host: loaded.config.transport.host,
         port: loaded.config.transport.port,
@@ -204,6 +252,11 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
     };
   } catch (error) {
     await app?.close().catch(() => undefined);
+    try {
+      runtimeDatabaseLock?.release();
+    } catch {
+      // The original startup error remains authoritative during cleanup.
+    }
     try {
       sqlite?.close();
     } catch {

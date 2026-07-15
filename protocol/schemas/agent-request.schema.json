@@ -36,7 +36,7 @@
           "type": "boolean"
         },
         "clientProtocolVersion": {
-          "oneOf": [{ "const": "1.0" }, { "type": "null" }]
+          "oneOf": [{ "enum": ["1.0", "1.1"] }, { "type": "null" }]
         },
         "features": {
           "type": "object",
@@ -94,7 +94,7 @@
           },
           "then": {
             "properties": {
-              "clientProtocolVersion": { "const": "1.0" }
+              "clientProtocolVersion": { "enum": ["1.0", "1.1"] }
             }
           }
         }

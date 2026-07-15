@@ -27,6 +27,7 @@ import type {
   ToolExecutionResult,
   ToolResultPayload,
 } from "../tools/tool-types.js";
+import type { UsageAccounting } from "../usage/usage-accounting.js";
 import { RequestAdmissionController, type RequestAdmissionRejection } from "./request-admission.js";
 import {
   createAuthoritativeRecipePresentation,
@@ -37,6 +38,7 @@ import {
 } from "./recipe-presentation.js";
 
 const MAXIMUM_MODEL_OUTPUT_TOKENS = 1024;
+const SHUTDOWN_PROVIDER_GRACE_MILLISECONDS = 1_000;
 
 type VerifiedProjectRevisions = Map<string, number>;
 
@@ -221,6 +223,7 @@ export type AgentErrorCode =
   | "MODEL_RESPONSE_INVALID"
   | "REQUEST_CANCELLED"
   | "REQUEST_LIMITED"
+  | "BUDGET_EXCEEDED"
   | "SESSION_NOT_FOUND"
   | "CONVERSATION_STORAGE_DISABLED"
   | "TOOL_REJECTED"
@@ -267,6 +270,7 @@ export interface AgentRequestServiceOptions {
   readonly modules?: ModuleRegistry;
   readonly tools: ToolRegistry;
   readonly localTools?: LocalToolExecution;
+  readonly usage?: UsageAccounting;
 }
 
 interface PendingToolCall {
@@ -290,6 +294,7 @@ interface RequestRecord {
   executionSessionId: string | null;
   createsSession: boolean;
   pendingTool: PendingToolCall | undefined;
+  usageAdmitted: boolean;
   readonly issuedToolCallIds: Set<string>;
 }
 
@@ -300,6 +305,13 @@ class ToolLoopError extends Error {
     super(code);
     this.name = "ToolLoopError";
     this.code = code;
+  }
+}
+
+class UsageBudgetError extends Error {
+  public constructor() {
+    super("MONTHLY_BUDGET_EXCEEDED");
+    this.name = "UsageBudgetError";
   }
 }
 
@@ -318,6 +330,18 @@ function limitedError(
       code: "REQUEST_LIMITED",
       fallbackText,
       retryable: true,
+    },
+  };
+}
+
+function budgetError(playerUuid: string): AgentTerminalResponse {
+  return {
+    type: "agent.error",
+    payload: {
+      playerUuid,
+      code: "BUDGET_EXCEEDED",
+      fallbackText: "The monthly AI budget has been reached. Ask an administrator to review it.",
+      retryable: false,
     },
   };
 }
@@ -462,8 +486,11 @@ export class AgentRequestService {
   readonly #modules: ModuleRegistry;
   readonly #tools: ToolRegistry;
   readonly #localTools: LocalToolExecution;
+  readonly #usage: UsageAccounting | undefined;
   readonly #requests = new Map<string, RequestRecord>();
+  readonly #runs = new Set<Promise<void>>();
   #closed = false;
+  #usageHealthy = true;
 
   public constructor(options: AgentRequestServiceOptions) {
     const timeoutMilliseconds =
@@ -479,6 +506,7 @@ export class AgentRequestService {
     this.#modules = options.modules ?? new ModuleRegistry();
     this.#tools = options.tools;
     this.#localTools = options.localTools ?? new UnavailableLocalToolExecutor();
+    this.#usage = options.usage;
     this.#timeoutMilliseconds = timeoutMilliseconds;
     this.#admission = new RequestAdmissionController(
       {
@@ -508,6 +536,39 @@ export class AgentRequestService {
       this.#safeRespond(respond, limitedError(input.playerUuid, "PLAYER_BUSY"));
       return;
     }
+    if (this.#usage !== undefined && !this.#usageHealthy) {
+      this.#safeRespond(respond, internalError(input.playerUuid));
+      return;
+    }
+
+    let usageAdmitted = false;
+    if (this.#usage !== undefined) {
+      try {
+        const usageDecision = this.#usageOperation(() =>
+          this.#usage?.admitRequest({
+            requestId: input.requestId,
+            playerUuid: input.playerUuid,
+            timestamp: this.#now(),
+          }),
+        );
+        if (usageDecision === undefined) {
+          throw new Error("Usage accounting disappeared during admission.");
+        }
+        if (!usageDecision.accepted) {
+          this.#safeRespond(
+            respond,
+            usageDecision.reason === "MONTHLY_BUDGET_EXCEEDED"
+              ? budgetError(input.playerUuid)
+              : limitedError(input.playerUuid, "PLAYER_DAILY_LIMIT"),
+          );
+          return;
+        }
+        usageAdmitted = true;
+      } catch {
+        this.#safeRespond(respond, internalError(input.playerUuid));
+        return;
+      }
+    }
 
     const record: RequestRecord = {
       input,
@@ -522,6 +583,7 @@ export class AgentRequestService {
       executionSessionId: null,
       createsSession: false,
       pendingTool: undefined,
+      usageAdmitted,
       issuedToolCallIds: new Set(),
     };
     this.#requests.set(input.requestId, record);
@@ -532,7 +594,19 @@ export class AgentRequestService {
     });
     if (!decision.accepted) {
       this.#requests.delete(input.requestId);
-      this.#safeRespond(respond, limitedError(input.playerUuid, decision.reason));
+      try {
+        if (record.usageAdmitted) {
+          this.#usageOperation(() => {
+            if (this.#usage?.rollbackAdmission(input.requestId) !== true) {
+              throw new Error("Durable usage admission could not be rolled back.");
+            }
+          });
+          record.usageAdmitted = false;
+        }
+        this.#safeRespond(respond, limitedError(input.playerUuid, decision.reason));
+      } catch {
+        this.#safeRespond(respond, internalError(input.playerUuid));
+      }
       return;
     }
 
@@ -582,7 +656,11 @@ export class AgentRequestService {
   }
 
   public cancelAll(): void {
-    for (const record of [...this.#requests.values()]) {
+    const records = [...this.#requests.values()];
+    for (const record of records.filter((candidate) => candidate.phase === "QUEUED")) {
+      this.cancel(record.input.requestId, record.input.playerUuid);
+    }
+    for (const record of records.filter((candidate) => candidate.phase !== "QUEUED")) {
       this.cancel(record.input.requestId, record.input.playerUuid);
     }
   }
@@ -631,9 +709,25 @@ export class AgentRequestService {
     }
   }
 
-  public close(): void {
+  public async close(): Promise<void> {
     this.#closed = true;
     this.cancelAll();
+    if (this.#runs.size === 0) {
+      return;
+    }
+    let graceTimer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled([...this.#runs]),
+        new Promise<void>((resolve) => {
+          graceTimer = setTimeout(resolve, SHUTDOWN_PROVIDER_GRACE_MILLISECONDS);
+        }),
+      ]);
+    } finally {
+      if (graceTimer !== undefined) {
+        clearTimeout(graceTimer);
+      }
+    }
   }
 
   public get activeCount(): number {
@@ -646,7 +740,7 @@ export class AgentRequestService {
 
   #start(record: RequestRecord): void {
     record.phase = "ACTIVE";
-    void this.#run(record)
+    const run = this.#run(record)
       .catch((error: unknown) => {
         if (record.terminalSent || record.suppressResponse) {
           return;
@@ -660,11 +754,18 @@ export class AgentRequestService {
               ? sessionError(record.input.playerUuid, "SESSION_NOT_FOUND")
               : error instanceof ToolLoopError
                 ? toolLoopError(record.input.playerUuid, error.code)
-                : internalError(record.input.playerUuid),
+                : error instanceof UsageBudgetError
+                  ? budgetError(record.input.playerUuid)
+                  : internalError(record.input.playerUuid),
         );
       })
       .finally(() => {
         this.#detach(record);
+      });
+    this.#runs.add(run);
+    void run
+      .finally(() => {
+        this.#runs.delete(run);
       })
       .catch(() => undefined);
   }
@@ -690,6 +791,33 @@ export class AgentRequestService {
 
     while (!record.controller.signal.aborted) {
       const toolsAvailable = sequence < this.#config.limits.maxToolRounds;
+      if (this.#usage !== undefined && !this.#usageHealthy) {
+        throw new Error("Usage accounting is unavailable.");
+      }
+      if (sequence > 0 && this.#usage !== undefined) {
+        const reservation = this.#usageOperation(() =>
+          this.#usage?.reserveProviderRound(record.input.requestId, sequence, this.#now()),
+        );
+        if (reservation === undefined) {
+          throw new Error("Usage accounting disappeared during reservation.");
+        }
+        if (!reservation.accepted) {
+          if (reservation.reason === "MONTHLY_BUDGET_EXCEEDED") {
+            throw new UsageBudgetError();
+          }
+          throw new Error("Usage request closed before its next provider round.");
+        }
+      }
+      if (this.#usage !== undefined) {
+        this.#usageOperation(() => {
+          if (
+            this.#usage?.markProviderRoundStarted(record.input.requestId, sequence, this.#now()) !==
+            true
+          ) {
+            throw new Error("Provider round could not be durably marked as started.");
+          }
+        });
+      }
       let result: ModelGenerationResult;
       try {
         result = await this.#provider.generate({
@@ -705,6 +833,29 @@ export class AgentRequestService {
           signal: record.controller.signal,
         });
       } catch (error) {
+        if (this.#usage !== undefined) {
+          this.#usageOperation(() => {
+            if (
+              error instanceof ModelGenerationError &&
+              error.accountingDisposition === "NOT_BILLABLE" &&
+              !record.detached
+            ) {
+              if (
+                this.#usage?.releaseProviderRound(record.input.requestId, sequence, this.#now()) !==
+                true
+              ) {
+                throw new Error("Non-billable provider round could not be released.");
+              }
+              return;
+            }
+            this.#usage?.recordProviderUsage({
+              requestId: record.input.requestId,
+              playerUuid: record.input.playerUuid,
+              providerRound: sequence,
+              timestamp: this.#now(),
+            });
+          });
+        }
         if (
           !toolsAvailable &&
           error instanceof ModelGenerationError &&
@@ -713,6 +864,17 @@ export class AgentRequestService {
           throw new ToolLoopError("TOOL_ROUND_LIMIT");
         }
         throw error;
+      }
+      if (this.#usage !== undefined) {
+        this.#usageOperation(() =>
+          this.#usage?.recordProviderUsage({
+            requestId: record.input.requestId,
+            playerUuid: record.input.playerUuid,
+            providerRound: sequence,
+            timestamp: this.#now(),
+            ...(result.usage === undefined ? {} : { usage: result.usage }),
+          }),
+        );
       }
       if (result.type === "final") {
         if (authoritativeRecipe !== undefined) {
@@ -1010,6 +1172,18 @@ export class AgentRequestService {
       return;
     }
     record.detached = true;
+    if (record.usageAdmitted) {
+      record.usageAdmitted = false;
+      try {
+        this.#usageOperation(() => {
+          if (this.#usage?.closeRequest(record.input.requestId, this.#now()) !== true) {
+            throw new Error("Durable usage admission could not be closed.");
+          }
+        });
+      } catch {
+        // A terminal request must still release in-memory admission after a storage failure.
+      }
+    }
     const pending = record.pendingTool;
     if (pending !== undefined) {
       record.pendingTool = undefined;
@@ -1024,6 +1198,18 @@ export class AgentRequestService {
       this.#admission.cancelQueued(record.input.requestId, record.input.playerUuid);
     } else {
       this.#admission.releaseActive(record.input.requestId);
+    }
+  }
+
+  #usageOperation<Result>(operation: () => Result): Result {
+    if (!this.#usageHealthy) {
+      throw new Error("Usage accounting is unavailable.");
+    }
+    try {
+      return operation();
+    } catch (error) {
+      this.#usageHealthy = false;
+      throw error;
     }
   }
 

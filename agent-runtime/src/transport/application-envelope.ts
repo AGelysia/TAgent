@@ -51,9 +51,37 @@ export type PaperApplicationMessage =
       readonly type: "tool.result";
       readonly requestId: string;
       readonly result: ToolResultPayload;
-    };
+    }
+  | { readonly type: "management.costs.request"; readonly requestId: string };
 
-export type RuntimeApplicationResponse = AgentRuntimeResponse | SessionResumeResponse;
+export interface ManagementUsageWindow {
+  readonly period: string;
+  readonly admittedRequests: number;
+  readonly providerCalls: number;
+  readonly reportedProviderCalls: number;
+  readonly estimatedProviderCalls: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly costMicroUsd: number;
+}
+
+export interface ManagementCostsPayload {
+  readonly currentDay: ManagementUsageWindow;
+  readonly currentMonth: ManagementUsageWindow;
+  readonly budget: {
+    readonly month: string;
+    readonly limitMicroUsd: number;
+    readonly settledMicroUsd: number;
+    readonly activeReservationsMicroUsd: number;
+    readonly remainingMicroUsd: number;
+    readonly exhausted: boolean;
+  };
+}
+
+export type RuntimeApplicationResponse =
+  | AgentRuntimeResponse
+  | SessionResumeResponse
+  | { readonly type: "management.costs.response"; readonly payload: ManagementCostsPayload };
 
 export interface ApplicationEnvelopeProtocolOptions {
   readonly serverId: string;
@@ -126,7 +154,8 @@ export class ApplicationEnvelopeProtocol {
       envelope.type !== "agent.request" &&
       envelope.type !== "agent.cancel" &&
       envelope.type !== "session.resume" &&
-      envelope.type !== "tool.result"
+      envelope.type !== "tool.result" &&
+      envelope.type !== "management.costs.request"
     ) {
       throw new ApplicationProtocolFailure("UNSUPPORTED_MESSAGE_TYPE");
     }
@@ -157,7 +186,9 @@ export class ApplicationEnvelopeProtocol {
           ? "agent-cancel.schema.json"
           : envelope.type === "session.resume"
             ? "session-resume.schema.json"
-            : "tool-result.schema.json";
+            : envelope.type === "tool.result"
+              ? "tool-result.schema.json"
+              : "management-costs-request.schema.json";
     if (!this.#schemaRegistry.validate(payloadSchema, envelope.payload).valid) {
       throw invalid();
     }
@@ -200,7 +231,7 @@ export class ApplicationEnvelopeProtocol {
             envelope.payload["sessionId"] === null ? null : String(envelope.payload["sessionId"]),
         },
       };
-    } else {
+    } else if (envelope.type === "tool.result") {
       if (envelope.messageId === envelope.requestId) {
         throw invalid();
       }
@@ -226,6 +257,11 @@ export class ApplicationEnvelopeProtocol {
               : (envelope.payload["error"] as ToolResultPayload["error"]),
         },
       };
+    } else {
+      if (envelope.messageId !== envelope.requestId) {
+        throw invalid();
+      }
+      message = { type: "management.costs.request", requestId: envelope.requestId };
     }
 
     if (!this.#replayCache.accept(envelope.messageId, envelope.nonce, now.getTime())) {
@@ -245,7 +281,9 @@ export class ApplicationEnvelopeProtocol {
           ? "agent-error.schema.json"
           : response.type === "session.resumed"
             ? "session-resumed.schema.json"
-            : "tool-call.schema.json";
+            : response.type === "tool.call"
+              ? "tool-call.schema.json"
+              : "management-costs-response.schema.json";
     if (!this.#schemaRegistry.validate(payloadSchema, response.payload).valid) {
       throw new Error(`Runtime generated an invalid ${response.type} payload.`);
     }

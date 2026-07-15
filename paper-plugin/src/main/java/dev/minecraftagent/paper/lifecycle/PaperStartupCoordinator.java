@@ -284,6 +284,7 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
         (candidate, error) -> {
           if (!isCurrent(attempt)) {
             closeCandidate(candidate);
+            discardPublication(attempt);
             attempt.completion.complete(false);
             return;
           }
@@ -293,6 +294,7 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
                     synchronized (PaperStartupCoordinator.this) {
                       if (!isCurrent(attempt)) {
                         closeCandidate(candidate);
+                        discardPublication(attempt);
                         attempt.completion.complete(false);
                       } else if (error == null) {
                         finishSuccess(attempt, candidate);
@@ -318,6 +320,7 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
     requireCurrent(attempt);
     try {
       var readiness = coreSelfCheck.run();
+      attempt.readiness.set(readiness);
       requireCurrent(attempt);
       return readiness;
     } catch (StartupFailure failure) {
@@ -390,6 +393,17 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
       }
     }
 
+    try {
+      publishPublication(attempt, candidate.readiness());
+    } catch (RuntimeException error) {
+      if (shouldBecomeOnline) {
+        runtimeApplications.detach(connection);
+      }
+      finishFailure(
+          attempt, new RuntimeConnectionFailure("CANDIDATE_PUBLICATION_FAILED", "lifecycle"));
+      return;
+    }
+
     desiredModeStore = candidate.readiness().desiredModeStore();
     adminPolicy.set(candidate.readiness().adminPolicy());
     attempt.connectionAttempt.set(null);
@@ -428,6 +442,7 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
     if (connection != null) {
       connection.close();
     }
+    discardPublication(attempt);
     var failure = failureDetails(error);
     if (attempt.kind == AttemptKind.INITIAL) {
       if (commandRegistered) {
@@ -502,6 +517,7 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
     if (candidate != null) {
       candidate.close();
     }
+    discardPublication(attempt);
     attempt.completion.complete(false);
   }
 
@@ -594,6 +610,25 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
     }
   }
 
+  private static void publishPublication(Attempt attempt, CoreReadiness readiness) {
+    if (!attempt.publicationFinalized.compareAndSet(false, true)) {
+      throw new IllegalStateException("Core readiness publication was already finalized");
+    }
+    try {
+      readiness.publication().publish();
+    } catch (RuntimeException error) {
+      readiness.publication().discard();
+      throw error;
+    }
+  }
+
+  private static void discardPublication(Attempt attempt) {
+    var readiness = attempt.readiness.get();
+    if (readiness != null && attempt.publicationFinalized.compareAndSet(false, true)) {
+      readiness.publication().discard();
+    }
+  }
+
   private static FailureDetails failureDetails(Throwable error) {
     var failure = unwrap(error);
     if (failure instanceof StartupFailure startupFailure) {
@@ -637,6 +672,8 @@ public final class PaperStartupCoordinator implements AgentControl, AutoCloseabl
         new AtomicReference<>();
     private final AtomicReference<AuthenticatedRuntimeConnection> candidate =
         new AtomicReference<>();
+    private final AtomicReference<CoreReadiness> readiness = new AtomicReference<>();
+    private final AtomicBoolean publicationFinalized = new AtomicBoolean();
     private final CompletableFuture<Boolean> completion = new CompletableFuture<>();
     private volatile DesiredMode persistedDesiredMode;
 

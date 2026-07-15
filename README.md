@@ -2,7 +2,7 @@
 
 Minecraft Agent is a security-first Minecraft assistant composed of a Paper plugin, a local
 TypeScript runtime, and an optional Fabric client mod. This repository currently implements the
-Phase 0-11 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
+Phase 0-12 foundation: shared protocol contracts, fail-closed readiness checks, an authenticated
 loopback Runtime-Paper channel, conditional `/agent` registration, persistent emergency Offline
 controls, private model replies, Runtime-owned sessions, resume, explicit one-shot modules, a
 bounded closed-tool model loop, and Paper-owned proposal authorization and audit
@@ -13,11 +13,14 @@ exact-version Litematica adapter. Phase 11 adds private Markdown knowledge, play
 permission-filtered landmarks, authoritative recipe v2 views, and bounded Paper-owned build
 previews that the client can convert to native Litematica schematics. The production write catalog
 is still empty: there is no production proposal creator, generic execution surface, or Minecraft
-state mutation.
+state mutation. Phase 12 adds redacted management diagnostics, a restricted atomic policy reload,
+and durable aggregate usage/cost accounting.
 
 The product and delivery baseline is recorded in
-[`minecraft_agent_vibe_coding_plan.md`](minecraft_agent_vibe_coding_plan.md). Implementation status
-is tracked in [`docs/progress.md`](docs/progress.md).
+the repository-only
+[`minecraft_agent_vibe_coding_plan.md`](https://github.com/AGelysia/TAgent/blob/main/minecraft_agent_vibe_coding_plan.md).
+Implementation status is tracked in the repository-only
+[`docs/progress.md`](https://github.com/AGelysia/TAgent/blob/main/docs/progress.md).
 
 ## Version baseline
 
@@ -31,11 +34,12 @@ is tracked in [`docs/progress.md`](docs/progress.md).
 | Litematica    | 0.26.12 (optional)    |
 | MaLiLib       | 0.27.16 (optional)    |
 | Node.js       | 22.16-22.x            |
+| Candidate     | 0.1.0                 |
 
 Minecraft 1.21.11 is intentionally pinned because the product baseline requires Java 21. Paper
 26.x requires Java 25 and is outside this compatibility line. Paper publishes the 1.21.11 API only
-through a mutable snapshot coordinate, so release builds must retain Gradle dependency verification
-metadata before they can be called byte-for-byte reproducible.
+through a mutable snapshot coordinate. The checked-in Gradle dependency verification metadata pins
+the resolved snapshot and all other build artifacts by SHA-256; an upstream change fails closed.
 
 ## Repository layout
 
@@ -83,7 +87,22 @@ cd ..
 The Fabric build downloads Minecraft artifacts and is deliberately last. Do not run both Gradle
 builds concurrently on a low-memory host.
 
-## Phase 2-11 Runtime
+The complete Linux release-candidate lane runs two uncached clean builds, the pinned real Paper
+smoke, dependency audit, package/JAR/schema/permission inspection, archive extraction, and checksum
+comparison:
+
+```bash
+./scripts/release-check.sh
+```
+
+The canonical command requires a clean Git worktree at entry and exit. It also asserts the Phase 13
+minimum test inventory and required suites before the second clean build removes reports. A long,
+explicit dirty-worktree override exists only for maintainer diagnostics and cannot produce manual or
+release evidence. This proves deterministic output within the recorded pinned lane. It is not a claim that arbitrary
+future operating-system or JDK builds are byte-for-byte identical. GitHub's manual release-candidate
+workflow uploads an artifact only; it does not create a tag or Release.
+
+## Phase 2-12 Runtime
 
 ```bash
 cd agent-runtime
@@ -92,7 +111,8 @@ npm run check
 ```
 
 [`agent-runtime/config.example.yml`](agent-runtime/config.example.yml) is the strict configuration
-template. Runtime secrets are resolved after YAML parsing from whole-value `${ENV_NAME}` references;
+template and currently requires `configVersion: 2`; legacy v1 files fail with an explicit upgrade
+diagnostic. Runtime secrets are resolved after YAML parsing from whole-value `${ENV_NAME}` references;
 `.env.example` is documentation only and is not loaded automatically. Keep a local configuration at
 mode `0600`, inject secrets from the shell or service manager, and start with:
 
@@ -106,8 +126,12 @@ Capability Schema, Runtime-owned SQLite file, and the configured OpenAI model be
 returns a cached minimal readiness view and does not repeat provider or database work.
 
 The Runtime uses the OpenAI Responses API for bounded, non-streaming answers and serial function
-calls with provider storage disabled. It applies per-player outstanding/cooldown/daily limits plus global
-concurrency and queue limits. With `privacy.storeConversations: true`, a versioned SQLite
+calls with provider storage disabled. It applies per-player outstanding/cooldown/durable UTC-daily
+limits plus global concurrency, queue, and a monthly reservation-based admission bound. Pricing is explicit rather than
+inferred from the model name: configure integer
+`model.inputMicroUsdPerMillionTokens`, `model.outputMicroUsdPerMillionTokens`, and
+`limits.providerRoundReservationMicroUsd` from the selected model's current price sheet. With
+`privacy.storeConversations: true`, a versioned SQLite
 repository commits each successful user/assistant exchange and can restore it after a Runtime
 restart. Every session read is scoped by authenticated server ID and player UUID, and model context
 is bounded by both message count and total text size. Disabling conversation storage leaves no
@@ -139,7 +163,17 @@ request. A remote build preview also requires a successful same-request
 `server_registry`/`authoritative` recipe result, including its text fallback, so model output cannot
 supply recipe facts.
 
-## Phase 3-11 Paper
+SQLite migrations v3-v5 persist idempotent provider-round usage events, active cost reservations,
+provider-start state, and UTC daily/monthly aggregates. Reported token cost is rounded up to an
+integer micro-USD per provider event; a response or started call with unknown usage is conservatively
+charged at the configured round reservation and marked estimated. The authenticated Runtime-Paper channel accepts a closed
+`management.costs.request` and returns only server-wide current-day/current-month totals plus budget
+state. The management payload never contains player UUIDs or per-player usage. See
+[`docs/operations.md`](docs/operations.md) before selecting a reservation value. The monthly setting
+is a reservation-based conservative admission bound, not a provider billing cap; reported cost can
+exceed both a round's reservation and the configured local bound.
+
+## Phase 3-12 Paper
 
 On first Paper startup, the plugin installs a strict `plugins/MinecraftAgent/config.yml`. Keep its
 Runtime token as the complete `${MINECRAFT_AGENT_SERVER_TOKEN}` environment reference. The endpoint
@@ -170,6 +204,20 @@ authenticated handshake, then persists `ENABLED` before publishing ONLINE. A Run
 moves the Agent Offline without changing the persisted desired mode, and the command remains
 available for an explicit recovery attempt. An initial startup failure still leaves the command
 absent and requires an external fix plus restart.
+
+Online management commands are `/agent status`, `/agent doctor`, `/agent capabilities`,
+`/agent costs`, and `/agent reload`. The four read-only queries default to OP through individual
+`minecraftagent.admin.*` permissions; ordinary client controls use `minecraftagent.ui`. Reload
+remains Console/Owner-only and does not become available merely because a player is OP or has the
+descriptor's `minecraftagent.admin.reload` node. It validates a complete candidate away from the
+server thread and atomically replaces only `owners` plus `security` policy. Runtime connection
+settings, state/capability paths, and Capability approvals require a server restart. A failed or
+stale reload keeps the previous policy generation. The trusted manager is installed only after
+Runtime authentication, survives Offline recovery without rebasing restart-only fields, and binds
+each publication to its Online epoch. Costs distinguish reported/estimated provider calls, settled
+cost, active reservations, and remaining monthly exposure. Doctor renders only bounded component/protocol,
+Capability, anonymous client-feature, and Litematica compatibility aggregates; it never renders a
+player UUID or client-local path.
 
 Ordinary players have `minecraftagent.use` by default and may run `/agent say <message>`. Paper
 derives the UUID from the actual player, permits one live request per player, and sends validated
@@ -234,6 +282,8 @@ connection generation, and never exposes the Runtime token or provider key. Ever
 private fallback text. Paper sends a structured view only when its exact version registry intersects
 the actual client's advertised features; vanilla and incompatible clients stay on fallback text.
 Client-to-Paper frames are capped at 16 KiB and Paper-to-client frames at 40 KiB before parsing.
+The outer client payload remains `1.0`; the current Fabric hello is `1.1` with closed diagnostics,
+while Paper preserves the capabilities of diagnostic-free legacy hello `1.0` clients.
 
 View transfers use identity or gzip framing with 24 KiB decoded chunks, at most 1 MiB compressed and
 uncompressed content, 64 chunks, and a 15-second timeout. Paper prepares JSON, compression, hashes,
@@ -284,6 +334,7 @@ After receiving a build-preview view, use its UUID for the explicit presentation
 ```text
 /agent ui preview <view-id>
 /agent ui materials <view-id>
+/agent ui remove <view-id>
 ```
 
 The opt-in exact-server smoke pins Paper `1.21.11-132`, verifies its SHA-256, limits the heap to 512
@@ -298,8 +349,8 @@ server. It cleans up all temporary worlds, logs, credentials, and child processe
 The smoke includes an Offline/restart/on/Runtime-loss/on lifecycle and checks clean dynamic command
 unregistration in addition to the three initial transport-failure cases. It does not connect a real
 player, graphical Fabric client, or Litematica installation, and does not click a proposal; focused
-tests cover the Phase 8/10/11 domain and protocol boundaries. Graphical Phase 11 verification is a
-separate manual-client lane.
+tests cover the Phase 8/10/11/12 domain and protocol boundaries. Graphical verification is the
+separate [`docs/phase13-manual-test.md`](docs/phase13-manual-test.md) lane.
 
 ## Package
 
@@ -307,7 +358,8 @@ separate manual-client lane.
 ./scripts/package.sh
 ```
 
-Artifacts are placed under `dist/`. The package contains the implemented persistent conversation,
+The inspected directory is placed under `dist/`; upload-ready JARs, a deterministic
+`MinecraftAgent-0.1.0.tar.gz`, and their `SHA256SUMS` are placed under `release/`. The package contains the implemented persistent conversation,
 resume, explicit module path, shared tool/proposal schemas, Runtime loop, Paper read adapters, and
 Paper proposal authorization and audit infrastructure. It also contains the bounded Capability Pack
 loader, exact approval and immutable catalog/diff model, required-only typed renderer, and parse-only
@@ -317,6 +369,9 @@ the optional Fabric channel, structured-view transfer/rendering, local overlay/p
 native Litematica generation. The production proposal tool catalog remains empty; Capability
 proposal creation, generic execution, world apply/rollback, and every Minecraft mutation remain
 unavailable.
+
+Phase 12 packaging also includes the closed management cost schemas, Runtime SQLite v3-v5 usage
+accounting, Paper management queries, anonymous client diagnostics, and restricted policy reload.
 
 The packaged Runtime preserves its compiled layout and includes the shared protocol schemas and
 configuration template. Install production dependencies before startup:
@@ -330,7 +385,14 @@ cd ..
 
 The top-level start scripts forward `--config`. They do not load `.env`; provide the server token
 and provider key through the invoking shell or service manager. Startup fails closed unless the
-configured model lookup succeeds.
+configured model lookup succeeds. Relative config paths are resolved from the extracted bundle root.
+
+`scripts/package.ps1` remains a developer bundle path and does not establish release equivalence.
+The canonical candidate is produced on Linux by `scripts/release-check.sh`; native Windows packaging
+and runtime behavior remain an explicit manual gap.
+
+See [`SECURITY.md`](SECURITY.md) before exposing a server and
+[`CLIENT-COMPATIBILITY.md`](CLIENT-COMPATIBILITY.md) before installing the optional client stack.
 
 ## Security baseline
 
@@ -359,4 +421,7 @@ exact-version, presentation-only Litematica adapter; it is not a model or server
 Phase 11 treats local documents and stored plans as data, keeps landmarks and build snapshots under
 Paper authority, derives recipe presentation only from authoritative registry results, and rejects
 Runtime-authored build views. Its hashes and local schematic are preview evidence only; the empty
-production write catalog remains the final barrier against world mutation.
+production write catalog remains the final barrier against world mutation. Phase 12 preserves the
+same Offline gate for every management query, exposes no per-player cost or client identity, and
+publishes a reload policy only after complete validation; config values outside the supported local
+policy snapshot require restart.

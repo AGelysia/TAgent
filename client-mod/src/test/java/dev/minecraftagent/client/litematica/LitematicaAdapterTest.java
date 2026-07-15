@@ -3,6 +3,7 @@ package dev.minecraftagent.client.litematica;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -137,12 +138,81 @@ class LitematicaAdapterTest {
             "1.21.11", "0.19.3", id -> Optional.empty(), trapLoader, root, () -> true);
     assertEquals(LitematicaCompatibility.Status.NOT_INSTALLED, absent.status());
     assertEquals(0, attemptedLoads.get());
+    assertEquals(
+        LitematicaAdapterDiagnostic.Status.NOT_INSTALLED,
+        LitematicaAdapterDiagnostic.from(absent).status());
 
-    var unsupportedMods = versions(Map.of("litematica", "0.26.11", "malilib", "0.27.16"));
-    var unsupported =
+    var orphanMalilib =
         LitematicaAdapterResolver.resolve(
-            "1.21.11", "0.19.3", unsupportedMods, trapLoader, root, () -> true);
-    assertEquals(LitematicaCompatibility.Status.UNSUPPORTED_VERSION, unsupported.status());
+            "1.21.11",
+            "0.19.3",
+            versions(Map.of("malilib", "0.27.16")),
+            trapLoader,
+            root,
+            () -> true);
+    assertEquals(LitematicaCompatibility.Status.NOT_INSTALLED, orphanMalilib.status());
+    assertEquals(Optional.of("0.27.16"), orphanMalilib.detectedVersions().malilibVersion());
+    assertEquals(0, attemptedLoads.get());
+
+    var unsafeMetadata =
+        LitematicaAdapterResolver.resolve(
+            "1.21.11",
+            "0.19.3",
+            versions(Map.of("litematica", "0.26.12\n", "malilib", "0.27.16")),
+            trapLoader,
+            root,
+            () -> true);
+    assertEquals(LitematicaCompatibility.Status.NOT_INSTALLED, unsafeMetadata.status());
+    assertTrue(unsafeMetadata.detectedVersions().litematicaVersion().isEmpty());
+    assertEquals(0, attemptedLoads.get());
+
+    var pathMetadata =
+        LitematicaAdapterResolver.resolve(
+            "1.21.11",
+            "0.19.3",
+            versions(Map.of("litematica", "/home/player/mod.jar", "malilib", "0.27.16")),
+            trapLoader,
+            root,
+            () -> true);
+    assertEquals(LitematicaCompatibility.Status.NOT_INSTALLED, pathMetadata.status());
+    assertTrue(pathMetadata.detectedVersions().litematicaVersion().isEmpty());
+    assertEquals(0, attemptedLoads.get());
+
+    var dependencyMissingMods = versions(Map.of("litematica", "0.26.12"));
+    var dependencyMissing =
+        LitematicaAdapterResolver.resolve(
+            "1.21.11", "0.19.3", dependencyMissingMods, trapLoader, root, () -> true);
+    assertEquals(LitematicaCompatibility.Status.MISSING_DEPENDENCY, dependencyMissing.status());
+    assertEquals(0, attemptedLoads.get());
+    assertEquals(
+        LitematicaAdapterDiagnostic.Status.MISSING_DEPENDENCY,
+        LitematicaAdapterDiagnostic.from(dependencyMissing).status());
+
+    var unsupportedCombinations =
+        List.of(
+            new VersionCombination("1.21.10", "0.19.3", "0.26.12", "0.27.16"),
+            new VersionCombination("1.21.11", "0.19.2", "0.26.12", "0.27.16"),
+            new VersionCombination("1.21.11", "0.19.3", "0.26.11", "0.27.16"),
+            new VersionCombination("1.21.11", "0.19.3", "0.26.12", "0.27.15"));
+    for (var combination : unsupportedCombinations) {
+      var unsupported =
+          LitematicaAdapterResolver.resolve(
+              combination.minecraftVersion(),
+              combination.fabricLoaderVersion(),
+              versions(
+                  Map.of(
+                      "litematica",
+                      combination.litematicaVersion(),
+                      "malilib",
+                      combination.malilibVersion())),
+              trapLoader,
+              root,
+              () -> true);
+      assertEquals(LitematicaCompatibility.Status.UNSUPPORTED_VERSION, unsupported.status());
+      assertEquals(
+          LitematicaAdapterDiagnostic.Status.UNSUPPORTED_VERSION,
+          LitematicaAdapterDiagnostic.from(unsupported).status());
+    }
     assertEquals(0, attemptedLoads.get());
 
     var exactMods = versions(Map.of("litematica", "0.26.12", "malilib", "0.27.16"));
@@ -155,6 +225,54 @@ class LitematicaAdapterTest {
     assertEquals(
         LitematicaSupportMatrix.supported().getFirst(),
         linkageFailure.supportedCombination().orElseThrow());
+    assertEquals(
+        LitematicaAdapterDiagnostic.Status.ADAPTER_LINKAGE_FAILED,
+        LitematicaAdapterDiagnostic.from(linkageFailure).status());
+  }
+
+  @Test
+  void diagnosticsClassifyEveryCompatibilityResultWithoutPathsOrAuthority() throws Exception {
+    var root = Files.createDirectory(temporaryDirectory.resolve("managed"));
+    var versions =
+        new LitematicaCompatibility.DetectedVersions(
+            "1.21.11", "0.19.3", Optional.of("0.26.12"), Optional.of("0.27.16"));
+    var ready =
+        new LitematicaCompatibility(
+            LitematicaCompatibility.Status.READY,
+            versions,
+            Optional.of(LitematicaSupportMatrix.supported().getFirst()),
+            Optional.of(fakeAdapter(root, () -> true)));
+
+    var diagnostic = LitematicaAdapterDiagnostic.from(ready);
+
+    assertEquals(LitematicaAdapterDiagnostic.Status.READY, diagnostic.status());
+    assertEquals(Optional.of("litematica-reflection-1"), diagnostic.adapterId());
+    assertEquals(
+        List.of(
+            "status",
+            "minecraftversion",
+            "fabricloaderversion",
+            "litematicaversion",
+            "malilibversion",
+            "adapterid"),
+        java.util.Arrays.stream(LitematicaAdapterDiagnostic.class.getRecordComponents())
+            .map(component -> component.getName().toLowerCase(java.util.Locale.ROOT))
+            .toList());
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new LitematicaAdapterDiagnostic(
+                LitematicaAdapterDiagnostic.Status.READY,
+                "1.21.11",
+                "0.19.3",
+                Optional.of("0.26.12"),
+                Optional.of("0.27.16"),
+                Optional.empty()));
+    assertEquals(
+        LitematicaAdapterDiagnostic.Status.PREVIEW_STORAGE_UNAVAILABLE,
+        LitematicaAdapterDiagnostic.previewStorageUnavailable(
+                "1.21.11", "0.19.3", Optional.of("0.26.12"), Optional.of("0.27.16"))
+            .status());
   }
 
   @Test
@@ -226,6 +344,12 @@ class LitematicaAdapterTest {
     var copy = new HashMap<>(versions);
     return id -> Optional.ofNullable(copy.get(id));
   }
+
+  private record VersionCombination(
+      String minecraftVersion,
+      String fabricLoaderVersion,
+      String litematicaVersion,
+      String malilibVersion) {}
 
   private static String sha256(Path path) throws IOException {
     try {

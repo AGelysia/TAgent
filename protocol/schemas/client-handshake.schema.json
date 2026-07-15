@@ -11,9 +11,7 @@
     "dependencies"
   ],
   "properties": {
-    "clientProtocolVersion": {
-      "const": "1.0"
-    },
+    "clientProtocolVersion": { "enum": ["1.0", "1.1"] },
     "modVersion": {
       "type": "string",
       "minLength": 1,
@@ -47,26 +45,116 @@
       "additionalProperties": false,
       "required": ["litematica", "malilib"],
       "properties": {
-        "litematica": {
-          "oneOf": [
-            {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 64,
-              "pattern": "^[ -~]+$"
+        "litematica": { "$ref": "#/$defs/dependencyVersion" },
+        "malilib": { "$ref": "#/$defs/dependencyVersion" }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["litematicaAdapter"],
+      "properties": {
+        "litematicaAdapter": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "minecraftVersion",
+            "fabricLoaderVersion",
+            "litematicaVersion",
+            "malilibVersion",
+            "adapterId"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "READY",
+                "NOT_INSTALLED",
+                "MISSING_DEPENDENCY",
+                "UNSUPPORTED_VERSION",
+                "ADAPTER_LINKAGE_FAILED",
+                "PREVIEW_STORAGE_UNAVAILABLE"
+              ]
             },
-            { "type": "null" }
-          ]
-        },
-        "malilib": {
-          "oneOf": [
+            "minecraftVersion": { "$ref": "#/$defs/version" },
+            "fabricLoaderVersion": { "$ref": "#/$defs/version" },
+            "litematicaVersion": { "$ref": "#/$defs/dependencyVersion" },
+            "malilibVersion": { "$ref": "#/$defs/dependencyVersion" },
+            "adapterId": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^[A-Za-z0-9._-]+$"
+                },
+                { "type": "null" }
+              ]
+            }
+          },
+          "allOf": [
             {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 64,
-              "pattern": "^[ -~]+$"
+              "if": {
+                "properties": {
+                  "status": { "enum": ["READY", "ADAPTER_LINKAGE_FAILED"] }
+                },
+                "required": ["status"]
+              },
+              "then": {
+                "properties": {
+                  "litematicaVersion": { "type": "string" },
+                  "malilibVersion": { "type": "string" },
+                  "adapterId": { "type": "string" }
+                }
+              }
             },
-            { "type": "null" }
+            {
+              "if": {
+                "properties": { "status": { "const": "NOT_INSTALLED" } },
+                "required": ["status"]
+              },
+              "then": {
+                "properties": {
+                  "litematicaVersion": { "type": "null" },
+                  "adapterId": { "type": "null" }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": { "status": { "const": "MISSING_DEPENDENCY" } },
+                "required": ["status"]
+              },
+              "then": {
+                "properties": {
+                  "litematicaVersion": { "type": "string" },
+                  "malilibVersion": { "type": "null" },
+                  "adapterId": { "type": "null" }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": { "status": { "const": "UNSUPPORTED_VERSION" } },
+                "required": ["status"]
+              },
+              "then": {
+                "properties": {
+                  "litematicaVersion": { "type": "string" },
+                  "malilibVersion": { "type": "string" },
+                  "adapterId": { "type": "null" }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "status": { "const": "PREVIEW_STORAGE_UNAVAILABLE" }
+                },
+                "required": ["status"]
+              },
+              "then": { "properties": { "adapterId": { "type": "null" } } }
+            }
           ]
         }
       }
@@ -75,13 +163,25 @@
   "allOf": [
     {
       "if": {
+        "properties": { "clientProtocolVersion": { "const": "1.1" } },
+        "required": ["clientProtocolVersion"]
+      },
+      "then": {
+        "properties": { "diagnostics": {} },
+        "required": ["diagnostics"]
+      },
+      "else": { "properties": { "diagnostics": false } }
+    },
+    {
+      "if": {
         "properties": {
           "capabilities": {
             "type": "object",
             "properties": { "litematicaPreview": { "const": 1 } },
             "required": ["litematicaPreview"]
           }
-        }
+        },
+        "required": ["capabilities"]
       },
       "then": {
         "properties": {
@@ -103,7 +203,8 @@
             "properties": { "litematicaMaterialList": { "const": 1 } },
             "required": ["litematicaMaterialList"]
           }
-        }
+        },
+        "required": ["capabilities"]
       },
       "then": {
         "properties": {
@@ -113,6 +214,165 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "clientProtocolVersion": { "const": "1.1" },
+          "diagnostics": {
+            "type": "object",
+            "properties": {
+              "litematicaAdapter": {
+                "type": "object",
+                "properties": { "litematicaVersion": { "type": "string" } },
+                "required": ["litematicaVersion"]
+              }
+            },
+            "required": ["litematicaAdapter"]
+          }
+        },
+        "required": ["clientProtocolVersion", "diagnostics"]
+      },
+      "then": {
+        "properties": {
+          "dependencies": {
+            "type": "object",
+            "properties": { "litematica": { "type": "string" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "clientProtocolVersion": { "const": "1.1" },
+          "diagnostics": {
+            "type": "object",
+            "properties": {
+              "litematicaAdapter": {
+                "type": "object",
+                "properties": { "litematicaVersion": { "type": "null" } },
+                "required": ["litematicaVersion"]
+              }
+            },
+            "required": ["litematicaAdapter"]
+          }
+        },
+        "required": ["clientProtocolVersion", "diagnostics"]
+      },
+      "then": {
+        "properties": {
+          "dependencies": {
+            "type": "object",
+            "properties": { "litematica": { "type": "null" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "clientProtocolVersion": { "const": "1.1" },
+          "diagnostics": {
+            "type": "object",
+            "properties": {
+              "litematicaAdapter": {
+                "type": "object",
+                "properties": { "malilibVersion": { "type": "string" } },
+                "required": ["malilibVersion"]
+              }
+            },
+            "required": ["litematicaAdapter"]
+          }
+        },
+        "required": ["clientProtocolVersion", "diagnostics"]
+      },
+      "then": {
+        "properties": {
+          "dependencies": {
+            "type": "object",
+            "properties": { "malilib": { "type": "string" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "clientProtocolVersion": { "const": "1.1" },
+          "diagnostics": {
+            "type": "object",
+            "properties": {
+              "litematicaAdapter": {
+                "type": "object",
+                "properties": { "malilibVersion": { "type": "null" } },
+                "required": ["malilibVersion"]
+              }
+            },
+            "required": ["litematicaAdapter"]
+          }
+        },
+        "required": ["clientProtocolVersion", "diagnostics"]
+      },
+      "then": {
+        "properties": {
+          "dependencies": {
+            "type": "object",
+            "properties": { "malilib": { "type": "null" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "clientProtocolVersion": { "const": "1.1" },
+          "diagnostics": {
+            "type": "object",
+            "properties": {
+              "litematicaAdapter": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "NOT_INSTALLED",
+                      "MISSING_DEPENDENCY",
+                      "UNSUPPORTED_VERSION",
+                      "ADAPTER_LINKAGE_FAILED",
+                      "PREVIEW_STORAGE_UNAVAILABLE"
+                    ]
+                  }
+                },
+                "required": ["status"]
+              }
+            },
+            "required": ["litematicaAdapter"]
+          }
+        },
+        "required": ["clientProtocolVersion", "diagnostics"]
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "type": "object",
+            "properties": {
+              "litematicaPreview": { "const": 0 },
+              "litematicaMaterialList": { "const": 0 }
+            }
+          }
+        }
+      }
     }
-  ]
+  ],
+  "$defs": {
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$"
+    },
+    "dependencyVersion": {
+      "oneOf": [{ "$ref": "#/$defs/version" }, { "type": "null" }]
+    }
+  }
 }

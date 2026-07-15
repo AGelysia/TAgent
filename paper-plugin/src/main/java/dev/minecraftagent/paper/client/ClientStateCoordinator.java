@@ -57,6 +57,11 @@ public final class ClientStateCoordinator implements AutoCloseable {
     return connections.lookup(Objects.requireNonNull(playerUuid));
   }
 
+  /** Returns current-generation diagnostic counts without exposing player identities. */
+  public ClientDiagnosticsSnapshot diagnosticsSnapshot() {
+    return ClientDiagnosticsSnapshot.from(connections.snapshot().values());
+  }
+
   /** Offline cleanup cancels transfers without discarding a still-connected client's handshake. */
   public synchronized void clearTransientTransfers() {
     transfers.clearPending();

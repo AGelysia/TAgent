@@ -56,7 +56,9 @@
         "control.off",
         "control.on",
         "health.ping",
-        "health.pong"
+        "health.pong",
+        "management.costs.request",
+        "management.costs.response"
       ]
     },
     "timestamp": {

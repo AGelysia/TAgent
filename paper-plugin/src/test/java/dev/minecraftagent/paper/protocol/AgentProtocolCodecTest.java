@@ -17,6 +17,7 @@ import dev.minecraftagent.paper.protocol.AgentProtocolCodec.AgentError;
 import dev.minecraftagent.paper.protocol.AgentProtocolCodec.AgentErrorCode;
 import dev.minecraftagent.paper.protocol.AgentProtocolCodec.CancelReason;
 import dev.minecraftagent.paper.protocol.AgentProtocolCodec.Completion;
+import dev.minecraftagent.paper.protocol.AgentProtocolCodec.ManagementCosts;
 import dev.minecraftagent.paper.protocol.AgentProtocolCodec.SessionResumed;
 import dev.minecraftagent.paper.protocol.AgentProtocolCodec.ToolCall;
 import dev.minecraftagent.paper.request.AgentModule;
@@ -99,6 +100,68 @@ class AgentProtocolCodecTest {
   }
 
   @Test
+  void encodesSchemaValidManagementCostsRequest() throws Exception {
+    var document = JSON.readTree(codec().encodeCostsRequest(REQUEST_ID));
+
+    assertSchema("envelope.schema.json", document);
+    assertSchema("management-costs-request.schema.json", document.path("payload"));
+    assertEquals(REQUEST_ID.toString(), document.path("messageId").asText());
+    assertEquals(REQUEST_ID.toString(), document.path("requestId").asText());
+    assertEquals("management.costs.request", document.path("type").asText());
+    assertEquals(0, document.path("payload").size());
+  }
+
+  @Test
+  void decodesStrictManagementCostsResponse() throws Exception {
+    var source = managementCostsResponse();
+    var costs = assertInstanceOf(ManagementCosts.class, codec().decode(source));
+
+    assertEquals(REQUEST_ID, costs.requestId());
+    assertEquals("2026-07-14", costs.currentDay().period());
+    assertEquals(3, costs.currentDay().admittedRequests());
+    assertEquals(5, costs.currentDay().providerCalls());
+    assertEquals(1200, costs.currentDay().inputTokens());
+    assertEquals(18_000, costs.currentMonth().costMicroUsd());
+    assertEquals(50_000_000, costs.budget().limitMicroUsd());
+    assertEquals(49_980_000, costs.budget().remainingMicroUsd());
+    assertEquals(false, costs.budget().exhausted());
+  }
+
+  @Test
+  void rejectsMalformedOrInconsistentManagementCosts() throws Exception {
+    var valid = managementCostsResponse();
+
+    assertFailure(
+        codec(),
+        valid.replace("\"currentDay\":", "\"unknown\":0,\"currentDay\":"),
+        "PROTOCOL_MESSAGE_INVALID");
+    assertFailure(
+        codec(),
+        valid.replace("\"inputTokens\":1200", "\"inputTokens\":-1"),
+        "PROTOCOL_MESSAGE_INVALID");
+    assertFailure(
+        codec(),
+        valid.replace("\"inputTokens\":1200", "\"inputTokens\":1.5"),
+        "PROTOCOL_MESSAGE_INVALID");
+    assertFailure(
+        codec(),
+        valid.replace("\"inputTokens\":1200", "\"inputTokens\":9007199254740992"),
+        "PROTOCOL_MESSAGE_INVALID");
+    assertFailure(
+        codec(),
+        valid.replace("\"providerCalls\":5", "\"providerCalls\":6"),
+        "PROTOCOL_MESSAGE_INVALID");
+    assertFailure(
+        codec(),
+        valid.replace("\"period\":\"2026-07-14\"", "\"period\":\"2026-08-14\""),
+        "PROTOCOL_MESSAGE_INVALID");
+    assertFailure(
+        codec(),
+        valid.replace("\"remainingMicroUsd\":49980000", "\"remainingMicroUsd\":49980001"),
+        "PROTOCOL_MESSAGE_INVALID");
+  }
+
+  @Test
   void decodesStrictCompletionAndErrorFixtures() throws Exception {
     var codec = codec();
 
@@ -136,6 +199,15 @@ class AgentProtocolCodecTest {
                     fixture("envelope-agent-error.json")
                         .replace("MODEL_TIMEOUT", "TOOL_ROUND_LIMIT")));
     assertEquals(AgentErrorCode.TOOL_ROUND_LIMIT, limited.code());
+
+    var budget =
+        assertInstanceOf(
+            AgentError.class,
+            codec()
+                .decode(
+                    fixture("envelope-agent-error.json")
+                        .replace("MODEL_TIMEOUT", "BUDGET_EXCEEDED")));
+    assertEquals(AgentErrorCode.BUDGET_EXCEEDED, budget.code());
   }
 
   @Test
@@ -314,6 +386,15 @@ class AgentProtocolCodecTest {
   private static String fixture(String name) throws Exception {
     var path = protocolRoot().resolve("fixtures/valid/" + name);
     return Files.readString(path);
+  }
+
+  private static String managementCostsResponse() throws Exception {
+    var path = protocolRoot().resolve("fixtures/valid/management-costs.json");
+    return JSON.readTree(Files.newInputStream(path))
+        .path("response")
+        .toString()
+        .replace("2026-07-14T12:00:01Z", NOW.toString())
+        .replace("91000000-0000-4000-8000-000000000001", REQUEST_ID.toString());
   }
 
   private static void assertFailure(AgentProtocolCodec codec, String source, String expectedCode) {

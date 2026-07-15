@@ -18,6 +18,7 @@
         "MODEL_RESPONSE_INVALID",
         "REQUEST_CANCELLED",
         "REQUEST_LIMITED",
+        "BUDGET_EXCEEDED",
         "TOOL_REJECTED",
         "TOOL_ROUND_LIMIT",
         "SESSION_NOT_FOUND",

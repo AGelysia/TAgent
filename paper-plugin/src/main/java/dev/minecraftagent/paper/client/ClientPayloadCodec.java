@@ -14,22 +14,35 @@ import java.util.Base64;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
 /** Strict raw-UTF-8 JSON codec for the single Bukkit/Fabric custom payload channel. */
 public final class ClientPayloadCodec {
   public static final String CHANNEL = "minecraftagent:client";
+  public static final String PAYLOAD_VERSION = "1.0";
   public static final int MAX_INBOUND_BYTES = 16 * 1024;
   public static final int MAX_OUTBOUND_FRAME_BYTES = 40 * 1024;
 
   private static final Set<String> ENVELOPE_FIELDS =
       Set.of("clientPayloadVersion", "messageId", "type", "payload");
-  private static final Set<String> HELLO_FIELDS =
+  private static final Set<String> LEGACY_HELLO_FIELDS =
       Set.of("clientProtocolVersion", "modVersion", "capabilities", "dependencies");
+  private static final Set<String> CURRENT_HELLO_FIELDS =
+      Set.of("clientProtocolVersion", "modVersion", "capabilities", "dependencies", "diagnostics");
   private static final Set<String> CAPABILITY_FIELDS =
       Set.of("overlay", "itemIcons", "recipeView", "litematicaPreview", "litematicaMaterialList");
   private static final Set<String> DEPENDENCY_FIELDS = Set.of("litematica", "malilib");
+  private static final Set<String> DIAGNOSTIC_FIELDS = Set.of("litematicaAdapter");
+  private static final Set<String> LITEMATICA_ADAPTER_FIELDS =
+      Set.of(
+          "status",
+          "minecraftVersion",
+          "fabricLoaderVersion",
+          "litematicaVersion",
+          "malilibVersion",
+          "adapterId");
   private static final Set<String> ACK_FIELDS =
       Set.of("transferId", "generation", "status", "code");
   private static final Set<String> ERROR_FIELDS = Set.of("transferId", "generation", "code");
@@ -37,7 +50,7 @@ public final class ClientPayloadCodec {
   public ClientInboundMessage decodeInbound(byte[] bytes) {
     var envelope = parse(bytes);
     requireFields(envelope, ENVELOPE_FIELDS, "CLIENT_ENVELOPE_INVALID");
-    if (!ClientHandshake.PROTOCOL_VERSION.equals(string(envelope, "clientPayloadVersion"))) {
+    if (!PAYLOAD_VERSION.equals(string(envelope, "clientPayloadVersion"))) {
       throw new ClientProtocolException("CLIENT_PROTOCOL_INCOMPATIBLE");
     }
     var messageId = uuid(envelope, "messageId", false);
@@ -133,12 +146,21 @@ public final class ClientPayloadCodec {
   }
 
   private static ClientInboundMessage decodeHello(UUID messageId, JsonObject payload) {
-    requireFields(payload, HELLO_FIELDS, "CLIENT_HELLO_INVALID");
+    String protocolVersion = string(payload, "clientProtocolVersion");
+    boolean legacy = ClientHandshake.LEGACY_PROTOCOL_VERSION.equals(protocolVersion);
+    if (legacy) {
+      requireFields(payload, LEGACY_HELLO_FIELDS, "CLIENT_HELLO_INVALID");
+    } else if (ClientHandshake.CURRENT_PROTOCOL_VERSION.equals(protocolVersion)) {
+      requireFields(payload, CURRENT_HELLO_FIELDS, "CLIENT_HELLO_INVALID");
+    } else {
+      throw new ClientProtocolException("CLIENT_PROTOCOL_INCOMPATIBLE");
+    }
     var capabilitiesObject = object(payload, "capabilities");
     requireFields(capabilitiesObject, CAPABILITY_FIELDS, "CLIENT_HELLO_INVALID");
     var versions = new EnumMap<ClientFeature, Integer>(ClientFeature.class);
     for (var feature : ClientFeature.values()) {
-      versions.put(feature, integer(capabilitiesObject, feature.wireName(), 0, 1));
+      versions.put(
+          feature, integer(capabilitiesObject, feature.wireName(), 0, feature.maximumVersion()));
     }
 
     var dependencyObject = object(payload, "dependencies");
@@ -147,13 +169,34 @@ public final class ClientPayloadCodec {
     for (var name : java.util.List.of("litematica", "malilib")) {
       dependencies.put(name, nullableString(dependencyObject, name));
     }
+    ClientLitematicaDiagnostic adapterDiagnostic;
+    if (legacy) {
+      adapterDiagnostic =
+          ClientLitematicaDiagnostic.legacy(
+              Optional.ofNullable(dependencies.get("litematica")),
+              Optional.ofNullable(dependencies.get("malilib")));
+    } else {
+      var diagnosticsObject = object(payload, "diagnostics");
+      requireFields(diagnosticsObject, DIAGNOSTIC_FIELDS, "CLIENT_HELLO_INVALID");
+      var adapterObject = object(diagnosticsObject, "litematicaAdapter");
+      requireFields(adapterObject, LITEMATICA_ADAPTER_FIELDS, "CLIENT_HELLO_INVALID");
+      adapterDiagnostic =
+          new ClientLitematicaDiagnostic(
+              ClientLitematicaDiagnostic.Status.fromWireName(string(adapterObject, "status")),
+              string(adapterObject, "minecraftVersion"),
+              string(adapterObject, "fabricLoaderVersion"),
+              Optional.ofNullable(nullableString(adapterObject, "litematicaVersion")),
+              Optional.ofNullable(nullableString(adapterObject, "malilibVersion")),
+              Optional.ofNullable(nullableString(adapterObject, "adapterId")));
+    }
     return new ClientInboundMessage.Hello(
         messageId,
         new ClientHandshake(
-            string(payload, "clientProtocolVersion"),
+            protocolVersion,
             string(payload, "modVersion"),
             new ClientCapabilities(versions),
-            dependencies));
+            dependencies,
+            adapterDiagnostic));
   }
 
   private static ClientInboundMessage decodeAck(UUID messageId, JsonObject payload) {
@@ -193,7 +236,7 @@ public final class ClientPayloadCodec {
 
   private static byte[] encode(UUID messageId, String type, JsonObject payload) {
     var envelope = new JsonObject();
-    envelope.addProperty("clientPayloadVersion", ClientHandshake.PROTOCOL_VERSION);
+    envelope.addProperty("clientPayloadVersion", PAYLOAD_VERSION);
     envelope.addProperty("messageId", Objects.requireNonNull(messageId).toString());
     envelope.addProperty("type", type);
     envelope.add("payload", Objects.requireNonNull(payload));

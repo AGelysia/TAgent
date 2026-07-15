@@ -12,8 +12,31 @@ permissions:
   minecraftagent.module:
     description: Allows a player to route one request through an explicit Agent module
     default: true
+  minecraftagent.ui:
+    description: Allows a player to control the local Minecraft Agent client UI
+    default: true
   minecraftagent.command.agent:
-    description: Allows access to the Minecraft Agent status command
+    description: Legacy aggregate for read-only Minecraft Agent management queries
+    default: op
+    children:
+      minecraftagent.admin.status: true
+      minecraftagent.admin.doctor: true
+      minecraftagent.admin.capabilities: true
+      minecraftagent.admin.costs: true
+  minecraftagent.admin.status:
+    description: Allows access to Minecraft Agent operational status
+    default: op
+  minecraftagent.admin.doctor:
+    description: Allows access to redacted Minecraft Agent diagnostics
+    default: op
+  minecraftagent.admin.reload:
+    description: Names the Console or configured Owner reload operation
+    default: false
+  minecraftagent.admin.capabilities:
+    description: Allows access to the redacted Capability catalog
+    default: op
+  minecraftagent.admin.costs:
+    description: Allows access to aggregate Minecraft Agent usage and costs
     default: op
   minecraftagent.proposal.respond:
     description: Allows a player to confirm or reject their own Minecraft Agent proposals
