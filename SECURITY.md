@@ -88,6 +88,15 @@ configured model price and use limits before allowing players to submit requests
 The monthly value is a conservative reservation-based admission bound, not a
 provider billing cap.
 
+For controlled cloud validation, run Runtime and Paper as separate OS users with
+separate root-owned `0600` environment files. Only Runtime receives a provider
+key; Paper receives only the shared Runtime token and the disabled-by-default
+preview flag. Keep Runtime on loopback, restrict both the cloud security group
+and host firewall to the two tester source addresses, and follow
+`docs/phase14-cloud-validation.md`. The billable Provider validator emits only a
+closed sanitized status surface; do not retain its journal, raw server logs, or
+terminal transcripts as evidence.
+
 Supported production profiles are fixed to OpenAI Responses, Anthropic
 Messages, DeepSeek Chat Completions, Gemini stateless `generateContent`, and a
 reviewed OpenAI-compatible Chat Completions endpoint. Official profiles have

@@ -87,6 +87,7 @@ required_root_files=(
 required_root_directories=(
   agent-runtime
   default-capability-packs
+  deploy
   docs
   protocol
 )
@@ -101,7 +102,15 @@ require_exact_children "" "${required_root_files[@]}" "${required_root_directori
 require_exact_children agent-runtime \
   config.example.yml dist package-lock.json package.json scripts
 require_exact_children agent-runtime/scripts version.mjs
-require_exact_children docs operations.md phase13-manual-test.md
+require_exact_children deploy paper systemd
+require_exact_children deploy/paper config.yml.example server.properties.example
+require_exact_children deploy/systemd \
+  paper.env.example \
+  runtime.env.example \
+  tagent-paper.service.example \
+  tagent-provider-check.service.example \
+  tagent-runtime.service.example
+require_exact_children docs operations.md phase13-manual-test.md phase14-cloud-validation.md
 require_exact_children protocol README.md schemas
 
 required_runtime_files=(
@@ -111,6 +120,7 @@ required_runtime_files=(
   agent-runtime/dist/index.js
   agent-runtime/dist/storage/migrations.js
   agent-runtime/dist/usage/usage-accounting.js
+  agent-runtime/dist/validation/live-provider-check.js
   agent-runtime/package-lock.json
   agent-runtime/package.json
   agent-runtime/scripts/version.mjs
@@ -120,9 +130,13 @@ for path in "${required_runtime_files[@]}"; do
 done
 require_file docs/operations.md
 require_file docs/phase13-manual-test.md
+require_file docs/phase14-cloud-validation.md
 grep -Eq '"start"[[:space:]]*:[[:space:]]*"node dist/bootstrap/index\.js"' \
   "$DIST/agent-runtime/package.json" \
   || fail "agent-runtime/package.json does not start the packaged bootstrap"
+grep -Eq '"validate:provider"[[:space:]]*:[[:space:]]*"node dist/validation/live-provider-check\.js"' \
+  "$DIST/agent-runtime/package.json" \
+  || fail "agent-runtime/package.json does not run the packaged provider validator directly"
 cmp -s "$DIST/config.example.yml" "$DIST/agent-runtime/config.example.yml" \
   || fail "root and Runtime configuration templates differ"
 for source_path in \
@@ -135,6 +149,7 @@ for source_path in \
   start-agent.sh \
   docs/operations.md \
   docs/phase13-manual-test.md \
+  docs/phase14-cloud-validation.md \
   protocol/README.md; do
   cmp -s "$ROOT/$source_path" "$DIST/$source_path" \
     || fail "packaged source-controlled file differs: $source_path"
@@ -145,6 +160,8 @@ for runtime_path in config.example.yml package-lock.json package.json scripts/ve
 done
 diff -qr "$ROOT/capability-packs" "$DIST/default-capability-packs" >/dev/null \
   || fail "default Capability Packs differ from the source release set"
+diff -qr "$ROOT/deploy" "$DIST/deploy" >/dev/null \
+  || fail "deployment templates differ from the source release set"
 diff -qr "$ROOT/protocol/schemas" "$DIST/protocol/schemas" >/dev/null \
   || fail "packaged protocol schemas differ from the source release set"
 
@@ -160,6 +177,10 @@ if ! cmp -s "$TMP_ROOT/runtime-expected-files" "$TMP_ROOT/runtime-actual-files";
   diff -u "$TMP_ROOT/runtime-expected-files" "$TMP_ROOT/runtime-actual-files" >&2 || true
   fail "packaged Runtime output does not match the exact TypeScript source surface"
 fi
+[[ -d "$ROOT/agent-runtime/dist" && ! -L "$ROOT/agent-runtime/dist" ]] \
+  || fail "trusted Runtime build output is missing"
+diff -qr "$ROOT/agent-runtime/dist" "$DIST/agent-runtime/dist" >/dev/null \
+  || fail "packaged Runtime bytes differ from the trusted build output"
 
 VERSION="$(
   node -e '
@@ -239,25 +260,44 @@ if grep -a -R -l -E \
   fail "release files contain a private-key or credential pattern"
 fi
 
-while IFS= read -r line || [[ -n "$line" ]]; do
-  if [[ "$line" =~ ^([A-Z0-9_]*(KEY|TOKEN|SECRET)[A-Z0-9_]*)=(.*)$ ]]; then
-    value="${BASH_REMATCH[3]}"
-    [[ "$value" == replace-with-* || "$value" =~ ^\$\{[A-Z0-9_]+\}$ ]] \
-      || fail ".env.example contains a non-placeholder credential value for ${BASH_REMATCH[1]}"
-  fi
-done <"$DIST/.env.example"
+for environment_template in \
+  "$DIST/.env.example" \
+  "$DIST/deploy/systemd/runtime.env.example" \
+  "$DIST/deploy/systemd/paper.env.example"; do
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^[[:space:]]*#?[[:space:]]*([A-Z0-9_]*(KEY|TOKEN|SECRET)[A-Z0-9_]*)=(.*)$ ]]; then
+      value="${BASH_REMATCH[3]}"
+      [[ "$value" == replace-with-* || "$value" =~ ^\$\{[A-Z0-9_]+\}$ ]] \
+        || fail "environment example contains a non-placeholder credential value for ${BASH_REMATCH[1]}"
+    fi
+  done <"$environment_template"
+done
+grep -Eq '^MINECRAFT_AGENT_SERVER_TOKEN=replace-with-' \
+  "$DIST/deploy/systemd/runtime.env.example" \
+  || fail "Runtime environment example is missing its token placeholder"
+grep -Eq '^MINECRAFT_AGENT_SERVER_TOKEN=replace-with-' \
+  "$DIST/deploy/systemd/paper.env.example" \
+  || fail "Paper environment example is missing its token placeholder"
+grep -Eq '^MINECRAFT_AGENT_BUILD_PREVIEW_ENABLED=(false|true)$' \
+  "$DIST/deploy/systemd/paper.env.example" \
+  || fail "Paper environment example is missing its preview switch"
+if grep -Eq '(API_KEY|BASE_URL)=' "$DIST/deploy/systemd/paper.env.example"; then
+  fail "Paper environment example must not contain provider credentials or endpoints"
+fi
 
 while IFS= read -r -d '' yaml; do
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ "$line" =~ ^[[:space:]]*apiKey:[[:space:]]*(.*)$ ]]; then
       [[ "${BASH_REMATCH[1]}" == '${OPENAI_API_KEY}' ]] \
         || fail "YAML apiKey must use the OPENAI_API_KEY environment placeholder: $(relative_path "$yaml")"
-    elif [[ "$line" =~ ^[[:space:]]*serverToken:[[:space:]]*(.*)$ ]]; then
-      [[ "${BASH_REMATCH[1]}" == '${MINECRAFT_AGENT_SERVER_TOKEN}' ]] \
+    elif [[ "$line" =~ ^[[:space:]]*(serverToken|server-token):[[:space:]]*(.*)$ ]]; then
+      [[ "${BASH_REMATCH[2]}" == '${MINECRAFT_AGENT_SERVER_TOKEN}' ]] \
         || fail "YAML serverToken must use the MINECRAFT_AGENT_SERVER_TOKEN environment placeholder: $(relative_path "$yaml")"
     fi
   done <"$yaml"
-done < <(find "$DIST" -type f \( -name '*.yml' -o -name '*.yaml' \) -print0)
+done < <(find "$DIST" -type f \
+  \( -name '*.yml' -o -name '*.yaml' -o -name '*.yml.example' -o -name '*.yaml.example' \) \
+  -print0)
 
 SCHEMA_ROOT="$DIST/protocol/schemas"
 require_directory protocol/schemas

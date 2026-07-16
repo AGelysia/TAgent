@@ -37,7 +37,7 @@ Implementation status is tracked in the repository-only
 | Litematica    | 0.26.12 (optional)    |
 | MaLiLib       | 0.27.16 (optional)    |
 | Node.js       | 22.16-22.x            |
-| Candidate     | 0.1.0                 |
+| Candidate     | 0.2.0                 |
 
 Minecraft 1.21.11 is intentionally pinned because the product baseline requires Java 21. Paper
 26.x requires Java 25 and is outside this compatibility line. Paper publishes the 1.21.11 API only
@@ -102,12 +102,22 @@ comparison:
 ./scripts/release-check.sh
 ```
 
-The canonical command requires a clean Git worktree at entry and exit. It also asserts the Phase 13
+The canonical command requires a clean Git worktree at entry and exit. It also asserts the locked
 minimum test inventory and required suites before the second clean build removes reports. A long,
 explicit dirty-worktree override exists only for maintainer diagnostics and cannot produce manual or
 release evidence. This proves deterministic output within the recorded pinned lane. It is not a claim that arbitrary
 future operating-system or JDK builds are byte-for-byte identical. GitHub's manual release-candidate
 workflow uploads an artifact only; it does not create a tag or Release.
+
+For the final controlled cloud lane, create append-only evidence outside the repository with:
+
+```bash
+./scripts/final-validation.sh prepare /absolute/private/phase14-evidence
+```
+
+This reruns the clean candidate lane, fixes the candidate fingerprint, and copies the
+[`Phase 14 cloud checklist`](docs/phase14-cloud-validation.md). It does not contact a real provider,
+start Paper, or authorize publication by itself.
 
 ## Phase 2-14 Runtime
 
@@ -390,7 +400,7 @@ separate [`docs/phase13-manual-test.md`](docs/phase13-manual-test.md) lane.
 ```
 
 The inspected directory is placed under `dist/`; upload-ready JARs, a deterministic
-`MinecraftAgent-0.1.0.tar.gz`, and their `SHA256SUMS` are placed under `release/`. The package contains the implemented persistent conversation,
+`MinecraftAgent-0.2.0.tar.gz`, and their `SHA256SUMS` are placed under `release/`. The package contains the implemented persistent conversation,
 resume, explicit module path, shared tool/proposal schemas, Runtime loop, Paper read adapters, and
 Paper proposal authorization and audit infrastructure. It also contains the bounded Capability Pack
 loader, exact approval and immutable catalog/diff model, required-only typed renderer, and parse-only
@@ -404,25 +414,44 @@ unavailable.
 Phase 12 packaging also includes the closed management cost schemas, Runtime SQLite v3-v5 usage
 accounting, Paper management queries, anonymous client diagnostics, and restricted policy reload.
 
-The packaged Runtime preserves its compiled layout and includes the shared protocol schemas and
-configuration template. Install production dependencies before startup:
+The packaged Runtime preserves its compiled layout and includes the shared protocol schemas,
+configuration template, cloud checklist, and reviewed Paper/systemd deployment examples. Install
+production dependencies and create a private configuration before startup:
 
 ```bash
 cd dist/agent-runtime
-npm ci --omit=dev
+npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 cd ..
-./start-agent.sh --config config.example.yml
+install -m 0600 config.example.yml config.local.yml
+# Edit config.local.yml and provide its whole-value environment references.
+./start-agent.sh --config config.local.yml
 ```
 
 The top-level start scripts forward `--config`. They do not load `.env`; provide the server token
 and provider key through the invoking shell or service manager. Startup fails closed unless the
 configured model lookup succeeds. Relative config paths are resolved from the extracted bundle root.
 
+The packaged billable Provider check validates readiness, text, one exact tool call, continuation,
+and reported usage without printing the URL, key, model identifier, prompt, or response. Its model
+binding is a domain-separated HMAC keyed by the private Runtime token, not a reversible bare hash.
+It requires
+explicit authorization and performs real provider calls:
+
+```bash
+node agent-runtime/dist/validation/live-provider-check.js \
+  --confirm-billable --config /absolute/private/config.yml
+```
+
+Use the cloud checklist for service-user separation, firewalling, evidence rules, and the required
+two-physical-client end-to-end observation. A successful Provider-only check is not a Minecraft
+integration result.
+
 `scripts/package.ps1` remains a developer bundle path and does not establish release equivalence.
 The canonical candidate is produced on Linux by `scripts/release-check.sh`; native Windows packaging
 and runtime behavior remain an explicit manual gap.
 
-See [`SECURITY.md`](SECURITY.md) before exposing a server and
+See [`SECURITY.md`](SECURITY.md) and the
+[`Phase 14 cloud validation checklist`](docs/phase14-cloud-validation.md) before exposing a server and
 [`CLIENT-COMPATIBILITY.md`](CLIENT-COMPATIBILITY.md) before installing the optional client stack.
 
 ## Security baseline

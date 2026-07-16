@@ -52,6 +52,7 @@ Remove-Item $Release -Recurse -Force -ErrorAction SilentlyContinue
 New-Item "$Dist/agent-runtime" -ItemType Directory -Force | Out-Null
 New-Item "$Dist/agent-runtime/scripts" -ItemType Directory -Force | Out-Null
 New-Item "$Dist/default-capability-packs" -ItemType Directory -Force | Out-Null
+New-Item "$Dist/deploy" -ItemType Directory -Force | Out-Null
 New-Item "$Dist/docs" -ItemType Directory -Force | Out-Null
 New-Item "$Dist/protocol" -ItemType Directory -Force | Out-Null
 
@@ -65,10 +66,11 @@ Copy-Item "$Root/agent-runtime/package.json", "$Root/agent-runtime/package-lock.
 Copy-Item "$Root/agent-runtime/config.example.yml" "$Dist/agent-runtime"
 Copy-Item "$Root/agent-runtime/config.example.yml" "$Dist/config.example.yml"
 Copy-Item "$Root/capability-packs/*" "$Dist/default-capability-packs" -Recurse
+Copy-Item "$Root/deploy/*" "$Dist/deploy" -Recurse
 Copy-Item "$Root/protocol/schemas" "$Dist/protocol/schemas" -Recurse
 Copy-Item "$Root/protocol/README.md" "$Dist/protocol"
 Copy-Item "$Root/.env.example" $Dist
-Copy-Item "$Root/docs/operations.md", "$Root/docs/phase13-manual-test.md" "$Dist/docs"
+Copy-Item "$Root/docs/operations.md", "$Root/docs/phase13-manual-test.md", "$Root/docs/phase14-cloud-validation.md" "$Dist/docs"
 Copy-Item "$Root/README.md", "$Root/LICENSE", "$Root/SECURITY.md", "$Root/CLIENT-COMPATIBILITY.md", "$Root/start-agent.sh", "$Root/start-agent.ps1" $Dist
 
 $ChecksumLines = Get-ChildItem $Dist -File -Recurse |

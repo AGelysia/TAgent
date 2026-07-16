@@ -1,0 +1,29 @@
+[Unit]
+Description=TAgent billable live-provider validation
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=tagent
+Group=tagent
+WorkingDirectory=/opt/tagent/current
+EnvironmentFile=/etc/tagent/runtime.env
+ExecStart=/usr/bin/node /opt/tagent/current/agent-runtime/dist/validation/live-provider-check.js --confirm-billable --config /var/lib/tagent/runtime/config.yml
+TimeoutStartSec=10min
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# This unit is intentionally not installable or scheduled. Start it manually
+# only when the selected Provider account may incur the documented test calls.

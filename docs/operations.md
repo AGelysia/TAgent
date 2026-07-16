@@ -2,9 +2,11 @@
 
 ## Phase 0-14 purpose
 
-The repository remains a development implementation, not a deployable Minecraft
-Agent service. Its useful operations are build, format, contract, readiness,
-and focused integration tests. The Runtime has strict configuration, local
+The repository remains a development candidate, not a publicly accepted
+Minecraft Agent release. Phase 14 now includes a controlled, isolated cloud
+validation layout in `phase14-cloud-validation.md`; build, format, contract,
+readiness, provider, and focused integration checks remain mandatory. The
+Runtime has strict configuration, local
 filesystem/SQLite/Schema checks, an injectable provider-health port, and a
 loopback `/health` route. Paper Phase 3 adds strict startup inputs and a
 Paper-initiated authenticated Runtime hello; the current implementation includes
@@ -294,6 +296,23 @@ and repeat the complete physical-client graphical checklist against those exact
 hashes. The Phase 13 acceptance bound to commit `3735c5e` is historical only:
 its own candidate rule requires a new graphical run after any Runtime, dist, or
 archive fingerprint changes.
+
+The packaged checker makes billable calls and therefore requires an explicit
+flag. It runs compiled JavaScript directly, fails when any generation round has
+missing or zero usage, and emits only a profile ID, DEFAULT/CUSTOM endpoint
+mode, token-keyed model-name HMAC-SHA-256, fixed step states, usage states, and
+safe codes:
+
+```bash
+node agent-runtime/dist/validation/live-provider-check.js \
+  --confirm-billable --config /absolute/private/config.yml
+```
+
+It also rejects configuration warnings other than the expected reviewed custom
+base-URL signal. Keep the config at `0600`, use environment references for both
+secrets, and keep message-content logging disabled. This check does not exercise
+Paper authentication, private player delivery, cancellation, or the Runtime
+usage ledger; the cloud checklist covers those separately.
 
 `baseUrl` accepts at most 2048 characters and is normalized by removing trailing
 slashes. It must use HTTPS, except for plain HTTP on literal `127.0.0.1` or
@@ -1208,8 +1227,10 @@ values outside that metadata file. A changed or missing upstream artifact fails
 closed.
 
 `dist/` is the inspected installation tree. `release/` contains the two JARs,
-`MinecraftAgent-0.1.0.tar.gz`, and a separate `SHA256SUMS`. The archive has one
-top-level `MinecraftAgent-0.1.0/` directory. `scripts/package.ps1` can assemble a
+`MinecraftAgent-0.2.0.tar.gz`, and a separate `SHA256SUMS`. The archive has one
+top-level `MinecraftAgent-0.2.0/` directory. It also contains the controlled
+cloud checklist and the exact `deploy/paper` and `deploy/systemd` examples;
+private configuration and acceptance evidence are excluded. `scripts/package.ps1` can assemble a
 developer `dist/` tree but is not the canonical release path and does not prove
 native Windows runtime behavior.
 
@@ -1217,7 +1238,7 @@ The GitHub `Verify` workflow runs both Bash and PowerShell test orchestration on
 the POSIX security boundary. The manual `Release candidate` workflow has only
 read access and uploads a 14-day Actions artifact. It never creates a tag,
 GitHub Release, or mutable package. Final publication remains blocked on the
-manual client record.
+new Phase 14 live-provider, cloud, physical-client, and acceptance record.
 
 ### Manual graphical harness
 

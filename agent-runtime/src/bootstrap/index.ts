@@ -1,7 +1,6 @@
-import { pathToFileURL } from "node:url";
-
 import Fastify, { type FastifyInstance } from "fastify";
 
+import { isMainModule } from "./main-module.js";
 import { asRuntimeStartupError, RuntimeStartupError } from "./startup-error.js";
 import { loadRuntimeConfig, type LoadRuntimeConfigOptions } from "../config/runtime-config.js";
 import { checkLogDirectory } from "../health/filesystem.js";
@@ -296,11 +295,6 @@ export async function startRuntime(options: BootstrapOptions = {}): Promise<Star
   };
 }
 
-function isMainModule(): boolean {
-  const entryPath = process.argv[1];
-  return entryPath !== undefined && pathToFileURL(entryPath).href === import.meta.url;
-}
-
 function cliConfigPath(arguments_: readonly string[]): string | undefined {
   if (arguments_.length === 0) {
     return undefined;
@@ -346,6 +340,6 @@ async function runMain(): Promise<void> {
   process.once("SIGTERM", stop);
 }
 
-if (isMainModule()) {
+if (isMainModule(process.argv[1], import.meta.url)) {
   await runMain();
 }

@@ -339,7 +339,7 @@ describe("Paper WebSocket handshake", () => {
     });
     expect(payload).toMatchObject({
       component: "runtime",
-      componentVersion: "0.1.0",
+      componentVersion: "0.2.0",
       supportedProtocolVersions: ["1.0"],
       selectedProtocolVersion: "1.0",
     });

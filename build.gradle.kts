@@ -7,7 +7,7 @@ plugins {
 
 allprojects {
     group = "dev.minecraftagent"
-    version = "0.1.0"
+    version = "0.2.0"
 
     tasks.withType<AbstractArchiveTask>().configureEach {
         isPreserveFileTimestamps = false

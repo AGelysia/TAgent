@@ -36,6 +36,7 @@ rm -rf "$DIST" "$RELEASE"
 mkdir -p \
   "$DIST/agent-runtime/scripts" \
   "$DIST/default-capability-packs" \
+  "$DIST/deploy" \
   "$DIST/docs" \
   "$DIST/protocol" \
   "$RELEASE"
@@ -55,10 +56,15 @@ cp "$ROOT/agent-runtime/config.example.yml" "$DIST/agent-runtime/"
 cp "$ROOT/agent-runtime/config.example.yml" "$DIST/config.example.yml"
 chmod 0644 "$DIST/agent-runtime/config.example.yml"
 cp -R "$ROOT/capability-packs/." "$DIST/default-capability-packs/"
+cp -R "$ROOT/deploy/." "$DIST/deploy/"
 cp -R "$ROOT/protocol/schemas" "$DIST/protocol/schemas"
 cp "$ROOT/protocol/README.md" "$DIST/protocol/"
 cp "$ROOT/.env.example" "$DIST/"
-cp "$ROOT/docs/operations.md" "$ROOT/docs/phase13-manual-test.md" "$DIST/docs/"
+cp \
+  "$ROOT/docs/operations.md" \
+  "$ROOT/docs/phase13-manual-test.md" \
+  "$ROOT/docs/phase14-cloud-validation.md" \
+  "$DIST/docs/"
 cp \
   "$ROOT/README.md" \
   "$ROOT/LICENSE" \

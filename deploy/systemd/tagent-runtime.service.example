@@ -1,0 +1,33 @@
+[Unit]
+Description=TAgent Runtime
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=tagent
+Group=tagent
+WorkingDirectory=/opt/tagent/current
+EnvironmentFile=/etc/tagent/runtime.env
+ExecStart=/usr/bin/node /opt/tagent/current/agent-runtime/dist/bootstrap/index.js --config /var/lib/tagent/runtime/config.yml
+Restart=on-abnormal
+RestartSec=5s
+TimeoutStartSec=150s
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/tagent/runtime
+
+[Install]
+WantedBy=multi-user.target

@@ -793,6 +793,34 @@ Pre-publication acceptance still pending:
       per-round reservation from the actual provider/model/account price sheet;
       no example value is publication evidence or a billing cap.
 
+Final validation preparation implemented on 2026-07-16:
+
+- [x] The next candidate is versioned `0.2.0`, so the Phase 14 payload does not
+      reuse the historical accepted `0.1.0` version.
+- [x] A packaged, explicitly billable live-provider CLI checks readiness, text,
+      one exact tool call, continuation, positive reported usage, per-round
+      timeout, and safe failures. Its evidence identity contains only the fixed
+      provider profile, DEFAULT/CUSTOM mode, and a domain-separated model-name
+      HMAC-SHA-256 keyed by the private Runtime token; it never prints a URL,
+      key, model identifier, prompt, response, or continuation.
+- [x] The distribution now includes reviewed split-user systemd examples,
+      private Paper/Runtime environment templates, secure Paper properties, and
+      the complete cloud validation checklist. Exact distribution verification
+      rejects a missing or changed deployment surface; release verification
+      installs only production dependencies in an extracted copy and executes
+      the compiled Provider CLI without TypeScript sources or development
+      dependencies.
+- [x] `scripts/final-validation.sh` creates a new private repository-external
+      evidence directory only from a clean tree, runs the canonical release
+      lane, binds the tested fingerprint, and later compares all seven payload
+      fields without overwriting evidence.
+- [x] `docs/phase14-final-acceptance-record.md` is a repository-only `PENDING`
+      template. The historical Phase 13 record remains unchanged.
+- [ ] No cloud host, real provider credential, or new physical-client session
+      was used during this preparation. All Phase 14 acceptance decisions remain
+      pending until the copied checklist is completed against one exact clean
+      fingerprint.
+
 ## Verification
 
 Phase 14 automated development verification recorded on 2026-07-15:

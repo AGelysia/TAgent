@@ -74,7 +74,9 @@ const major = Number(process.argv[2].split(".")[0]);
 if (!Number.isSafeInteger(major) || major < 10) process.exit(1);
 NODE
 
-if [[ -n "$(git -C "$ROOT" status --porcelain)" ]]; then
+GIT_STATUS="$(git -C "$ROOT" status --porcelain)" \
+  || { printf 'Git worktree status could not be determined\n' >&2; exit 1; }
+if [[ -n "$GIT_STATUS" ]]; then
   STARTED_CLEAN=0
   if [[ "$DIRTY_OVERRIDE" != I_UNDERSTAND_THIS_IS_NOT_A_RELEASE ]]; then
     printf 'Release verification requires a clean Git worktree\n' >&2
@@ -122,6 +124,32 @@ cmp \
   "$ROOT/dist/SHA256SUMS" \
   "$FIRST_BUILD/archive/MinecraftAgent-${VERSION}/SHA256SUMS"
 
+PACKAGED_RUNTIME="$FIRST_BUILD/archive/MinecraftAgent-${VERSION}/agent-runtime"
+(
+  cd "$PACKAGED_RUNTIME"
+  npm ci --omit=dev --ignore-scripts --no-audit --no-fund --prefer-offline >/dev/null
+)
+ln -s "$FIRST_BUILD/archive/MinecraftAgent-${VERSION}" "$FIRST_BUILD/current"
+PACKAGED_RUNTIME_LINK="$FIRST_BUILD/current/agent-runtime"
+BOOTSTRAP_OUTPUT="$FIRST_BUILD/bootstrap.output"
+if node "$PACKAGED_RUNTIME_LINK/dist/bootstrap/index.js" --invalid \
+  >"$BOOTSTRAP_OUTPUT" 2>&1; then
+  printf 'Packaged Runtime bootstrap accepted invalid CLI arguments\n' >&2
+  exit 1
+fi
+grep -Fq '"code":"CONFIG_PATH_INVALID"' "$BOOTSTRAP_OUTPUT" \
+  || { printf 'Packaged Runtime bootstrap did not run through the release symlink\n' >&2; exit 1; }
+PROVIDER_CHECK_OUTPUT="$FIRST_BUILD/provider-check.output"
+if node "$PACKAGED_RUNTIME_LINK/dist/validation/live-provider-check.js" \
+  >"$PROVIDER_CHECK_OUTPUT" 2>&1; then
+  printf 'Packaged provider validator accepted missing billing confirmation\n' >&2
+  exit 1
+fi
+printf '%s\n' \
+  'confirmation=FAIL code=BILLING_CONFIRMATION_REQUIRED' \
+  'result=FAIL code=BILLING_CONFIRMATION_REQUIRED' >"$FIRST_BUILD/provider-check.expected"
+cmp "$FIRST_BUILD/provider-check.expected" "$PROVIDER_CHECK_OUTPUT"
+
 "$ROOT/scripts/paper-smoke.sh"
 (
   cd "$ROOT/agent-runtime"
@@ -132,7 +160,9 @@ MINECRAFT_AGENT_PACKAGE_SKIP_TESTS=1 "$ROOT/scripts/package.sh"
 cmp "$FIRST_BUILD/dist.SHA256SUMS" "$ROOT/dist/SHA256SUMS"
 cmp "$FIRST_BUILD/release.SHA256SUMS" "$ROOT/release/SHA256SUMS"
 git -C "$ROOT" diff --check
-if [[ "$STARTED_CLEAN" == 1 && -n "$(git -C "$ROOT" status --porcelain)" ]]; then
+FINAL_GIT_STATUS="$(git -C "$ROOT" status --porcelain)" \
+  || { printf 'Final Git worktree status could not be determined\n' >&2; exit 1; }
+if [[ "$STARTED_CLEAN" == 1 && -n "$FINAL_GIT_STATUS" ]]; then
   printf 'Git worktree changed while release verification was running\n' >&2
   exit 1
 fi

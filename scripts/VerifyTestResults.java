@@ -17,6 +17,8 @@ final class VerifyTestResults {
       Set.of(
           "test/anthropic-messages-provider.test.ts",
           "test/gemini-generate-content-provider.test.ts",
+          "test/live-provider-check.test.ts",
+          "test/main-module.test.ts",
           "test/openai-chat-completions-provider.test.ts",
           "test/openai-responses-provider.test.ts",
           "test/phase13-manual-runtime.test.ts",
@@ -45,7 +47,7 @@ final class VerifyTestResults {
     }
 
     verify(
-        new Lane("Runtime", 24, 275, RUNTIME_REQUIRED),
+        new Lane("Runtime", 26, 287, RUNTIME_REQUIRED),
         suitesFromDocument(Path.of(args[0])));
     verify(
         new Lane("Paper", 59, 463, PAPER_REQUIRED),
