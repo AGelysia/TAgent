@@ -14,7 +14,7 @@ does not apply to this candidate.
 - Status: `PENDING` (`PENDING`, `ACCEPTED`, or `REJECTED` only)
 - Final candidate version: `0.2.0`
 - Test date (UTC): `<PENDING>`
-- Sanitized external evidence reference: `<PENDING: opaque reference only>`
+- Sanitized external evidence reference: `phase14-0.2.0-3fd0959`
 - Mandatory failures: `<PENDING>`
 - Unapproved blockers: `<PENDING>`
 
@@ -24,23 +24,30 @@ into a pass.
 
 ## Fixed candidate binding
 
-- Tested `candidate.commit`: `<PENDING: 40 lowercase hex>`
+- Tested `candidate.commit`: `3fd09598f61f6223504ad997a6135373523c8e69`
 - Tested `candidate.version`: `0.2.0`
-- Tested `candidate.paper.sha256`: `<PENDING: 64 lowercase hex>`
-- Tested `candidate.client.sha256`: `<PENDING: 64 lowercase hex>`
-- Tested `candidate.dist-manifest.sha256`: `<PENDING: 64 lowercase hex>`
-- Tested `candidate.runtime-manifest.sha256`: `<PENDING: 64 lowercase hex>`
-- Tested `candidate.protocol-manifest.sha256`: `<PENDING: 64 lowercase hex>`
-- Tested `candidate.archive.sha256`: `<PENDING: 64 lowercase hex>`
+- Tested `candidate.paper.sha256`:
+  `213acda1974d39a65d0fcc9ac8902816284019d01bef8b0c37b9c95c75263d53`
+- Tested `candidate.client.sha256`:
+  `f823309e9f22ba505d5fcccc7f107c0f3d9dcee84edf24341b83eb03c9bd38e2`
+- Tested `candidate.dist-manifest.sha256`:
+  `4c7369864c3ff842c117af9e24c147f06543c5a9e850057663ac67c112c09dad`
+- Tested `candidate.runtime-manifest.sha256`:
+  `904c2a17907287fb97910e00aef045e69c7c23e857eb5602da2e0ea7a5286b89`
+- Tested `candidate.protocol-manifest.sha256`:
+  `8911de23fd119adc6c424c27e6f1b598fd35948c32fa7ab1eb3629fc3bdb2f8e`
+- Tested `candidate.archive.sha256`:
+  `2326361b0ad606adf96e3d104174822786118b2811a1d38b88a6c3a6a0638a75`
 - Trusted external archive-hash check: `PENDING`
 - Extracted package `SHA256SUMS` check: `PENDING`
-- Initial release-manifest SHA-256: `<PENDING: 64 lowercase hex>`
+- Initial release-manifest SHA-256:
+  `3a9e34bebc2641becdc214d46e805f7a26cf1524910955d83a5cd4a8256a8656`
 - Extracted manifest hash equals `candidate.dist-manifest.sha256`: `PENDING`
 - Pinned Paper build: `1.21.11-132`
 - Pinned Paper SHA-256:
   `5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba`
 - Pinned Paper hash check: `PENDING`
-- Initial clean release check: `PENDING`
+- Initial clean release check: `PASS`
 
 All placeholders must be replaced with the exact values from the one external
 `tested-fingerprint.txt`. Do not combine values from separate candidate runs.

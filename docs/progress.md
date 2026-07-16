@@ -821,6 +821,44 @@ Final validation preparation implemented on 2026-07-16:
       pending until the copied checklist is completed against one exact clean
       fingerprint.
 
+Clean `0.2.0` candidate preparation recorded on 2026-07-16:
+
+```bash
+./scripts/final-validation.sh prepare \
+  /absolute/private/phase14-evidence
+```
+
+- The command started from clean candidate commit
+  `3fd09598f61f6223504ad997a6135373523c8e69`, completed the canonical
+  release check, and created a private repository-external evidence directory.
+  Generated anchors and test results are `0400`; editable checklist/record
+  copies are `0600`; every evidence directory is `0700`.
+- Runtime passed all 26 suites and 287 tests, Paper passed 59 suites and 463
+  tests, and Client passed 17 suites and 210 tests. Every inventory reported
+  zero failures, errors, and skips. The extracted production Runtime installed
+  without development dependencies, and both Runtime and Provider CLI entries
+  executed through the deployment-style `current` symbolic link.
+- The pinned Paper `1.21.11-132` smoke passed `offline-lifecycle`,
+  `unavailable`, `wrong-token`, and `incompatible` with SHA-256
+  `5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba`.
+  npm reported zero high-severity vulnerabilities.
+- Both uncached package builds produced identical release manifests. The Paper
+  JAR is 752,661 bytes with SHA-256
+  `213acda1974d39a65d0fcc9ac8902816284019d01bef8b0c37b9c95c75263d53`;
+  the Client JAR is 330,677 bytes with SHA-256
+  `f823309e9f22ba505d5fcccc7f107c0f3d9dcee84edf24341b83eb03c9bd38e2`;
+  and the 1,300,419-byte `MinecraftAgent-0.2.0.tar.gz` hashes to
+  `2326361b0ad606adf96e3d104174822786118b2811a1d38b88a6c3a6a0638a75`.
+- The dist, Runtime-subset, protocol-subset, and outer release-manifest hashes
+  are respectively
+  `4c7369864c3ff842c117af9e24c147f06543c5a9e850057663ac67c112c09dad`,
+  `904c2a17907287fb97910e00aef045e69c7c23e857eb5602da2e0ea7a5286b89`,
+  `8911de23fd119adc6c424c27e6f1b598fd35948c32fa7ab1eb3629fc3bdb2f8e`,
+  and `3a9e34bebc2641becdc214d46e805f7a26cf1524910955d83a5cd4a8256a8656`.
+- This preparation used no real Provider credential and made no cloud,
+  graphical-client, live-timeout, or publication claim. The Phase 14 final
+  acceptance record remains `PENDING`.
+
 ## Verification
 
 Phase 14 automated development verification recorded on 2026-07-15:
