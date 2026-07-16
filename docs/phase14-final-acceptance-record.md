@@ -1,26 +1,40 @@
 # Phase 14 Final Acceptance Record
 
-This repository-only record is a deliberately uncompleted template. Raw working
-evidence belongs in the private external directory created by
-`scripts/final-validation.sh prepare`. Do not place a provider/custom endpoint
-URL, key, token, model identifier, prompt, response, tool payload, raw log,
-player UUID/account name, source IP, VM address, or client-local path here.
-
-The historical Phase 13 acceptance record must remain unchanged. Its outcome
-does not apply to this candidate.
+This repository record contains sanitized release facts only. Raw working
+evidence remains outside the repository. It intentionally contains no provider
+URL, credential, model identifier, prompt, response, tool payload, raw log,
+player identity, source address, VM address, or client-local path.
 
 ## Overall decision
 
-- Status: `PENDING` (`PENDING`, `ACCEPTED`, or `REJECTED` only)
+- Strict checklist status: `REJECTED`
+- Maintainer publication decision: `ACCEPTED_FOR_PRERELEASE_EXCEPTION`
+- Release channel: `PRE_RELEASE` (controlled public preview)
 - Final candidate version: `0.2.0`
-- Test date (UTC): `<PENDING>`
+- Test date (UTC): `2026-07-16`
 - Sanitized external evidence reference: `phase14-0.2.0-3fd0959`
-- Mandatory failures: `<PENDING>`
-- Unapproved blockers: `<PENDING>`
+- Observed mandatory test failures: `0`
+- Mandatory incomplete checks: `1` (native Litematica projection lifecycle)
+- Strict evidence gaps: no named live-provider profile has a retained exact CLI
+  transcript; native projection execution was not observed.
+- Unapproved publication blockers after the maintainer exception: `0`
+- Approved release limitation: exact-Litematica native projection execution was
+  not observed against this payload.
 
-This file must remain `PENDING` until all strict conditions at the end are
-satisfied. Notes cannot turn a missing test, `FAIL`, mismatch, or unsafe evidence
-into a pass.
+The maintainer reported that every planned cloud, real-provider Minecraft, and
+two-physical-client check passed except native Litematica projection. That
+statement is the source for the manual outcomes below because the test system's
+raw files were not migrated back to this workstation. The repository-external
+checklist therefore remains an unfilled template and is not represented as raw
+field-by-field evidence.
+
+The missing projection observation is not relabelled `PASS`. The empty named
+provider claim set also does not satisfy the original requirement for one
+`CLAIMED` deployment profile. The strict gate therefore has the terminal result
+`REJECTED`. Separately, the maintainer explicitly accepted both evidence gaps as
+limitations for this first public preview. This exception authorizes a
+prerelease; it does not redefine the strict result. GitHub must mark `v0.2.0` as
+a prerelease and state both limitations prominently.
 
 ## Fixed candidate binding
 
@@ -38,213 +52,135 @@ into a pass.
   `8911de23fd119adc6c424c27e6f1b598fd35948c32fa7ab1eb3629fc3bdb2f8e`
 - Tested `candidate.archive.sha256`:
   `2326361b0ad606adf96e3d104174822786118b2811a1d38b88a6c3a6a0638a75`
-- Trusted external archive-hash check: `PENDING`
-- Extracted package `SHA256SUMS` check: `PENDING`
 - Initial release-manifest SHA-256:
   `3a9e34bebc2641becdc214d46e805f7a26cf1524910955d83a5cd4a8256a8656`
-- Extracted manifest hash equals `candidate.dist-manifest.sha256`: `PENDING`
 - Pinned Paper build: `1.21.11-132`
 - Pinned Paper SHA-256:
   `5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba`
-- Pinned Paper hash check: `PENDING`
-- Initial clean release check: `PASS`
 
-All placeholders must be replaced with the exact values from the one external
-`tested-fingerprint.txt`. Do not combine values from separate candidate runs.
+The uploaded archive hash, extracted package manifest, internal checksums, dist
+manifest, and pinned Paper hash were reported `PASS`. No payload or archive
+change is permitted between this binding and the release tag.
+
+## Automated release evidence
+
+- Initial clean release check: `PASS`
+- Runtime: `26` suites, `287` tests, `0` failures/errors/skips
+- Paper: `59` suites, `463` tests, `0` failures/errors/skips
+- Client: `17` suites, `210` tests, `0` failures/errors/skips
+- Pinned Paper smoke: `PASS`
+- Extracted production Runtime and provider-check entry: `PASS`
+- Production dependency install: `PASS`
+- npm high-severity audit findings: `0`
+- Two uncached Linux package builds: identical complete manifests
+- GitHub Verify on the tested candidate and evidence-only successor: Linux and
+  PowerShell jobs `PASS`
+- Publication-stage final check and fingerprint: executed only after this
+  evidence decision is committed; the authoritative outcomes are the append-only
+  external `final-fingerprint.txt` and commit-bound GitHub Actions run.
+
+The final comparison is a mechanical publication condition, not a result
+asserted in advance by this record. If it does not produce
+`final-validation mode=compare result=passed`, the maintainer exception is void
+and no tag or Release may be created.
 
 ## Provider claims
 
-`CLAIMED` and `NOT_CLAIMED` are the only profile-claim values. A profile remains
-`NOT_CLAIMED` until its own explicitly billable live CLI run ends in the exact
-fixed PASS statuses, including `usage=REPORTED` for all three generation rounds.
-`usage=MISSING` or `usage=INVALID` makes the CLI result fail. A profile that is
-`NOT_CLAIMED` must be excluded from release compatibility claims.
+All five production adapters are implemented and covered by offline contract
+tests. No named profile is claimed as independently live-validated for this
+release because the exact billable CLI identity/status transcript was not
+retained in the migrated evidence.
 
-| Provider profile | Claim | Billable fixed-status CLI | Usage decision | Notes |
-| --- | --- | --- | --- | --- |
-| `openai` | `NOT_CLAIMED` | `PENDING` | `PENDING` | |
-| `anthropic` | `NOT_CLAIMED` | `PENDING` | `PENDING` | |
-| `deepseek` | `NOT_CLAIMED` | `PENDING` | `PENDING` | cache-miss input rate required |
-| `gemini` | `NOT_CLAIMED` | `PENDING` | `PENDING` | tool/thinking usage included |
-| `openai-compatible` | `NOT_CLAIMED` | `PENDING` | `PENDING` | reviewed fixture only |
-
-- Declared public provider claim set: `<PENDING: profile IDs only>`
-- Deployment provider profile: `<PENDING: exactly one CLAIMED profile ID>`
-- Each claimed CLI identity line matched its profile, DEFAULT/CUSTOM endpoint
-  mode, and private token-keyed model HMAC-SHA-256: `PENDING`
-- Deployment profile pricing reviewed against current account price sheet:
-  `PENDING`
-- Deployment per-round reservation reviewed as conservative: `PENDING`
-- No fallback, retry, rotation, or protocol discovery used: `PENDING`
-- Reviewed `openai-compatible` exact models/chat-completions fixture, when
-  claimed: `PENDING` (`PASS`, `FAIL`, or `NOT_CLAIMED`)
-
-Do not record the deployed model name, endpoint, account, key, prices, prompt,
-response, or provider error body.
-
-## Cloud deployment
-
-| Item | Result |
-| --- | --- |
-| Separate `tagent` and `minecraft` OS users/groups | `PENDING` |
-| Separate root-owned `0600` Runtime/Paper environment files | `PENDING` |
-| Provider key present only in Runtime environment | `PENDING` |
-| Runtime listener restricted to loopback | `PENDING` |
-| Security group allows `25565` from exactly two tester sources | `PENDING` |
-| Host firewall independently allows the same two sources | `PENDING` |
-| Runtime/RCON/query/database/debug ports not exposed | `PENDING` |
-| `online-mode`, whitelist, and enforce-whitelist enabled | `PENDING` |
-| RCON and query disabled | `PENDING` |
-| Exactly two authenticated accounts whitelisted | `PENDING` |
-| Runtime READY before Paper start | `PENDING` |
-| Paper systemd dependency and health precheck observed | `PENDING` |
-| `/agent` registered only after authenticated readiness | `PENDING` |
-
-Sanitized host image, Java, Node, npm, and systemd version facts:
-`<PENDING>`
-
-## Real-provider Minecraft path
-
-| Mandatory observation | Result | Sanitized outcome only |
+| Provider profile | Live claim | Released adapter |
 | --- | --- | --- |
-| Runtime/Paper readiness and bounded management output | `PENDING` | |
-| Real `/agent say` private response to requester | `PENDING` | |
-| Simultaneous second client observed no broadcast | `PENDING` | |
-| Real authoritative read-tool call and provider continuation | `PENDING` | |
-| Completed requests advanced admitted/call ledger counts | `PENDING` | |
-| Usage settled as reported or conservatively estimated | `PENDING` | |
-| Idle active reservation exposure equals `0` | `PENDING` | |
-| Player-disconnect cancellation suppressed stale reply | `PENDING` | |
-| Cancellation ledger settled and active exposure equals `0` | `PENDING` | |
-| `/agent off` closed admission and returned exact `AI offline` | `PENDING` | |
-| `/agent on` created a fresh authenticated generation | `PENDING` | |
-| Controlled Runtime loss stayed Offline until explicit recovery | `PENDING` | |
-| Post-recovery new work passed; old generation stayed stale | `PENDING` | |
-| Final active reservation exposure equals `0` | `PENDING` | |
-| No prompt, response, private identity, path, or secret leaked | `PENDING` | |
+| `openai` | `NOT_CLAIMED` | OpenAI Responses |
+| `anthropic` | `NOT_CLAIMED` | Anthropic Messages |
+| `deepseek` | `NOT_CLAIMED` | DeepSeek Chat Completions |
+| `gemini` | `NOT_CLAIMED` | Gemini `generateContent` |
+| `openai-compatible` | `NOT_CLAIMED` | reviewed Chat Completions protocol |
 
-## Timeout and usage decision
+- Declared public live-provider claim set: `EMPTY`
+- Operator-configured real-provider Minecraft response path: `PASS` by
+  maintainer observation
+- Exact deployed provider profile: `NOT_RETAINED`; therefore not a public claim
+- Live timeout claim: `NOT_CLAIMED`
+- Provider pricing/account correctness claim: `NOT_CLAIMED`
+- Automatic fallback, retry, rotation, or protocol discovery: `ABSENT`
 
-- Automated offline timeout/cancellation/late-result gate in the clean release
-  check: `PENDING`
-- Live provider timeout claim: `NOT_CLAIMED` (`CLAIMED` or `NOT_CLAIMED` only)
-- Reviewed deterministic provider/account fault control used: `NO`
-- Live timeout result: `NOT_CLAIMED`
-- Late player reply under a claimed live timeout: `NOT_CLAIMED`
-- Timeout usage settlement: `NOT_CLAIMED`
-- Timeout active reservation exposure returned to `0`: `NOT_CLAIMED`
-- Deployment usage outcome: `PENDING` (`REPORTED`, `MISSING_ESTIMATED`,
-  `MIXED_REPORTED_ESTIMATED`, or `FAIL`)
-- Ledger decision matches CLI usage status and Runtime settlement rules:
-  `PENDING`
+Release notes may say these adapters are available. They must not say that every
+listed provider, model, account, custom URL, or compatible endpoint was live
+certified. Operators remain responsible for validating their chosen endpoint,
+model capabilities, current prices, and conservative reservations.
 
-Live timeout is optional and may remain `NOT_CLAIMED` without blocking
-acceptance. It may be changed to `CLAIMED` only when the controlled-fault rules
-in `phase14-cloud-validation.md` were followed and every associated row passes.
-Changing a timeout value or relying on ordinary provider latency is not a
-controlled claim.
+## Cloud and Minecraft acceptance
 
-## Two physical licensed clients
+The maintainer attested the following outcomes for the exact bound payload:
 
-Do not record account names, UUIDs, source IPs, public addresses, or launcher
-paths.
+- Split Runtime/Paper service identities and private environment boundaries:
+  `PASS`
+- Runtime loopback binding, restricted Minecraft ingress, online-mode,
+  whitelist enforcement, and disabled RCON/query: `PASS`
+- Runtime-before-Paper readiness and authenticated command registration: `PASS`
+- Two distinct physical licensed clients joined and were simultaneously online:
+  `PASS`
+- Private `/agent say` response with no observer broadcast: `PASS`
+- Real read-tool continuation and correct AI response: `PASS`
+- Usage/cost settlement and zero final active reservation exposure: `PASS`
+- Disconnect cancellation, Offline gate, explicit recovery, and stale-generation
+  suppression: `PASS`
+- Shutdown, temporary-access removal, secret rotation/removal, and sanitized
+  evidence review: `PASS`
+- Bare `/agent` required OP: `EXPECTED`; it aliases the administrative status
+  surface. Ordinary permitted `/agent say`, module, and UI paths did not require
+  OP.
 
-| Physical client | Licensed authenticated account | Sanitized platform facts | Role | Result |
-| --- | --- | --- | --- | --- |
-| A | `PENDING` | `<PENDING>` | primary three-profile tester | `PENDING` |
-| B | `PENDING` | `<PENDING>` | independent observer/tester | `PENDING` |
+Sanitized test-host facts: Ubuntu kernel `6.8.0-48-generic`, OpenJDK
+`21.0.11`, Node.js `22.23.1`, npm `10.9.8`, x86_64, 8 virtual CPU cores,
+12 GiB assigned memory. No host or player identifier is retained.
 
-- Both devices joined the exact final candidate at least once: `PENDING`
-- Both were simultaneously online for private non-broadcast evidence: `PENDING`
-- Distinct physical devices and launcher/game directories confirmed: `PENDING`
-- Authentication remained online and whitelist enforced throughout: `PENDING`
+## Client channels
 
-## Phase 13 three-channel rerun
+| Channel | Outcome | Release interpretation |
+| --- | --- | --- |
+| Vanilla `1.21.11` | `PASS` | supported fallback client |
+| Agent client without Litematica | `PASS` | accepted preview client path |
+| Exact Litematica `0.26.12` / MaLiLib `0.27.16` | `INCOMPLETE` | adapter ships as experimental |
 
-Every row is a new run against this record's exact `0.2.0` fingerprint. The
-historical Phase 13 result is not referenced as a substitute.
+For the exact-Litematica channel, native placement creation/loading,
+placement-derived bounds and origin, Material List, explicit removal,
+changed-position fresh preview, and disconnect cleanup were not directly
+observed against the `0.2.0` payload. A correct AI response and server dispatch
+do not prove client execution. The older Phase 13 observation belongs to commit
+`3735c5ef7fe55f04fff499b257e72e71707c47c0` and is not substituted here.
 
-| Channel | Complete checklist | Fingerprint | Outcome |
-| --- | --- | --- | --- |
-| Vanilla `1.21.11` | `PENDING` | `PENDING` | `PENDING` |
-| Agent client, no Litematica | `PENDING` | `PENDING` | `PENDING` |
-| Exact Litematica `0.26.12` / MaLiLib `0.27.16` | `PENDING` | `PENDING` | `PENDING` |
+The base Fabric client remains optional and preview loading remains off by
+default. The exact dependency tuple is included only to identify the implemented
+reflection adapter; this prerelease makes no stable Litematica compatibility
+claim.
 
-- Mandatory Phase 13 core items: `PENDING`
-- Allowlisted non-core BLOCKED fixtures only: `<PENDING>`
-- Phase 13 failures: `<PENDING>`
-- All three channels match the tested Paper/client/dist/Runtime/protocol/archive
-  hashes and `0.2.0` version: `PENDING`
+The frozen archive's `CLIENT-COMPATIBILITY.md` table calls this tuple a supported
+release target and describes the intended preview lifecycle. For `v0.2.0`, that
+wording identifies the implemented matrix target, not a completed physical-test
+certification. This record and the GitHub prerelease limitation supersede that
+certification implication without changing the already tested payload.
 
-## Cleanup and redaction
+## Publication controls
 
-| Item | Result |
-| --- | --- |
-| Clients disconnected; Paper stopped before Runtime | `PENDING` |
-| No candidate Java/Node process or listener remains | `PENDING` |
-| Security-group and host-firewall test rules removed | `PENDING` |
-| Provider keys revoked or rotated | `PENDING` |
-| Runtime token rotated | `PENDING` |
-| Private env/config/world/SQLite/log/staging data removed | `PENDING` |
-| Temporary Owner, OP entries, and whitelist removed | `PENDING` |
-| Evidence contains only allowed sanitized fields | `PENDING` |
-| URL/key/model/prompt/response/tool payload/raw-log scan passed | `PENDING` |
+Publication is authorized only when all of these conditions hold:
 
-## Final comparison
+1. `scripts/final-validation.sh compare` passes from a clean evidence-only final
+   commit and reproduces every fixed payload hash above.
+2. The manual `Release candidate` workflow passes for that commit and its
+   downloaded assets match the fixed Paper, Client, archive, and release-manifest
+   hashes.
+3. The annotated `v0.2.0` tag targets that verified final commit.
+4. The GitHub Release is marked prerelease and uploads only the complete archive,
+   standalone Paper JAR, standalone Fabric JAR, and `SHA256SUMS`.
+5. Release notes disclose the unverified Litematica lifecycle, empty live-provider
+   claim set, absent native Windows equivalence, preview-only/no-world-write
+   boundary, and bare `/agent` OP behavior.
 
-- Final repository commit: `<PENDING: 40 lowercase hex>`
-- Final clean release check: `PENDING`
-- `final-validation mode=compare result=passed`: `PENDING`
-- `final-fingerprint.txt` created append-only: `PENDING`
-- Final `candidate.version`: `<PENDING; must be 0.2.0>`
-- Final Paper JAR hash: `<PENDING: 64 lowercase hex>`
-- Final Client JAR hash: `<PENDING: 64 lowercase hex>`
-- Final dist-manifest hash: `<PENDING: 64 lowercase hex>`
-- Final Runtime-manifest hash: `<PENDING: 64 lowercase hex>`
-- Final protocol-manifest hash: `<PENDING: 64 lowercase hex>`
-- Final archive hash: `<PENDING: 64 lowercase hex>`
-- Final release-manifest hash: `<PENDING: 64 lowercase hex>`
-- Tested-to-final seven-field comparison: `PENDING` (`MATCH` required)
-
-The final repository commit may modify only
-`docs/phase14-final-acceptance-record.md` and optionally `docs/progress.md` after
-the tested candidate. The compare script rejects any other committed path. Any
-payload or archive change requires a new prepare, cloud deployment,
-live-provider path, physical-client rerun, and final comparison.
-
-## Strict `ACCEPTED` conditions
-
-Set overall Status to `ACCEPTED` only when all of the following are true:
-
-1. The candidate is exactly `0.2.0`; every fixed placeholder is complete; the
-   trusted upload, internal `SHA256SUMS`, pinned Paper, initial release check,
-   and final release check all pass.
-2. The final compare reports `MATCH` for version, Paper JAR, Client JAR, dist
-   manifest, Runtime manifest, protocol manifest, and archive. No tested payload
-   changed.
-3. The two-user deployment, split secret environments, loopback Runtime,
-   two-source security group and host firewall, online authentication, exact
-   whitelist, disabled RCON/query, and Runtime-before-Paper order all pass.
-4. The deployment provider is `CLAIMED`. Every profile in the declared public
-   claim set is `CLAIMED` by its own exact billable CLI PASS; every other profile
-   is `NOT_CLAIMED` and excluded from public compatibility claims. A claimed
-   `openai-compatible` result is limited to its reviewed fixture.
-5. Every mandatory real-provider Minecraft row passes, including private
-   delivery, real tool continuation, cancellation, Offline/recovery, correct
-   usage settlement, and final active reservation exposure `0`.
-6. The clean automated timeout gate passes. Live timeout is either validly
-   `CLAIMED` with every controlled-fault row passing or remains honestly
-   `NOT_CLAIMED`; no uncontrolled live timeout claim is permitted.
-7. Both independent physical licensed clients pass their required observations,
-   and the complete Phase 13 Vanilla, Agent-client, and exact-Litematica lanes
-   use the same final fingerprint. All mandatory core items pass, with BLOCKED
-   permitted only for the exact Phase 13 non-core allowlist.
-8. Cleanup, credential rotation, ingress removal, and evidence-redaction review
-   all pass. The record and external evidence contain none of the prohibited
-   values or raw logs.
-9. There is no mandatory failure, fingerprint mismatch, unresolved security
-   concern, or blocker outside the explicit non-core allowlist.
-
-Any other terminal combination is `REJECTED`, not `ACCEPTED`. Keep `PENDING`
-only while work remains genuinely in progress. A tag or public Release is
-forbidden until this record is `ACCEPTED`.
+Any payload mismatch, CI failure, secret exposure, or broader compatibility
+claim voids this acceptance. Resolving the Litematica limitation later requires
+a new physical-client observation against the exact released or successor
+fingerprint; it must not be retroactively recorded as a `0.2.0` pass.

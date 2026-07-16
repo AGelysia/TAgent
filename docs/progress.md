@@ -1,21 +1,21 @@
 # Progress
 
-Last updated: 2026-07-15
+Last updated: 2026-07-16
 
 ## Current status
 
-Phase 0 through Phase 10 are complete. Phase 11's read/preview delivery and the
-Phase 12 bounded management surface are complete. Management now includes the
-universal Offline gate, independently authorized status/doctor/capability/cost
-queries, anonymous client/Litematica diagnostics, owner-only atomic policy
-reload, and Runtime-owned durable usage/budget accounting. Phase 13 automated
-release-candidate infrastructure and mandatory physical-client lane are accepted;
-public release remains pending. Phase 14 implements fixed OpenAI, Anthropic,
-DeepSeek, Gemini, and OpenAI-compatible production adapters with controlled
-endpoint overrides. Its offline contract tests are implemented; sanitized
-live-key provider acceptance remains pending. The plan's world apply/rollback acceptance is
-deliberately not claimed: the production write catalog remains empty pending the
-existing typed asynchronous proposal and real-player safety gate.
+Phase 0 through Phase 12 are complete. Phase 13's release-candidate
+infrastructure and its historical physical-client acceptance are complete.
+Phase 14 implements fixed OpenAI, Anthropic, DeepSeek, Gemini, and
+OpenAI-compatible production adapters with controlled endpoint overrides. The
+exact `0.2.0` payload passed the clean automated gate, cloud and two-client
+results were maintainer-attested, and the owner authorized a controlled public
+prerelease exception. The original strict gate remains `REJECTED`: native
+Litematica projection execution was not observed against this payload and no
+named provider profile has retained live-CLI evidence. Neither is a stable
+compatibility claim for `0.2.0`. The plan's world apply/rollback acceptance
+remains deliberately unclaimed: the production write catalog is empty pending
+the existing typed asynchronous proposal and real-player safety gate.
 
 ## Locked decisions
 
@@ -772,26 +772,26 @@ Implemented scope:
       operations, security, README, and plan documentation define the provider
       and custom-endpoint trust boundary.
 
-Pre-publication acceptance still pending:
+Pre-publication acceptance decision:
 
-- [ ] Run the complete clean Phase 13 release-candidate lane again against the
-      final Phase 14 commit and record its new fingerprints. The accepted Phase
-      13 fingerprint remains historical evidence for commit `3735c5e`, not a
-      fingerprint for the changed Runtime.
-- [ ] After those new fingerprints are fixed, repeat the complete Phase 13
-      physical-client graphical checklist against that exact candidate. The
-      existing acceptance record requires a new graphical run whenever any
-      payload or archive hash changes, including this Phase 14 Runtime change.
-- [ ] With isolated real credentials, verify readiness, private text, at least
-      one serial tool call/continuation, usage accounting, cancellation/timeout,
-      and sanitized errors for each official provider profile intended to be
-      claimed publicly.
-- [ ] Verify one reviewed HTTPS or literal-loopback `openai-compatible` fixture
-      implements exact `GET models` and `POST chat/completions` behavior. Do not
-      generalize that result to arbitrary compatible endpoints.
-- [ ] Recalculate both configured micro-USD rates and the conservative
-      per-round reservation from the actual provider/model/account price sheet;
-      no example value is publication evidence or a billing cap.
+- [x] The complete clean release-candidate lane fixed a new Phase 14 fingerprint.
+      The accepted Phase 13 fingerprint remains historical evidence for commit
+      `3735c5e`, not a substitute for the changed Runtime.
+- [x] The maintainer attested that the exact `0.2.0` cloud and two-physical-client
+      run passed every exercised item except native Litematica projection. That
+      client lifecycle remains explicitly `INCOMPLETE`, is not relabelled a pass,
+      and is accepted only as a visible prerelease limitation.
+- [x] An operator-configured real-provider Minecraft path returned the expected
+      AI response. The deployed profile and exact billable CLI transcript were
+      not retained, so the public live-provider claim set is empty. The five
+      released adapters are implementation/offline-contract claims only.
+- [x] Pricing, provider-account behavior, arbitrary compatible endpoints, live
+      timeout, and native Windows equivalence remain operator validation tasks
+      rather than `0.2.0` compatibility claims.
+- [x] The owner authorized a controlled `v0.2.0` prerelease with those limits.
+      Publication still fails closed unless the final local comparison and the
+      commit-bound GitHub Release Candidate workflow pass without changing any
+      payload hash.
 
 Final validation preparation implemented on 2026-07-16:
 
@@ -814,12 +814,11 @@ Final validation preparation implemented on 2026-07-16:
       evidence directory only from a clean tree, runs the canonical release
       lane, binds the tested fingerprint, and later compares all seven payload
       fields without overwriting evidence.
-- [x] `docs/phase14-final-acceptance-record.md` is a repository-only `PENDING`
-      template. The historical Phase 13 record remains unchanged.
-- [ ] No cloud host, real provider credential, or new physical-client session
-      was used during this preparation. All Phase 14 acceptance decisions remain
-      pending until the copied checklist is completed against one exact clean
-      fingerprint.
+- [x] `docs/phase14-final-acceptance-record.md` contains the sanitized final
+      prerelease decision. The historical Phase 13 record remains unchanged.
+- [x] The exact automated evidence remains private and append-only. The migrated
+      manual checklist itself was not returned, so manual results are identified
+      as maintainer attestations instead of being represented as raw evidence.
 
 Clean `0.2.0` candidate preparation recorded on 2026-07-16:
 
@@ -855,9 +854,12 @@ Clean `0.2.0` candidate preparation recorded on 2026-07-16:
   `904c2a17907287fb97910e00aef045e69c7c23e857eb5602da2e0ea7a5286b89`,
   `8911de23fd119adc6c424c27e6f1b598fd35948c32fa7ab1eb3629fc3bdb2f8e`,
   and `3a9e34bebc2641becdc214d46e805f7a26cf1524910955d83a5cd4a8256a8656`.
-- This preparation used no real Provider credential and made no cloud,
-  graphical-client, live-timeout, or publication claim. The Phase 14 final
-  acceptance record remains `PENDING`.
+- This preparation itself used no real Provider credential and made no cloud or
+  graphical-client claim. Subsequent testing was maintainer-attested on
+  2026-07-16: all exercised cloud, real-provider Minecraft, and two-client items
+  passed except the exact-Litematica native projection lifecycle. The owner
+  accepted that gap for a prerelease; no named live-provider profile or live
+  timeout is claimed.
 
 ## Verification
 
@@ -1239,24 +1241,26 @@ redaction; a real-player click remains a later integration lane.
 
 ## Next gates
 
-1. Complete Phase 14 live-key acceptance for every official provider profile
-   intended to be claimed, plus one reviewed `openai-compatible` fixture. Record
-   only sanitized PASS/FAIL evidence and never commit credentials or response
-   bodies.
-2. Run the clean release-candidate lane on the final Phase 14 commit, bind new
-   fingerprints to that commit, then repeat the full physical-client graphical
-   checklist for that exact candidate. Recheck operator-supplied prices and
-   round reservations before any tag or public Release.
-3. Keep the production write catalog empty until the first fixed typed adapter
+1. Publish only the fixed `v0.2.0` controlled prerelease after both final
+   comparison gates pass. Keep its Litematica, provider-profile, Windows, and
+   no-world-write limitations visible in the GitHub notes.
+2. Exercise native preview load, placement inspection, Material List, removal,
+   changed-position reload, and disconnect cleanup on the exact Litematica tuple
+   before promoting that adapter from experimental in any successor release.
+3. Complete live-key acceptance for each provider profile intended to gain a
+   named compatibility claim, including one reviewed `openai-compatible`
+   fixture. Record only sanitized PASS/FAIL evidence and never commit credentials
+   or response bodies. Recheck prices and round reservations for each deployment.
+4. Keep the production write catalog empty until the first fixed typed adapter
    has operation-specific validation, limits, rollback/partial-failure policy,
    confirmation-time region revalidation, off-thread durable audit/rollback
    persistence, and a real-player proposal integration test.
-4. Resolve only the explicitly allowlisted Phase 13 graphical fixtures when safe
+5. Resolve only the explicitly allowlisted Phase 13 graphical fixtures when safe
    deterministic inputs become available; do not relabel a missing fixture as a
    pass.
-5. Add a real online-player integration lane for private `/agent say` delivery,
+6. Add a real online-player integration lane for private `/agent say` delivery,
    proposal confirmation, and late dynamic command-tree refresh without
    increasing routine weak-host resource usage.
-6. Do not generalize the same-lane uncached checksum match into a cross-platform
+7. Do not generalize the same-lane uncached checksum match into a cross-platform
    byte-for-byte reproducibility claim. Native Windows and an independently
    pinned host image remain unverified.
