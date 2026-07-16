@@ -12,7 +12,8 @@ player identity, source address, VM address, or client-local path.
 - Release channel: `PRE_RELEASE` (controlled public preview)
 - Final candidate version: `0.2.0`
 - Test date (UTC): `2026-07-16`
-- Sanitized external evidence reference: `phase14-0.2.0-3fd0959`
+- Manual-test evidence reference: `phase14-0.2.0-3fd0959`
+- Final publication evidence reference: `phase14-release-0.2.0-72cd98c`
 - Observed mandatory test failures: `0`
 - Mandatory incomplete checks: `1` (native Litematica projection lifecycle)
 - Strict evidence gaps: no named live-provider profile has a retained exact CLI
@@ -36,9 +37,12 @@ limitations for this first public preview. This exception authorizes a
 prerelease; it does not redefine the strict result. GitHub must mark `v0.2.0` as
 a prerelease and state both limitations prominently.
 
-## Fixed candidate binding
+## Fixed payload and candidate binding
 
-- Tested `candidate.commit`: `3fd09598f61f6223504ad997a6135373523c8e69`
+- Original cloud-tested `candidate.commit`:
+  `3fd09598f61f6223504ad997a6135373523c8e69`
+- Publication-prepare `candidate.commit`:
+  `72cd98c4d5d7710d2171e550eeddc18b2edc830f`
 - Tested `candidate.version`: `0.2.0`
 - Tested `candidate.paper.sha256`:
   `213acda1974d39a65d0fcc9ac8902816284019d01bef8b0c37b9c95c75263d53`
@@ -58,9 +62,17 @@ a prerelease and state both limitations prominently.
 - Pinned Paper SHA-256:
   `5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba`
 
+The publication-prepare commit differs from the cloud-tested candidate only in
+the package-excluded Release Candidate workflow and its earlier repository-only
+acceptance/progress record. The two private `tested-fingerprint.txt` files differ
+only in `candidate.commit`; version, Paper JAR, Client JAR, dist manifest,
+Runtime manifest, protocol manifest, and archive are identical. Their
+`release.SHA256SUMS` files are byte-identical.
+
 The uploaded archive hash, extracted package manifest, internal checksums, dist
-manifest, and pinned Paper hash were reported `PASS`. No payload or archive
-change is permitted between this binding and the release tag.
+manifest, and pinned Paper hash were reported `PASS`. The manual attestation is
+reused only because all seven tested payload fields are identical. No payload or
+archive change is permitted between this binding and the release tag.
 
 ## Automated release evidence
 
@@ -75,6 +87,8 @@ change is permitted between this binding and the release tag.
 - Two uncached Linux package builds: identical complete manifests
 - GitHub Verify on the tested candidate and evidence-only successor: Linux and
   PowerShell jobs `PASS`
+- Publication re-prepare after the workflow-only fix: `PASS`; the same Runtime,
+  Paper, Client, Paper smoke, archive, and reproducibility inventory passed
 - Publication-stage final check and fingerprint: executed only after this
   evidence decision is committed; the authoritative outcomes are the append-only
   external `final-fingerprint.txt` and commit-bound GitHub Actions run.
@@ -165,6 +179,25 @@ certification. This record and the GitHub prerelease limitation supersede that
 certification implication without changing the already tested payload.
 
 ## Publication controls
+
+### Release Candidate infrastructure incident
+
+The first manual Release Candidate run (`29502639841`) did not publish a
+candidate artifact, tag, or Release; it retained only its failure test evidence.
+It failed because the current GitHub `ubuntu-24.04` image did not provide `rg`.
+The Runtime log contained its READY marker, but the missing log-search command
+caused Paper smoke to time out while waiting for that already-present marker.
+All Runtime, Paper, Client, inventory, and archive checks reached before the
+smoke had passed.
+
+Commit `72cd98c4d5d7710d2171e550eeddc18b2edc830f` makes the package-excluded
+Release Candidate workflow install `ripgrep` from the Ubuntu repository and
+print its version before verification. It changes no release payload field. A
+fresh private `prepare` passed on that commit and fixed the final publication
+evidence above. Publication still requires a new successful workflow run against
+the exact final documentation descendant; the failed run is not waived.
+
+### Required successful publication path
 
 Publication is authorized only when all of these conditions hold:
 

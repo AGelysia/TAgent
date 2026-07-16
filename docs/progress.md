@@ -792,6 +792,18 @@ Pre-publication acceptance decision:
       Publication still fails closed unless the final local comparison and the
       commit-bound GitHub Release Candidate workflow pass without changing any
       payload hash.
+- [x] The first manual Release Candidate run failed before publication because
+      GitHub's current `ubuntu-24.04` image lacked `rg`; the Runtime READY marker
+      was present, but Paper smoke could not search its log. No tag, Release, or
+      candidate artifact was created. The workflow now installs `ripgrep`
+      explicitly from Ubuntu before running the release gate.
+- [x] A fresh private `prepare` on workflow-fix commit
+      `72cd98c4d5d7710d2171e550eeddc18b2edc830f` passed the complete local release
+      check. Its version, Paper, Client, dist, Runtime, protocol, and archive
+      fields match the cloud-tested candidate exactly, and its
+      `release.SHA256SUMS` is byte-identical. The manual attestation is rebound
+      only on that payload identity; a new final compare and successful GitHub
+      workflow run remain mandatory.
 
 Final validation preparation implemented on 2026-07-16:
 
